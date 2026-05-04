@@ -1,0 +1,20 @@
+{
+  "name": "realestate",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Real Estate Society Management & Accounting System (backend + frontend monorepo)",
+  "scripts": {
+    "install:all": "npm install && npm install --prefix backend && npm install --prefix frontend",
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "dev": "concurrently --names \"BACKEND,FRONTEND\" --prefix-colors \"magenta.bold,cyan.bold\" \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "build": "npm run build --prefix frontend",
+    "start:backend": "npm start --prefix backend",
+    "start:frontend": "npm start --prefix frontend",
+    "start": "concurrently --names \"BACKEND,FRONTEND\" --prefix-colors \"magenta.bold,cyan.bold\" \"npm run start:backend\" \"npm run start:frontend\"",
+    "lint": "npm run lint --prefix frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

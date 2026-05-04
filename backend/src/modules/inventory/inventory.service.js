@@ -1,0 +1,162 @@
+const { v4: uuidv4 } = require('uuid');
+const { notDeleted } = require('../../utils/notDeleted');
+const { Inventory, Society } = require('../../models');
+
+const stripId = ({ _id, ...rest }) => rest;
+
+const listForSociety = async (societyId) => {
+  const inventory = await Inventory.find(notDeleted({ societyId })).lean();
+  return inventory.map(stripId);
+};
+
+// Compute totalPrice only when both inputs are real numbers — the inventory
+// form doesn't always collect pricePerSqft, in which case totalPrice stays 0.
+const computeTotalPrice = (area, pricePerSqft) => {
+  const a = Number(area);
+  const p = Number(pricePerSqft);
+  if (!Number.isFinite(a) || !Number.isFinite(p)) return 0;
+  return a * p;
+};
+
+const create = async (societyId, body) => {
+  const area = body.area != null ? Number(body.area) : null;
+  const pricePerSqft = body.pricePerSqft != null ? Number(body.pricePerSqft) : null;
+
+  const item = {
+    id: uuidv4(),
+    societyId,
+    inventoryNumber: body.inventoryNumber,
+    type: body.type,
+    phase: body.phase || '',
+    area,
+    pricePerSqft,
+    totalPrice: computeTotalPrice(area, pricePerSqft),
+    status: 'Available',
+    floor: body.floor || null,
+    facing: body.facing || '',
+    notes: body.notes || '',
+    createdAt: new Date(),
+  };
+  await Inventory.create(item);
+  return item;
+};
+
+const update = async (id, body) => {
+  const updates = { ...body, updatedAt: new Date() };
+  if (body.area !== undefined || body.pricePerSqft !== undefined) {
+    const sale = await Inventory.findOne({ id }).lean();
+    const area = body.area !== undefined ? Number(body.area) : sale?.area;
+    const pricePerSqft = body.pricePerSqft !== undefined ? Number(body.pricePerSqft) : sale?.pricePerSqft;
+    updates.totalPrice = computeTotalPrice(area, pricePerSqft);
+  }
+  await Inventory.updateOne({ id }, { $set: updates });
+  const updated = await Inventory.findOne({ id }).lean();
+  if (!updated) return null;
+  return stripId(updated);
+};
+
+const remove = async (id) => {
+  await Inventory.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
+};
+
+const listGlobalAdmin = async (query) => {
+  const {
+    societyId, status, type, q,
+    page = 1, limit = 50,
+    sort = 'createdAt', order = 'desc',
+  } = query;
+
+  const pageNum = Math.max(1, parseInt(page) || 1);
+  const limitNum = Math.max(1, Math.min(500, parseInt(limit) || 50));
+  const skip = (pageNum - 1) * limitNum;
+  const sortDirection = order === 'asc' ? 1 : -1;
+
+  const societies = await Society.find({}).lean();
+  const societyMap = {};
+  societies.forEach(s => { societyMap[s.id] = s; });
+
+  const filter = { isDeleted: { $ne: true } };
+  if (societyId && societyId !== 'all') filter.societyId = societyId;
+  if (status && status !== 'all') filter.status = status;
+  if (type && type !== 'all') filter.type = type;
+
+  if (q && q.trim()) {
+    const rx = new RegExp(q.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    const matchingSocietyIds = societies
+      .filter(s => rx.test(s.name || ''))
+      .map(s => s.id);
+
+    filter.$or = [
+      { inventoryNumber: rx },
+      { type: rx },
+      { currentOwner: rx },
+      { facing: rx },
+      { floor: rx },
+      { notes: rx },
+    ];
+    if (matchingSocietyIds.length > 0) {
+      filter.$or.push({ societyId: { $in: matchingSocietyIds } });
+    }
+  }
+
+  const total = await Inventory.countDocuments(filter);
+
+  const items = await Inventory
+    .find(filter)
+    .sort({ [sort]: sortDirection })
+    .skip(skip)
+    .limit(limitNum)
+    .lean();
+
+  const inventory = items.map(({ _id, ...rest }) => ({
+    ...rest,
+    societyName: societyMap[rest.societyId]?.name || 'Unknown',
+    societyLocation: societyMap[rest.societyId]?.location || '',
+  }));
+
+  const summaryAgg = await Inventory.aggregate([
+    { $match: filter },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        available: { $sum: { $cond: [{ $eq: ['$status', 'Available'] }, 1, 0] } },
+        sold: { $sum: { $cond: [{ $eq: ['$status', 'Sold'] }, 1, 0] } },
+        booked: { $sum: { $cond: [{ $eq: ['$status', 'Booked'] }, 1, 0] } },
+        blocked: { $sum: { $cond: [{ $eq: ['$status', 'Blocked'] }, 1, 0] } },
+      },
+    },
+  ]);
+  const summary = summaryAgg[0]
+    ? { total: summaryAgg[0].total, available: summaryAgg[0].available, sold: summaryAgg[0].sold, booked: summaryAgg[0].booked, blocked: summaryAgg[0].blocked }
+    : { total: 0, available: 0, sold: 0, booked: 0, blocked: 0 };
+
+  const types = (await Inventory.distinct('type', { isDeleted: { $ne: true } }))
+    .filter(Boolean).sort();
+  const distinctStatuses = (await Inventory.distinct('status', { isDeleted: { $ne: true } }))
+    .filter(Boolean);
+  const statuses = distinctStatuses.length > 0 ? distinctStatuses : ['Available', 'Sold', 'Booked', 'Blocked'];
+
+  return {
+    inventory,
+    pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+    summary,
+    filters: { types, statuses },
+  };
+};
+
+const listGlobal = async () => {
+  const inventory = await Inventory.find(notDeleted()).lean();
+  const societies = await Society.find({}).lean();
+  const societyMap = {};
+  societies.forEach(s => societyMap[s.id] = s.name);
+
+  const enriched = inventory.map(item => ({
+    ...item,
+    societyName: societyMap[item.societyId] || 'Unknown',
+  }));
+
+  return enriched.map(stripId);
+};
+
+module.exports = { listForSociety, create, update, remove, listGlobalAdmin, listGlobal };
