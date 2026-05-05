@@ -13,7 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog'
-import { BookOpen, ArrowLeft, Plus, Edit, Trash2, RefreshCw, Filter, X, Wallet, ArrowDownCircle, ArrowUpCircle, DollarSign, Lock, AlertTriangle, Building2, Banknote } from 'lucide-react'
+import { BookOpen, ArrowLeft, Plus, Edit, Trash2, RefreshCw, Filter, X, Wallet, ArrowDownCircle, ArrowUpCircle, IndianRupee, Lock, AlertTriangle, Building2, Banknote } from 'lucide-react'
 import { AppShell } from '@/components/dashboard/AppShell'
 import { getDeleteOtp, refreshDeleteOtp } from '@/lib/deleteOtp'
 
@@ -696,7 +696,7 @@ export default function DaybookPage() {
                       ₹{fmt(summary.closingBalance)}
                     </p>
                   </div>
-                  <DollarSign className={`w-8 h-8 ${(summary.closingBalance ?? 0) >= 0 ? 'text-blue-500' : 'text-orange-500'}`} />
+                  <IndianRupee className={`w-8 h-8 ${(summary.closingBalance ?? 0) >= 0 ? 'text-blue-500' : 'text-orange-500'}`} />
                 </div>
               </CardContent>
             </Card>

@@ -16,7 +16,7 @@ import { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerFooter, Dr
 import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog'
-import { ArrowLeft, Plus, Edit, Trash2, Users, CreditCard, Wallet, TrendingDown, TrendingUp, Eye, RefreshCw, DollarSign, Banknote, FileText, ArrowDownCircle, ArrowUpCircle, HandCoins, PiggyBank } from 'lucide-react'
+import { ArrowLeft, Plus, Edit, Trash2, Users, CreditCard, Wallet, TrendingDown, TrendingUp, Eye, RefreshCw, IndianRupee, Banknote, FileText, ArrowDownCircle, ArrowUpCircle, HandCoins, PiggyBank } from 'lucide-react'
 import { AppShell } from '@/components/dashboard/AppShell'
 import { getDeleteOtp, refreshDeleteOtp } from '@/lib/deleteOtp'
 
@@ -768,7 +768,7 @@ export default function BorrowLoansPage() {
                           <TableCell>
                             <div className="flex items-center gap-2">
                               <Button variant="outline" size="sm" onClick={() => openRepaymentsDrawer(loan)}>
-                                <DollarSign className="w-4 h-4 mr-1" /> {loanMode === 'BORROWED' ? 'Repay' : 'Receive'}
+                                <IndianRupee className="w-4 h-4 mr-1" /> {loanMode === 'BORROWED' ? 'Repay' : 'Receive'}
                               </Button>
                               <AlertDialog>
                                 <AlertDialogTrigger asChild>
@@ -1010,65 +1010,77 @@ export default function BorrowLoansPage() {
                       </CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <form onSubmit={handleCreateRepayment} className="grid grid-cols-5 gap-3">
-                        <div>
-                          <Label className="text-xs">Amount *</Label>
-                          <Input
-                            type="number"
-                            min="0.01"
-                            step="0.01"
-                            value={repaymentForm.amount}
-                            onChange={e => setRepaymentForm({...repaymentForm, amount: e.target.value})}
-                            max={selectedLoan.balancePrincipal}
-                            required
-                          />
-                        </div>
-                        <div>
-                          <Label className="text-xs">Date *</Label>
-                          <Input
-                            type="date"
-                            value={repaymentForm.repaymentDate}
-                            min={selectedLoan.loanDate ? String(selectedLoan.loanDate).slice(0, 10) : undefined}
-                            max={todayISO()}
-                            onChange={e => setRepaymentForm({...repaymentForm, repaymentDate: e.target.value})}
-                            required
-                          />
-                        </div>
-                        <div>
-                          <Label className="text-xs">
-                            {selectedLoan.direction === 'BORROWED' ? 'Pay From' : 'Receive In'} *
-                          </Label>
-                          <Select value={repaymentForm.accountId} onValueChange={v => setRepaymentForm({...repaymentForm, accountId: v})}>
-                            <SelectTrigger>
-                              <SelectValue placeholder="Account" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {accounts
-                                .filter(a => a.scope !== 'SOCIETY' && !a.societyId)
-                                .filter(a => repaymentForm.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK')
-                                .map(a => (
-                                  <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                      <form onSubmit={handleCreateRepayment} className="space-y-3">
+                        <div className="grid grid-cols-4 gap-3">
+                          <div>
+                            <Label className="text-xs">Amount *</Label>
+                            <Input
+                              type="number"
+                              min="0.01"
+                              step="0.01"
+                              value={repaymentForm.amount}
+                              onChange={e => setRepaymentForm({...repaymentForm, amount: e.target.value})}
+                              max={selectedLoan.balancePrincipal}
+                              required
+                            />
+                          </div>
+                          <div>
+                            <Label className="text-xs">Date *</Label>
+                            <Input
+                              type="date"
+                              value={repaymentForm.repaymentDate}
+                              min={selectedLoan.loanDate ? String(selectedLoan.loanDate).slice(0, 10) : undefined}
+                              max={todayISO()}
+                              onChange={e => setRepaymentForm({...repaymentForm, repaymentDate: e.target.value})}
+                              required
+                            />
+                          </div>
+                          <div>
+                            <Label className="text-xs">
+                              {selectedLoan.direction === 'BORROWED' ? 'Pay From' : 'Receive In'} *
+                            </Label>
+                            <Select value={repaymentForm.accountId} onValueChange={v => setRepaymentForm({...repaymentForm, accountId: v})}>
+                              <SelectTrigger>
+                                <SelectValue placeholder="Account" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {accounts
+                                  .filter(a => a.scope !== 'SOCIETY' && !a.societyId)
+                                  .filter(a => repaymentForm.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK')
+                                  .map(a => (
+                                    <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                                  ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div>
+                            <Label className="text-xs">Mode</Label>
+                            <Select value={repaymentForm.paymentMode} onValueChange={v => setRepaymentForm({...repaymentForm, paymentMode: v, accountId: ''})}>
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {PAYMENT_MODES.map(m => (
+                                  <SelectItem key={m} value={m}>{m}</SelectItem>
                                 ))}
-                            </SelectContent>
-                          </Select>
+                              </SelectContent>
+                            </Select>
+                          </div>
                         </div>
-                        <div>
-                          <Label className="text-xs">Mode</Label>
-                          <Select value={repaymentForm.paymentMode} onValueChange={v => setRepaymentForm({...repaymentForm, paymentMode: v, accountId: ''})}>
-                            <SelectTrigger>
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {PAYMENT_MODES.map(m => (
-                                <SelectItem key={m} value={m}>{m}</SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <div className="flex items-end">
-                          <Button 
-                            type="submit" 
-                            className={`w-full ${selectedLoan.direction === 'BORROWED' ? 'bg-purple-600 hover:bg-purple-700' : 'bg-blue-600 hover:bg-blue-700'}`}
+                        <div className="grid grid-cols-[1fr_auto] gap-3 items-end">
+                          <div>
+                            <Label className="text-xs">Remark</Label>
+                            <Input
+                              type="text"
+                              maxLength={500}
+                              placeholder="Optional note"
+                              value={repaymentForm.remark}
+                              onChange={e => setRepaymentForm({...repaymentForm, remark: e.target.value})}
+                            />
+                          </div>
+                          <Button
+                            type="submit"
+                            className={`${selectedLoan.direction === 'BORROWED' ? 'bg-purple-600 hover:bg-purple-700' : 'bg-blue-600 hover:bg-blue-700'} px-8`}
                           >
                             Add
                           </Button>

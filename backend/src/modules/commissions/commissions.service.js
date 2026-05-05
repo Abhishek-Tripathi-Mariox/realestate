@@ -3,6 +3,7 @@ const { notDeleted } = require('../../utils/notDeleted');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   CommissionBill, CommissionPayment, Account, Transaction, Vendor,
+  Sale, Inventory, Customer,
 } = require('../../models');
 
 const stripId = ({ _id, ...rest }) => rest;
@@ -11,7 +12,42 @@ const listBills = async (query) => {
   const filter = notDeleted();
   if (query.societyId) filter.societyId = query.societyId;
   const bills = await CommissionBill.find(filter).sort({ billDate: -1 }).lean();
-  return bills.map(stripId);
+  if (bills.length === 0) return [];
+
+  // Join Sale → Customer + Inventory in batch so the table can render
+  // Sale (Customer) and Inventory columns plus the totalPaid/balance aliases
+  // the FE reads.
+  const saleIds = [...new Set(bills.map(b => b.saleId).filter(Boolean))];
+  const sales = saleIds.length ? await Sale.find({ id: { $in: saleIds } }).lean() : [];
+  const saleById = Object.fromEntries(sales.map(s => [s.id, s]));
+
+  const inventoryIds = [...new Set(sales.map(s => s.inventoryId).filter(Boolean))];
+  const inventories = inventoryIds.length
+    ? await Inventory.find({ id: { $in: inventoryIds } }).lean()
+    : [];
+  const inventoryById = Object.fromEntries(inventories.map(i => [i.id, i]));
+
+  const customerIds = [...new Set(sales.map(s => s.customerId).filter(Boolean))];
+  const customers = customerIds.length
+    ? await Customer.find({ id: { $in: customerIds } }).lean()
+    : [];
+  const customerById = Object.fromEntries(customers.map(c => [c.id, c]));
+
+  return bills.map((b) => {
+    const sale = b.saleId ? saleById[b.saleId] : null;
+    const inv = sale?.inventoryId ? inventoryById[sale.inventoryId] : null;
+    const customer = sale?.customerId ? customerById[sale.customerId] : null;
+    const amount = b.amount ?? b.commissionAmount ?? 0;
+    const paid = b.paidAmount || 0;
+    return {
+      ...stripId(b),
+      customerName: customer?.name || sale?.buyerName || '',
+      inventoryName: inv?.inventoryNumber || '',
+      totalPaid: paid,
+      balance: Math.max(0, amount - paid),
+      status: (b.status || 'Pending').toUpperCase(),
+    };
+  });
 };
 
 const createBill = async (body) => {

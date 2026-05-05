@@ -4,6 +4,7 @@ const { roundPaise } = require('../../utils/money');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   ExpenseBill, ExpensePayment, Account, Transaction, Vendor, ExpenseCategory,
+  CommissionBill,
 } = require('../../models');
 
 const stripId = ({ _id, ...rest }) => rest;
@@ -16,16 +17,20 @@ const listBills = async (query) => {
   if (query.scope === 'COMPANY') filter.societyId = null;
 
   const bills = await ExpenseBill.find(filter).sort({ billDate: -1 }).lean();
-  return bills.map(stripId);
+  return bills.map((b) => {
+    const amount = b.amount ?? b.billAmount ?? 0;
+    const paid = b.paidAmount || 0;
+    return {
+      ...stripId(b),
+      categoryName: b.category || '',          // FE reads categoryName
+      totalPaid: paid,                         // FE reads totalPaid
+      balance: Math.max(0, amount - paid),     // FE reads balance
+      status: (b.status || 'Pending').toUpperCase(), // FE checks 'PAID'/'PARTIAL'
+    };
+  });
 };
 
 const createBill = async (body, userId) => {
-  let accountId = body.accountId;
-  if (!accountId) {
-    const defaultAccount = await Account.findOne({ isDefault: true }).lean();
-    accountId = defaultAccount?.id;
-  }
-
   // Frontend sends `categoryId, billAmount, vendorId` — look up the readable
   // names so the saved row carries human-readable data for downstream listings.
   let vendorName = body.vendorName || '';
@@ -54,27 +59,13 @@ const createBill = async (body, userId) => {
     billAmount: amount,                          // legacy alias for FE reads
     billDate: body.billDate || body.expenseDate,
     description: body.description || body.remark || '',
-    paidAmount: amount,
-    status: 'Paid',
+    paidAmount: 0,
+    status: 'Pending',
     createdBy: userId,
     createdAt: new Date(),
   };
 
   await ExpenseBill.create(bill);
-
-  await createTransaction({
-    txnDate: bill.billDate,
-    societyId: bill.societyId,
-    accountId,
-    direction: 'OUT',
-    amount: bill.amount,
-    paymentMode: body.paymentMode || 'Cash',
-    partyType: 'Vendor',
-    partyName: bill.vendorName,
-    sourceType: 'EXPENSE_PAYMENT',
-    sourceId: bill.id,
-    remark: `${bill.category} - ${bill.vendorName}`,
-  }, userId);
 
   return bill;
 };
@@ -99,25 +90,39 @@ const listExpenses = async (query) => {
   const limit = Math.max(1, Math.min(500, parseInt(query.limit) || 50));
   const skip = (page - 1) * limit;
 
+  const scope = (query.scope || '').toUpperCase();
+
+  // Scope-aware source-type rules:
+  //   SOCIETY tab → only expense outflows for that society.
+  //   COMPANY tab → company-level expenses (no societyId) + every commission
+  //     payout regardless of society, since broker commissions are paid out
+  //     of the company bank, not the society's account.
   const filter = {
     direction: 'OUT',
-    sourceType: { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] },
     isVoided: { $ne: true },
     isReversal: { $ne: true },
     isReversed: { $ne: true },
   };
-
-  const scope = (query.scope || '').toUpperCase();
   if (scope === 'COMPANY') {
-    filter.$or = [{ societyId: null }, { societyId: { $exists: false } }];
+    filter.$or = [
+      {
+        sourceType: { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] },
+        $or: [{ societyId: null }, { societyId: { $exists: false } }],
+      },
+      { sourceType: 'COMMISSION_PAYMENT' },
+    ];
   } else if (scope === 'SOCIETY') {
+    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] };
     if (query.societyId && query.societyId !== 'all') {
       filter.societyId = query.societyId;
     } else {
       filter.societyId = { $ne: null };
     }
-  } else if (query.societyId && query.societyId !== 'all') {
-    filter.societyId = query.societyId;
+  } else {
+    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] };
+    if (query.societyId && query.societyId !== 'all') {
+      filter.societyId = query.societyId;
+    }
   }
 
   if (query.accountId && query.accountId !== 'all') filter.accountId = query.accountId;
@@ -138,7 +143,7 @@ const listExpenses = async (query) => {
     .limit(limit)
     .lean();
 
-  const transactions = txns.map(stripId);
+  const transactions = txns.map(t => ({ ...stripId(t), status: 'PAID' }));
 
   const summaryAgg = await Transaction.aggregate([
     { $match: filter },
@@ -162,8 +167,103 @@ const listExpenses = async (query) => {
       }
     : { totalExpense: 0, cashExpense: 0, bankExpense: 0, transactionCount: 0 };
 
+  // Synthesize virtual rows for unpaid expense + commission bill balances so
+  // this page also surfaces "money owed", not just "money spent". The amount
+  // shown is the still-outstanding balance, and the status field lets the FE
+  // tell paid transactions apart from pending bills.
+  const billFilter = notDeleted();
+  if (scope === 'COMPANY') {
+    billFilter.$or = [{ societyId: null }, { societyId: { $exists: false } }];
+  } else if (query.societyId && query.societyId !== 'all') {
+    billFilter.societyId = query.societyId;
+  }
+  if (query.startDate || query.endDate) {
+    billFilter.billDate = {};
+    if (query.startDate) billFilter.billDate.$gte = query.startDate;
+    if (query.endDate) billFilter.billDate.$lte = query.endDate;
+  }
+
+  // Expense bills follow the scope filter normally; commission bills only
+  // surface in the COMPANY tab since they're paid out of the company bank.
+  const expenseBillQuery = { ...billFilter, status: { $ne: 'Paid' } };
+  const openExpenseBills = await ExpenseBill.find(expenseBillQuery).lean();
+
+  let openCommissionBills = [];
+  if (scope === 'COMPANY') {
+    const commissionFilter = notDeleted({ status: { $ne: 'Paid' } });
+    if (query.startDate || query.endDate) {
+      commissionFilter.billDate = {};
+      if (query.startDate) commissionFilter.billDate.$gte = query.startDate;
+      if (query.endDate) commissionFilter.billDate.$lte = query.endDate;
+    }
+    openCommissionBills = await CommissionBill.find(commissionFilter).lean();
+  }
+
+  const pendingRows = [
+    ...openExpenseBills.map((b) => {
+      const amount = b.amount ?? b.billAmount ?? 0;
+      const balance = Math.max(0, amount - (b.paidAmount || 0));
+      return {
+        id: `bill-${b.id}`,
+        _isBill: true,
+        sourceType: 'EXPENSE_BILL',
+        sourceId: b.id,
+        txnDate: b.billDate || null,
+        societyId: b.societyId || null,
+        scope: b.scope || (b.societyId ? 'SOCIETY' : 'COMPANY'),
+        accountId: null,
+        direction: 'OUT',
+        amount: balance,
+        paymentMode: '-',
+        partyType: 'Vendor',
+        partyName: b.vendorName || '',
+        referenceNo: b.category || '',
+        remark: b.description || b.remark || '',
+        status: ((b.status || 'Pending').toUpperCase() === 'PARTIAL') ? 'PARTIAL' : 'PENDING',
+      };
+    }),
+    ...openCommissionBills.map((b) => {
+      const amount = b.amount ?? b.commissionAmount ?? 0;
+      const balance = Math.max(0, amount - (b.paidAmount || 0));
+      return {
+        id: `bill-${b.id}`,
+        _isBill: true,
+        sourceType: 'COMMISSION_BILL',
+        sourceId: b.id,
+        txnDate: b.billDate || b.commissionDate || null,
+        societyId: b.societyId || null,
+        scope: 'COMPANY',
+        accountId: null,
+        direction: 'OUT',
+        amount: balance,
+        paymentMode: '-',
+        partyType: 'Vendor',
+        partyName: b.brokerName || '',
+        referenceNo: 'Commission',
+        remark: b.description || b.remark || '',
+        status: ((b.status || 'Pending').toUpperCase() === 'PARTIAL') ? 'PARTIAL' : 'PENDING',
+      };
+    }),
+  ].filter(r => r.amount > 0);
+
+  if (query.paymentMode && query.paymentMode !== 'all') {
+    // pending rows have no payment mode yet — drop them when the user filters by mode
+    pendingRows.length = 0;
+  }
+  if (query.accountId && query.accountId !== 'all') {
+    pendingRows.length = 0;
+  }
+
+  const totalPending = roundPaise(pendingRows.reduce((s, r) => s + r.amount, 0));
+  summary.totalPending = totalPending;
+  summary.pendingCount = pendingRows.length;
+
+  // Surface pending rows on page 1 so the user sees them without paginating.
+  // Real transactions still drive the `total`/pagination.
+  const merged = page === 1 ? [...pendingRows, ...transactions] : transactions;
+
   return {
-    transactions,
+    transactions: merged,
     summary,
     total,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },

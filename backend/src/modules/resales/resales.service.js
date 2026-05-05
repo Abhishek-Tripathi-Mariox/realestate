@@ -115,6 +115,26 @@ const create = async (body) => {
     createdAt: new Date(),
   };
   await ResaleDeal.create(deal);
+
+  // Mark the original Sale as TRANSFERRED so the Sales tab stops showing it
+  // as an active booking with a pending balance — the resale flow now owns
+  // payment tracking for this unit.
+  if (deal.originalSaleId) {
+    await Sale.updateOne(
+      { id: deal.originalSaleId },
+      {
+        $set: {
+          status: 'TRANSFERRED',
+          paymentStatus: 'Transferred',
+          resaleDealId: deal.id,
+          transferredTo: deal.buyerName,
+          transferredAt: new Date(),
+          updatedAt: new Date(),
+        },
+      },
+    );
+  }
+
   return deal;
 };
 
@@ -145,6 +165,19 @@ const remove = async (dealId, userId) => {
   await ResaleBuyerPayment.updateMany({ dealId }, { $set: { isDeleted: true, deletedAt: new Date() } });
   await ResaleSellerPayout.updateMany({ dealId }, { $set: { isDeleted: true, deletedAt: new Date() } });
   await ResaleDeal.updateOne({ id: dealId }, { $set: { isDeleted: true, deletedAt: new Date() } });
+
+  // Revert the original Sale back to Booked so the unit's prior sale becomes
+  // active again on the Sales tab.
+  if (deal.originalSaleId) {
+    await Sale.updateOne(
+      { id: deal.originalSaleId },
+      {
+        $set: { status: 'Booked', updatedAt: new Date() },
+        $unset: { resaleDealId: '', transferredTo: '', transferredAt: '' },
+      },
+    );
+  }
+
   return { message: 'Resale deal deleted with reversal' };
 };
 

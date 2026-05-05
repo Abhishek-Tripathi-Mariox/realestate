@@ -506,19 +506,31 @@ export default function ExpensesPage() {
         </Tabs>
 
         {/* Summary Cards */}
-        <div className="grid grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-5 gap-4 mb-6">
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-gray-500">Total Expense</p>
+                  <p className="text-sm text-gray-500">Total Paid</p>
                   <p className="text-2xl font-bold text-red-600">₹{fmt(summary.totalExpense)}</p>
                 </div>
                 <MinusCircle className="w-8 h-8 text-red-200" />
               </div>
             </CardContent>
           </Card>
-          
+
+          <Card>
+            <CardContent className="pt-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-gray-500">Pending</p>
+                  <p className="text-2xl font-bold text-orange-600">₹{fmt(summary.totalPending || 0)}</p>
+                </div>
+                <Receipt className="w-8 h-8 text-orange-200" />
+              </div>
+            </CardContent>
+          </Card>
+
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center justify-between">
@@ -530,7 +542,7 @@ export default function ExpensesPage() {
               </div>
             </CardContent>
           </Card>
-          
+
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center justify-between">
@@ -542,7 +554,7 @@ export default function ExpensesPage() {
               </div>
             </CardContent>
           </Card>
-          
+
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center justify-between">
@@ -707,13 +719,17 @@ export default function ExpensesPage() {
                       <TableHead>Vendor/Party</TableHead>
                       <TableHead>Mode</TableHead>
                       <TableHead className="text-right">Amount</TableHead>
+                      <TableHead>Status</TableHead>
                       <TableHead>Remark</TableHead>
                       <TableHead>Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {expenses.map(expense => (
-                      <TableRow key={expense.id} className="cursor-pointer hover:bg-gray-50" onClick={() => setViewingExpense(expense)}>
+                    {expenses.map(expense => {
+                      const isBill = expense._isBill || expense.status === 'PENDING' || expense.status === 'PARTIAL'
+                      const statusVariant = expense.status === 'PAID' ? 'default' : expense.status === 'PARTIAL' ? 'secondary' : 'destructive'
+                      return (
+                      <TableRow key={expense.id} className={`cursor-pointer hover:bg-gray-50 ${isBill ? 'bg-orange-50/40' : ''}`} onClick={() => setViewingExpense(expense)}>
                         <TableCell>{expense.txnDate}</TableCell>
                         <TableCell>
                           <Badge variant={expense.scope === 'COMPANY' ? 'secondary' : 'outline'}>
@@ -729,8 +745,11 @@ export default function ExpensesPage() {
                         </TableCell>
                         <TableCell>{expense.partyName || '-'}</TableCell>
                         <TableCell>{expense.paymentMode}</TableCell>
-                        <TableCell className="text-right font-medium text-red-600">
+                        <TableCell className={`text-right font-medium ${isBill ? 'text-orange-600' : 'text-red-600'}`}>
                           ₹{fmt(expense.amount)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={statusVariant}>{expense.status || 'PAID'}</Badge>
                         </TableCell>
                         <TableCell className="max-w-[200px] truncate" title={expense.remark}>
                           {expense.remark || '-'}
@@ -740,16 +759,21 @@ export default function ExpensesPage() {
                             <Button variant="ghost" size="sm" onClick={() => setViewingExpense(expense)}>
                               <Eye className="w-4 h-4" />
                             </Button>
-                            <Button variant="ghost" size="sm" onClick={() => openEditExpense(expense)}>
-                              <Edit className="w-4 h-4" />
-                            </Button>
-                            <Button variant="ghost" size="sm" className="text-red-600" onClick={() => handleDeleteExpense(expense)}>
-                              <Trash2 className="w-4 h-4" />
-                            </Button>
+                            {!isBill && (
+                              <>
+                                <Button variant="ghost" size="sm" onClick={() => openEditExpense(expense)}>
+                                  <Edit className="w-4 h-4" />
+                                </Button>
+                                <Button variant="ghost" size="sm" className="text-red-600" onClick={() => handleDeleteExpense(expense)}>
+                                  <Trash2 className="w-4 h-4" />
+                                </Button>
+                              </>
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>
-                    ))}
+                      )
+                    })}
                   </TableBody>
                 </Table>
                 

@@ -15,7 +15,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog'
-import { Building2, Users, Package, ShoppingCart, TrendingUp, TrendingDown, DollarSign, LogOut, Plus, Edit, Trash2, Home, Eye, EyeOff, Receipt, UserCheck, CreditCard, Percent, RefreshCw, ArrowRightLeft, CheckCircle, XCircle, BookOpen, Wallet, ArrowDownCircle, ArrowUpCircle, Filter, X, Download, FileText, FileSpreadsheet, Lock, Settings, AlertTriangle, Pencil, IndianRupee, UserCircle, MinusCircle, Globe } from 'lucide-react'
+import { Building2, Users, Package, ShoppingCart, TrendingUp, TrendingDown, LogOut, Plus, Edit, Trash2, Home, Eye, EyeOff, Receipt, UserCheck, CreditCard, Percent, RefreshCw, ArrowRightLeft, CheckCircle, XCircle, BookOpen, Wallet, ArrowDownCircle, ArrowUpCircle, Filter, X, Download, FileText, FileSpreadsheet, Lock, Settings, AlertTriangle, Pencil, IndianRupee, UserCircle, MinusCircle, Globe } from 'lucide-react'
 import { AppShell } from '@/components/dashboard/AppShell'
 import { StatCard } from '@/components/dashboard/StatCard'
 import { getDeleteOtp, refreshDeleteOtp } from '@/lib/deleteOtp'
@@ -95,6 +95,7 @@ const App = () => {
   const [password, setPassword] = useState('')
   
   // App state
+  const [activeTab, setActiveTab] = useState('partners')
   const [societies, setSocieties] = useState([])
   const [selectedSociety, setSelectedSociety] = useState(null)
   const [partners, setPartners] = useState([])
@@ -1784,7 +1785,7 @@ const App = () => {
                 value={`₹${fmt(summary.netProfitLoss)}`}
                 sub={summary.netProfitLoss >= 0 ? 'Profitable' : 'In loss'}
                 color={summary.netProfitLoss >= 0 ? 'emerald' : 'rose'}
-                Icon={DollarSign}
+                Icon={IndianRupee}
                 percent={(() => {
                   const total = summary.totalSalesAmount || 0
                   if (total <= 0) return 0
@@ -1794,7 +1795,7 @@ const App = () => {
             </div>
 
             {/* Tabs for different modules */}
-            <Tabs defaultValue="partners" className="space-y-4">
+            <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
               <TabsList className="flex w-full overflow-x-auto whitespace-nowrap lg:grid lg:grid-cols-9 h-11 p-1 bg-slate-100/80 border border-slate-200/70 rounded-xl">
                 <TabsTrigger value="partners" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Partners</TabsTrigger>
                 <TabsTrigger value="inventory" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Inventory</TabsTrigger>
@@ -2509,10 +2510,9 @@ const App = () => {
                                           size="sm" 
                                           className="text-purple-600"
                                           onClick={() => {
-                                            // Find and view the resale deal
                                             const resaleDeal = resaleDeals.find(r => r.id === sale.resaleDealId)
                                             if (resaleDeal) {
-                                              setActiveTab('resale')
+                                              setActiveTab('resales')
                                             }
                                           }}
                                           title="View Resale Deal"
@@ -8265,7 +8265,7 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
                     ₹{fmt(summary.closingBalance)}
                   </p>
                 </div>
-                <DollarSign className={`w-8 h-8 ${summary.closingBalance >= 0 ? 'text-blue-500' : 'text-orange-500'}`} />
+                <IndianRupee className={`w-8 h-8 ${summary.closingBalance >= 0 ? 'text-blue-500' : 'text-orange-500'}`} />
               </div>
             </CardContent>
           </Card>

@@ -3,7 +3,7 @@ const { notDeleted } = require('../../utils/notDeleted');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   Sale, SalePaymentEntry, Inventory, Customer, Account, Transaction,
-  PaymentAllocation, CustomerPayment,
+  PaymentAllocation, CustomerPayment, ResaleDeal,
 } = require('../../models');
 
 const stripId = ({ _id, ...rest }) => rest;
@@ -22,10 +22,29 @@ const listForSociety = async (societyId) => {
     return acc;
   }, {});
 
+  // Self-heal older sales whose resale deal predates the TRANSFERRED-marking
+  // logic: if a non-deleted ResaleDeal points at this sale, treat it as
+  // transferred even if the Sale row wasn't updated at the time.
+  const resaleDeals = saleIds.length
+    ? await ResaleDeal.find(notDeleted({ originalSaleId: { $in: saleIds } })).lean()
+    : [];
+  const dealBySaleId = Object.fromEntries(resaleDeals.map(d => [d.originalSaleId, d]));
+
   const enrichedSales = await Promise.all(sales.map(async (sale) => {
     const inventory = await Inventory.findOne({ id: sale.inventoryId }).lean();
     const customer = sale.customerId ? await Customer.findOne({ id: sale.customerId }).lean() : null;
     const totalPaid = (sale.amountPaid || 0) + (allocatedBySale[sale.id] || 0);
+    const linkedDeal = dealBySaleId[sale.id];
+    const isTransferred = sale.status === 'TRANSFERRED' || Boolean(linkedDeal);
+    if (linkedDeal) {
+      sale.status = 'TRANSFERRED';
+      sale.resaleDealId = sale.resaleDealId || linkedDeal.id;
+      sale.transferredTo = sale.transferredTo || linkedDeal.buyerName;
+    }
+    // TRANSFERRED sales are owned by a resale deal now — show no pending
+    // balance against the original sale so the Sales tab and its summary
+    // don't keep counting it as outstanding.
+    const balance = isTransferred ? 0 : (sale.finalAmount || 0) - totalPaid;
     return {
       ...sale,
       inventoryNumber: inventory?.inventoryNumber || 'N/A',
@@ -34,19 +53,20 @@ const listForSociety = async (societyId) => {
       customerName: customer?.name || sale.buyerName || 'N/A',
       customerPhone: customer?.phone || sale.buyerContact || '',
       totalPaid,
-      balance: (sale.finalAmount || 0) - totalPaid,
+      balance,
     };
   }));
 
   const totalAmount = enrichedSales.reduce((sum, s) => sum + (s.finalAmount || 0), 0);
   const totalReceived = enrichedSales.reduce((sum, s) => sum + s.totalPaid, 0);
+  const totalPending = enrichedSales.reduce((sum, s) => sum + (s.balance || 0), 0);
   const summary = {
     totalSales: enrichedSales.length,
     count: enrichedSales.length,                // alias the FE Sales-tab card reads
     totalAmount,
     totalDealAmount: totalAmount,               // alias the FE Sales-tab card reads
     totalReceived,
-    totalPending: totalAmount - totalReceived,
+    totalPending,
   };
 
   return { sales: enrichedSales.map(stripId), summary };
@@ -89,6 +109,17 @@ const getById = async (id) => {
   const sale = await Sale.findOne(notDeleted({ id })).lean();
   if (!sale) return null;
 
+  // Self-heal legacy rows whose resale deal predates the TRANSFERRED-marking
+  // logic so the ledger view picks the read-only/transferred treatment.
+  if (sale.status !== 'TRANSFERRED') {
+    const linkedDeal = await ResaleDeal.findOne(notDeleted({ originalSaleId: id })).lean();
+    if (linkedDeal) {
+      sale.status = 'TRANSFERRED';
+      sale.resaleDealId = sale.resaleDealId || linkedDeal.id;
+      sale.transferredTo = sale.transferredTo || linkedDeal.buyerName;
+    }
+  }
+
   const inventory = sale.inventoryId
     ? await Inventory.findOne({ id: sale.inventoryId }).lean()
     : null;
@@ -112,7 +143,7 @@ const getById = async (id) => {
   const allocations = await PaymentAllocation.find({ saleId: id }).lean();
   const allocatedTotal = allocations.reduce((sum, a) => sum + (a.amount || 0), 0);
   const totalPaid = (sale.amountPaid || 0) + allocatedTotal;
-  const balance = (sale.finalAmount || 0) - totalPaid;
+  const balance = sale.status === 'TRANSFERRED' ? 0 : (sale.finalAmount || 0) - totalPaid;
 
   return {
     ...stripId(sale),
