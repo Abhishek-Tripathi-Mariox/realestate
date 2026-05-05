@@ -41,7 +41,7 @@ function BrandMark({ className = '' }) {
   )
 }
 
-export function Sidebar({ user, onLogout }) {
+export function Sidebar({ user, onLogout, mobileOpen = false, onMobileClose }) {
   const pathname = usePathname() || '/'
 
   const items = [
@@ -62,15 +62,12 @@ export function Sidebar({ user, onLogout }) {
   const isActive = (href) =>
     href === '/' ? pathname === '/' : pathname === href || pathname.startsWith(href + '/')
 
-  return (
-    <aside className="hidden lg:flex flex-col w-60 shrink-0 sticky top-0 h-screen bg-white border-r border-slate-200/70">
-      {/* Brand */}
+  const navContent = (
+    <>
       <div className="px-6 py-5 flex items-center gap-2.5">
         <BrandMark />
         <span className="font-bold text-lg tracking-tight text-slate-900">Estate</span>
       </div>
-
-      {/* Nav */}
       <nav className="flex-1 px-3 py-2 space-y-1 overflow-y-auto">
         {items.map((it) => {
           const active = isActive(it.href)
@@ -79,6 +76,7 @@ export function Sidebar({ user, onLogout }) {
             <Link
               key={it.href}
               href={it.href}
+              onClick={() => onMobileClose && onMobileClose()}
               className={cn(
                 'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200',
                 active
@@ -92,8 +90,6 @@ export function Sidebar({ user, onLogout }) {
           )
         })}
       </nav>
-
-      {/* Footer / logout */}
       <div className="p-3 border-t border-slate-200/70">
         <button
           onClick={onLogout}
@@ -103,6 +99,37 @@ export function Sidebar({ user, onLogout }) {
           <span>Logout</span>
         </button>
       </div>
-    </aside>
+    </>
+  )
+
+  return (
+    <>
+      {/* Desktop: static sidebar */}
+      <aside className="hidden lg:flex flex-col w-60 shrink-0 sticky top-0 h-screen bg-white border-r border-slate-200/70">
+        {navContent}
+      </aside>
+
+      {/* Mobile: drawer */}
+      <div
+        className={cn(
+          'fixed inset-0 z-50 lg:hidden transition-opacity',
+          mobileOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+        )}
+        aria-hidden={!mobileOpen}
+      >
+        <div
+          className="absolute inset-0 bg-black/40"
+          onClick={onMobileClose}
+        />
+        <aside
+          className={cn(
+            'absolute left-0 top-0 h-full w-64 max-w-[80vw] bg-white border-r border-slate-200/70 flex flex-col shadow-xl transition-transform',
+            mobileOpen ? 'translate-x-0' : '-translate-x-full'
+          )}
+        >
+          {navContent}
+        </aside>
+      </div>
+    </>
   )
 }

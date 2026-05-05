@@ -19,13 +19,21 @@ const computeTotalPrice = (area, pricePerSqft) => {
 };
 
 const create = async (societyId, body) => {
+  const inventoryNumber = (body.inventoryNumber || '').trim();
+  if (!inventoryNumber) return { error: 'Inventory number is required', status: 400 };
+
+  const existing = await Inventory.findOne(notDeleted({ societyId, inventoryNumber })).lean();
+  if (existing) {
+    return { error: `Inventory number "${inventoryNumber}" already exists in this society`, status: 409 };
+  }
+
   const area = body.area != null ? Number(body.area) : null;
   const pricePerSqft = body.pricePerSqft != null ? Number(body.pricePerSqft) : null;
 
   const item = {
     id: uuidv4(),
     societyId,
-    inventoryNumber: body.inventoryNumber,
+    inventoryNumber,
     type: body.type,
     phase: body.phase || '',
     area,
@@ -42,11 +50,30 @@ const create = async (societyId, body) => {
 };
 
 const update = async (id, body) => {
+  const current = await Inventory.findOne({ id }).lean();
+  if (!current) return null;
+
   const updates = { ...body, updatedAt: new Date() };
+
+  if (body.inventoryNumber !== undefined) {
+    const inventoryNumber = (body.inventoryNumber || '').trim();
+    if (!inventoryNumber) return { error: 'Inventory number is required', status: 400 };
+    if (inventoryNumber !== current.inventoryNumber) {
+      const clash = await Inventory.findOne(notDeleted({
+        societyId: current.societyId,
+        inventoryNumber,
+        id: { $ne: id },
+      })).lean();
+      if (clash) {
+        return { error: `Inventory number "${inventoryNumber}" already exists in this society`, status: 409 };
+      }
+    }
+    updates.inventoryNumber = inventoryNumber;
+  }
+
   if (body.area !== undefined || body.pricePerSqft !== undefined) {
-    const sale = await Inventory.findOne({ id }).lean();
-    const area = body.area !== undefined ? Number(body.area) : sale?.area;
-    const pricePerSqft = body.pricePerSqft !== undefined ? Number(body.pricePerSqft) : sale?.pricePerSqft;
+    const area = body.area !== undefined ? Number(body.area) : current.area;
+    const pricePerSqft = body.pricePerSqft !== undefined ? Number(body.pricePerSqft) : current.pricePerSqft;
     updates.totalPrice = computeTotalPrice(area, pricePerSqft);
   }
   await Inventory.updateOne({ id }, { $set: updates });

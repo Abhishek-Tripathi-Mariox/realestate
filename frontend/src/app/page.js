@@ -1651,19 +1651,19 @@ const App = () => {
 
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Dashboard</h1>
-          <p className="text-sm text-slate-500 mt-0.5">Overview of your real estate societies</p>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">Dashboard</h1>
+          <p className="text-xs sm:text-sm text-slate-500 mt-0.5">Overview of your real estate societies</p>
         </div>
       </div>
 
       <div className="space-y-6">
         {/* Society Selector & Actions */}
-        <div className="mb-6 p-4 rounded-2xl bg-white border border-slate-200/70 shadow-soft">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <Label htmlFor="society-select" className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Society</Label>
+        <div className="mb-6 p-3 sm:p-4 rounded-2xl bg-white border border-slate-200/70 shadow-soft">
+          <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <Label htmlFor="society-select" className="text-xs font-semibold text-slate-500 uppercase tracking-wider shrink-0">Society</Label>
               <Select value={selectedSociety} onValueChange={setSelectedSociety}>
-                <SelectTrigger className="w-64 h-9 border-slate-200 bg-slate-50/60 hover:bg-slate-100/60 transition-colors">
+                <SelectTrigger className="w-full sm:w-64 h-9 border-slate-200 bg-slate-50/60 hover:bg-slate-100/60 transition-colors">
                   <SelectValue placeholder="Choose a society" />
                 </SelectTrigger>
                 <SelectContent>
@@ -1676,7 +1676,7 @@ const App = () => {
               </Select>
             </div>
 
-            <div className="ml-auto flex items-center gap-2">
+            <div className="sm:ml-auto flex items-center gap-2 flex-wrap">
               {/* Quick Add Expense Button */}
               <Button
                 variant="ghost"
@@ -1795,7 +1795,7 @@ const App = () => {
 
             {/* Tabs for different modules */}
             <Tabs defaultValue="partners" className="space-y-4">
-              <TabsList className="grid w-full grid-cols-9 h-11 p-1 bg-slate-100/80 border border-slate-200/70 rounded-xl">
+              <TabsList className="flex w-full overflow-x-auto whitespace-nowrap lg:grid lg:grid-cols-9 h-11 p-1 bg-slate-100/80 border border-slate-200/70 rounded-xl">
                 <TabsTrigger value="partners" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Partners</TabsTrigger>
                 <TabsTrigger value="inventory" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Inventory</TabsTrigger>
                 <TabsTrigger value="purchases" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Purchases</TabsTrigger>
@@ -2157,7 +2157,7 @@ const App = () => {
                   </CardHeader>
                   <CardContent>
                     {/* Customer Summary Cards */}
-                    <div className="grid grid-cols-4 gap-4 mb-6">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
                       <Card className="bg-blue-50">
                         <CardContent className="pt-4">
                           <div className="text-sm text-muted-foreground">Total Customers</div>
@@ -2603,7 +2603,7 @@ const App = () => {
                         {/* Customer Section */}
                         <div className="bg-blue-50 p-4 rounded-lg">
                           <h4 className="font-semibold mb-2">Customer Details</h4>
-                          <div className="grid grid-cols-2 gap-4 text-sm">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
                             <div><span className="text-gray-500">Name:</span> {viewSaleData.customerName}</div>
                             <div><span className="text-gray-500">Phone:</span> {viewSaleData.customerPhone}</div>
                             <div className="col-span-2"><span className="text-gray-500">Address:</span> {viewSaleData.customerAddress || '-'}</div>
@@ -3061,7 +3061,7 @@ const App = () => {
                     ) : (
                       <>
                         {/* Totals Summary */}
-                        <div className="grid grid-cols-3 gap-4 mb-4 p-3 bg-blue-50 rounded-lg">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 p-3 bg-blue-50 rounded-lg">
                           <div className="text-center">
                             <p className="text-xs text-gray-500">Total Bill</p>
                             <p className="text-lg font-semibold">₹{fmt(expenseTotals.totalBill)}</p>
@@ -3253,7 +3253,7 @@ const App = () => {
                     ) : (
                       <>
                         {/* Totals Summary */}
-                        <div className="grid grid-cols-3 gap-4 mb-4 p-3 bg-purple-50 rounded-lg">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 p-3 bg-purple-50 rounded-lg">
                           <div className="text-center">
                             <p className="text-xs text-gray-500">Total Commission</p>
                             <p className="text-lg font-semibold">₹{fmt(commissionTotals.totalCommission)}</p>
@@ -3851,7 +3851,7 @@ const App = () => {
               </Select>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* Amount */}
               <div>
                 <Label>Amount *</Label>
@@ -3956,7 +3956,7 @@ const App = () => {
               )}
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* Vendor/Party */}
               <div>
                 <Label>Vendor/Party</Label>
@@ -4072,7 +4072,7 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
           {/* Summary */}
           <Card className="mb-4 bg-blue-50">
             <CardContent className="pt-6">
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <p className="text-sm text-gray-600">Bill Amount</p>
                   <p className="text-xl font-bold text-gray-900">₹{fmt(getBillAmount())}</p>
@@ -4099,7 +4099,7 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
               </CardHeader>
               <CardContent>
                 <form onSubmit={handleSubmit} className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <Label>Amount * (Max: ₹{fmt(balance)})</Label>
                       <Input
@@ -4504,7 +4504,7 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                   {ledgerItem?.notes && (
                     <p className="mb-3 text-sm italic text-slate-600">📝 {ledgerItem.notes}</p>
                   )}
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <p className="text-sm text-gray-600">Total Investment</p>
                       <p className="text-xl font-bold text-green-600">₹{fmt(totals.totalInvestment)}</p>
@@ -4627,7 +4627,7 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                     </Select>
                   </div>
                 )}
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <Label>Amount *</Label>
                     <Input
@@ -5628,11 +5628,13 @@ const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, 
             <SelectValue placeholder="Choose inventory" />
           </SelectTrigger>
           <SelectContent>
-            {inventory.map(item => (
-              <SelectItem key={item.id} value={item.id}>
-                {item.type} - {item.inventoryNumber}{item.area > 0 ? ` (${item.area} sq ft)` : ''}
-              </SelectItem>
-            ))}
+            {inventory
+              .filter(item => !item.status || item.status === 'Available' || item.id === formData.inventoryId)
+              .map(item => (
+                <SelectItem key={item.id} value={item.id}>
+                  {item.type} - {item.inventoryNumber}{item.area > 0 ? ` (${item.area} sq ft)` : ''}
+                </SelectItem>
+              ))}
           </SelectContent>
         </Select>
         {initialData && hasPayments && (
@@ -5771,7 +5773,7 @@ const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, 
 
       {/* Customer details (read-only when selected) */}
       {formData.customerId && !showEditCustomer && (
-        <div className="grid grid-cols-2 gap-4 p-3 bg-gray-50 rounded-lg">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 bg-gray-50 rounded-lg">
           <div>
             <Label className="text-xs text-gray-500">Customer Phone</Label>
             <p className="text-sm">{formData.customerPhone || 'Not provided'}</p>
@@ -5783,7 +5785,7 @@ const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, 
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <Label>Deal Price *</Label>
           <Input type="number" value={formData.dealPrice} onChange={e => setFormData({...formData, dealPrice: e.target.value})} required />
@@ -6061,7 +6063,7 @@ const ExpenseBillForm = ({ vendors, categories = [], onSubmit, onCancel, onAddNe
           </Select>
         )}
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <Label>Bill Amount *</Label>
           <Input type="number" value={formData.billAmount} onChange={e => setFormData({...formData, billAmount: e.target.value})} required />
@@ -6178,7 +6180,7 @@ const CommissionBillForm = ({ brokers, sales, inventory, onSubmit, onCancel }) =
           </CardContent>
         </Card>
       )}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <Label>Commission Amount *</Label>
           <Input type="number" value={formData.commissionAmount} onChange={e => setFormData({...formData, commissionAmount: e.target.value})} required />
@@ -6367,7 +6369,7 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
             <h4 className="font-medium mb-2 flex items-center gap-2">
               <UserCircle className="w-4 h-4" /> Current Owner (Seller)
             </h4>
-            <div className="grid grid-cols-2 gap-4 text-sm">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
               <div>
                 <span className="text-gray-500">Name:</span> <strong>{formData.sellerName}</strong>
               </div>
@@ -6450,7 +6452,7 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
       </div>
       
       {/* Charges */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div>
           <Label>Transfer Charges</Label>
           <Input type="number" value={formData.transferCharges} onChange={e => setFormData({...formData, transferCharges: e.target.value})} />
@@ -6478,7 +6480,7 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
         <Card className="bg-gradient-to-r from-green-50 to-blue-50 border-green-200">
           <CardContent className="pt-4">
             <h4 className="font-medium mb-3">💰 Deal Summary</h4>
-            <div className="grid grid-cols-2 gap-4 text-sm">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
               <div className="space-y-2">
                 <div className="flex justify-between">
                   <span className="text-gray-600">Original Sale Price:</span>
@@ -6676,7 +6678,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
         
         <div className="px-4 overflow-y-auto max-h-[60vh]">
           {/* Summary */}
-          <div className="grid grid-cols-2 gap-4 mb-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
             <Card className="bg-green-50">
               <CardContent className="pt-4">
                 <p className="text-sm font-medium text-green-700">Money IN (From Buyer)</p>
@@ -6734,7 +6736,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                   </CardHeader>
                   <CardContent>
                     <form onSubmit={handleBuyerSubmit} className="space-y-4">
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <div>
                           <Label>Amount * (Max: ₹{fmt(buyerBalance)})</Label>
                           <Input
@@ -6858,7 +6860,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                 <Card className="bg-purple-50 border-purple-200">
                   <CardContent className="pt-4">
                     <h4 className="font-medium text-purple-800 mb-2">Seller Payout Breakdown</h4>
-                    <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
                       <div>
                         <div className="flex justify-between">
                           <span className="text-gray-600">Principal (Invested):</span>
@@ -6900,7 +6902,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                   </CardHeader>
                   <CardContent>
                     <form onSubmit={handleSellerSubmit} className="space-y-4">
-                      <div className="grid grid-cols-3 gap-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                         <div>
                           <Label>Principal Amount</Label>
                           <Input
@@ -6942,7 +6944,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                         </div>
                       </div>
                       
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <div>
                           <Label>Payout Date *</Label>
                           <Input
@@ -6966,7 +6968,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                           </Select>
                         </div>
                       </div>
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <div>
                           <Label>Account *</Label>
                           <Select value={sellerFormData.accountId} onValueChange={v => setSellerFormData({...sellerFormData, accountId: v})}>
@@ -7103,7 +7105,7 @@ const CustomerForm = ({ customer, onSubmit, onCancel }) => {
         />
       </div>
       
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <Label>Phone</Label>
           <Input 
@@ -7132,7 +7134,7 @@ const CustomerForm = ({ customer, onSubmit, onCancel }) => {
         />
       </div>
       
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <Label>PAN Number</Label>
           <Input 
@@ -7222,7 +7224,7 @@ const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
         )}
       </div>
       
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <Label>Amount (₹) *</Label>
           <Input 
@@ -7244,7 +7246,7 @@ const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
         </div>
       </div>
       
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <Label>Payment Mode *</Label>
           <Select value={formData.paymentMode} onValueChange={v => setFormData({...formData, paymentMode: v})}>
@@ -7276,7 +7278,7 @@ const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
         </div>
       </div>
       
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <Label>Reference Number</Label>
           <Input 
@@ -7399,12 +7401,12 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
     }
   }
 
-  const availableInventory = inventory || []
+  const availableInventory = (inventory || []).filter(i => !i.status || i.status === 'Available')
 
   return (
     <div className="space-y-4">
       {/* Summary Bar */}
-      <div className="grid grid-cols-3 gap-4 p-4 bg-gray-50 rounded-lg">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4 bg-gray-50 rounded-lg">
         <div className="text-center">
           <div className="text-sm text-muted-foreground">Payment Amount</div>
           <div className="text-xl font-bold text-green-600">₹{payment.amount.toLocaleString('en-IN')}</div>
@@ -7487,7 +7489,7 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <Label>Deal Price *</Label>
                     <Input 
@@ -7513,7 +7515,7 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
                     Final Amount: ₹{((parseFloat(saleFormData.dealPrice) || 0) - (parseFloat(saleFormData.discount) || 0)).toLocaleString('en-IN')}
                   </p>
                 )}
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <Label>Sale Date *</Label>
                     <Input 
@@ -7628,7 +7630,7 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
               </CardHeader>
               <CardContent>
                 <form onSubmit={handleCreateSaleSubmit} className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <Label>Select Flat/Unit *</Label>
                       <Select 
@@ -7658,7 +7660,7 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
                       />
                     </div>
                   </div>
-                  <div className="grid grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div>
                       <Label>Deal Price *</Label>
                       <Input 
@@ -7796,7 +7798,7 @@ const CustomerLedgerView = ({ data }) => {
   return (
     <div className="space-y-6">
       {/* Summary Cards */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <Card className="bg-blue-50">
           <CardContent className="pt-4">
             <div className="text-sm text-muted-foreground">Total Sales</div>
