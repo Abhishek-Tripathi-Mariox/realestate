@@ -2,7 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const { notDeleted } = require('../../utils/notDeleted');
 const {
   Society, Sale, SalePaymentEntry, Purchase, ExpenseBill, Vendor,
-  Inventory, Partner, SocietyPhase, Transaction,
+  Inventory, Partner, SocietyPhase, Transaction, CommissionBill,
 } = require('../../models');
 
 const stripId = ({ _id, ...rest }) => rest;
@@ -52,10 +52,13 @@ const remove = async (societyId) => {
 };
 
 const summary = async (societyId) => {
-  const inventory = await Inventory.find(notDeleted({ societyId })).lean();
-  const sales = await Sale.find(notDeleted({ societyId })).lean();
-  const purchases = await Purchase.find(notDeleted({ societyId })).lean();
-  const expenseBills = await ExpenseBill.find(notDeleted({ societyId })).lean();
+  const [inventory, sales, purchases, expenseBills, commissionBills] = await Promise.all([
+    Inventory.find(notDeleted({ societyId })).lean(),
+    Sale.find(notDeleted({ societyId })).lean(),
+    Purchase.find(notDeleted({ societyId })).lean(),
+    ExpenseBill.find(notDeleted({ societyId })).lean(),
+    CommissionBill.find(notDeleted({ societyId })).lean(),
+  ]);
 
   const totalInventory = inventory.length;
   const soldInventory = inventory.filter(i => i.status === 'Sold').length;
@@ -65,17 +68,33 @@ const summary = async (societyId) => {
   const totalReceived = sales.reduce((sum, s) => sum + (s.amountPaid || 0), 0);
   const totalPending = totalSaleAmount - totalReceived;
 
-  const totalPurchaseAmount = purchases.reduce((sum, p) => sum + (p.totalCost || 0), 0);
+  const totalPurchaseAmount = purchases.reduce((sum, p) => sum + (p.dealAmount ?? p.totalCost ?? 0), 0);
   const totalPurchasePaid = purchases.reduce((sum, p) => sum + (p.amountPaid || 0), 0);
 
   const totalExpenses = expenseBills.reduce((sum, e) => sum + (e.amount || 0), 0);
   const totalExpensesPaid = expenseBills.reduce((sum, e) => sum + (e.paidAmount || 0), 0);
 
+  const totalCommissions = commissionBills.reduce((sum, c) => sum + (c.amount || 0), 0);
+  const totalCommissionsPaid = commissionBills.reduce((sum, c) => sum + (c.paidAmount || 0), 0);
+
+  const totalPayables = (totalExpenses - totalExpensesPaid) + (totalCommissions - totalCommissionsPaid);
+  const netProfitLoss = totalReceived - totalPurchasePaid - totalExpensesPaid - totalCommissionsPaid;
+
   return {
     totalInventory, soldInventory, availableInventory,
-    totalSaleAmount, totalReceived, totalPending,
-    totalPurchaseAmount, totalPurchasePaid,
+    totalSaleAmount,
+    totalSalesAmount: totalSaleAmount,
+    salesCount: sales.length,
+    totalReceived, totalPending,
+    totalPurchaseAmount,
+    purchaseCount: purchases.length,
+    totalPurchasePaid,
     totalExpenses, totalExpensesPaid,
+    expenseBillCount: expenseBills.length,
+    totalCommissions, totalCommissionsPaid,
+    commissionBillCount: commissionBills.length,
+    totalPayables,
+    netProfitLoss,
   };
 };
 
