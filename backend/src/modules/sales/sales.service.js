@@ -3,17 +3,29 @@ const { notDeleted } = require('../../utils/notDeleted');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   Sale, SalePaymentEntry, Inventory, Customer, Account, Transaction,
+  PaymentAllocation, CustomerPayment,
 } = require('../../models');
 
 const stripId = ({ _id, ...rest }) => rest;
 
 const listForSociety = async (societyId) => {
   const sales = await Sale.find(notDeleted({ societyId })).lean();
+  const saleIds = sales.map(s => s.id);
+  // Pull allocations from the customer-payment flow so a sale's totalPaid
+  // reflects every rupee — whether it came in via the per-sale Sale Ledger
+  // (Sale.amountPaid) or via Record Customer Payment + allocate.
+  const allocations = saleIds.length
+    ? await PaymentAllocation.find({ saleId: { $in: saleIds } }).lean()
+    : [];
+  const allocatedBySale = allocations.reduce((acc, a) => {
+    acc[a.saleId] = (acc[a.saleId] || 0) + (a.amount || 0);
+    return acc;
+  }, {});
 
   const enrichedSales = await Promise.all(sales.map(async (sale) => {
     const inventory = await Inventory.findOne({ id: sale.inventoryId }).lean();
     const customer = sale.customerId ? await Customer.findOne({ id: sale.customerId }).lean() : null;
-    const totalPaid = sale.amountPaid || 0;
+    const totalPaid = (sale.amountPaid || 0) + (allocatedBySale[sale.id] || 0);
     return {
       ...sale,
       inventoryNumber: inventory?.inventoryNumber || 'N/A',
@@ -26,11 +38,15 @@ const listForSociety = async (societyId) => {
     };
   }));
 
+  const totalAmount = enrichedSales.reduce((sum, s) => sum + (s.finalAmount || 0), 0);
+  const totalReceived = enrichedSales.reduce((sum, s) => sum + s.totalPaid, 0);
   const summary = {
     totalSales: enrichedSales.length,
-    totalAmount: enrichedSales.reduce((sum, s) => sum + (s.finalAmount || 0), 0),
-    totalReceived: enrichedSales.reduce((sum, s) => sum + (s.amountPaid || 0), 0),
-    totalPending: enrichedSales.reduce((sum, s) => sum + ((s.finalAmount || 0) - (s.amountPaid || 0)), 0),
+    count: enrichedSales.length,                // alias the FE Sales-tab card reads
+    totalAmount,
+    totalDealAmount: totalAmount,               // alias the FE Sales-tab card reads
+    totalReceived,
+    totalPending: totalAmount - totalReceived,
   };
 
   return { sales: enrichedSales.map(stripId), summary };
@@ -93,7 +109,9 @@ const getById = async (id) => {
     return { ...stripId(p), accountName: account?.name || '-' };
   }));
 
-  const totalPaid = sale.amountPaid || 0;
+  const allocations = await PaymentAllocation.find({ saleId: id }).lean();
+  const allocatedTotal = allocations.reduce((sum, a) => sum + (a.amount || 0), 0);
+  const totalPaid = (sale.amountPaid || 0) + allocatedTotal;
   const balance = (sale.finalAmount || 0) - totalPaid;
 
   return {
@@ -195,11 +213,41 @@ const addPayment = async (saleId, body, userId) => {
 };
 
 const listLedger = async (saleId) => {
-  const entries = await SalePaymentEntry
-    .find(notDeleted({ saleId }))
-    .sort({ paymentDate: -1 })
-    .lean();
-  return { entries: entries.map(stripId) };
+  const [entries, allocations] = await Promise.all([
+    SalePaymentEntry.find(notDeleted({ saleId })).lean(),
+    PaymentAllocation.find({ saleId }).lean(),
+  ]);
+
+  // Surface allocations from the customer-payment flow as ledger entries so
+  // both flows are visible in one place.
+  const paymentIds = [...new Set(allocations.map(a => a.paymentId).filter(Boolean))];
+  const customerPayments = paymentIds.length
+    ? await CustomerPayment.find({ id: { $in: paymentIds } }).lean()
+    : [];
+  const paymentById = Object.fromEntries(customerPayments.map(p => [p.id, p]));
+
+  const allocationEntries = allocations.map(a => {
+    const p = paymentById[a.paymentId] || {};
+    return {
+      id: `alloc-${a.id}`,
+      saleId,
+      entryType: 'SALE_PAYMENT',
+      amount: a.amount || 0,
+      paymentDate: p.paymentDate || a.createdAt,
+      paymentMode: p.paymentMode || 'Cash',
+      accountId: p.accountId || null,
+      referenceNo: p.referenceNo || '',
+      remark: p.remark || `Allocated from customer payment${p.referenceNo ? ` (${p.referenceNo})` : ''}`,
+      createdAt: a.createdAt,
+      source: 'CUSTOMER_PAYMENT_ALLOCATION',
+      sourcePaymentId: a.paymentId,
+    };
+  });
+
+  const merged = [...entries.map(stripId), ...allocationEntries]
+    .sort((a, b) => new Date(b.paymentDate || b.createdAt) - new Date(a.paymentDate || a.createdAt));
+
+  return { entries: merged };
 };
 
 const addLedgerEntry = async (saleId, body, userId) => {

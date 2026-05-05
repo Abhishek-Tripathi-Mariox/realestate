@@ -2757,7 +2757,7 @@ const App = () => {
                                     <span className="text-green-600">{deal.buyerName}</span>
                                   </div>
                                 </TableCell>
-                                <TableCell>₹{fmt(deal.buyerPurchaseAmount)}</TableCell>
+                                <TableCell>₹{fmt(deal.buyerPurchaseAmount || deal.resalePrice || 0)}</TableCell>
                                 <TableCell>
                                   <div className="flex flex-col">
                                     <span className="text-green-600">₹{fmt(deal.buyerPaid)}</span>
@@ -2766,7 +2766,7 @@ const App = () => {
                                     </Badge>
                                   </div>
                                 </TableCell>
-                                <TableCell>₹{fmt(deal.sellerPayoutAmount)}</TableCell>
+                                <TableCell>₹{fmt(deal.sellerPayoutAmount || Math.max(0, (deal.resalePrice || 0) - (deal.companyCommission || 0)))}</TableCell>
                                 <TableCell>
                                   <div className="flex flex-col">
                                     <span className="text-orange-600">₹{fmt(deal.sellerPaid)}</span>
@@ -2775,8 +2775,8 @@ const App = () => {
                                     </Badge>
                                   </div>
                                 </TableCell>
-                                <TableCell className={deal.netProfit >= 0 ? 'text-green-600 font-medium' : 'text-red-600 font-medium'}>
-                                  ₹{fmt(deal.netProfit)}
+                                <TableCell className={(deal.netProfit ?? ((deal.resalePrice || 0) - (deal.originalSalePrice || 0) - (deal.companyCommission || 0))) >= 0 ? 'text-green-600 font-medium' : 'text-red-600 font-medium'}>
+                                  ₹{fmt(deal.netProfit ?? ((deal.resalePrice || 0) - (deal.originalSalePrice || 0) - (deal.companyCommission || 0)))}
                                 </TableCell>
                                 <TableCell>
                                   <Badge variant={deal.status === 'CLOSED' ? 'default' : deal.status === 'ACTIVE' ? 'secondary' : 'outline'}>
@@ -4023,13 +4023,15 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
     remark: ''
   })
 
-  // Set default account on mount
+  // Set default account on mount, matching the selected payment mode
   useEffect(() => {
     if (accounts?.length > 0 && !formData.accountId) {
-      const defaultAccount = accounts.find(a => a.isDefault) || accounts[0]
-      setFormData(prev => ({ ...prev, accountId: defaultAccount?.id || '' }))
+      const wantType = formData.paymentMode === 'Cash' ? 'CASH' : 'BANK'
+      const eligible = accounts.filter(a => a.type === wantType)
+      const defaultAccount = eligible.find(a => a.isDefault) || eligible[0]
+      if (defaultAccount) setFormData(prev => ({ ...prev, accountId: defaultAccount.id }))
     }
-  }, [accounts])
+  }, [accounts, formData.paymentMode])
 
   const getTitle = () => {
     if (!bill) return ''
@@ -4059,7 +4061,7 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
   const balance = getBillAmount() - totalPaid
 
   return (
-    <Drawer open={isOpen} onOpenChange={onClose}>
+    <Drawer open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
       <DrawerContent className="max-h-[90vh]">
         <DrawerHeader>
           <DrawerTitle>{getTitle()}</DrawerTitle>
@@ -4122,7 +4124,7 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
                   </div>
                   <div>
                     <Label>Payment Mode *</Label>
-                    <Select value={formData.paymentMode} onValueChange={v => setFormData({...formData, paymentMode: v})}>
+                    <Select value={formData.paymentMode} onValueChange={v => setFormData({...formData, paymentMode: v, accountId: ''})}>
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
@@ -4140,7 +4142,7 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
                         <SelectValue placeholder="Select account" />
                       </SelectTrigger>
                       <SelectContent>
-                        {accounts?.map(acc => (
+                        {accounts?.filter(acc => formData.paymentMode === 'Cash' ? acc.type === 'CASH' : acc.type === 'BANK').map(acc => (
                           <SelectItem key={acc.id} value={acc.id}>{acc.name} ({acc.type})</SelectItem>
                         ))}
                       </SelectContent>
@@ -4218,9 +4220,7 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
         </div>
 
         <DrawerFooter>
-          <DrawerClose asChild>
-            <Button variant="outline">Close</Button>
-          </DrawerClose>
+          <Button variant="outline" onClick={onClose}>Close</Button>
         </DrawerFooter>
       </DrawerContent>
     </Drawer>
@@ -4232,7 +4232,7 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
   const totalPaid = entries.reduce((sum, e) => sum + e.amount, 0)
 
   return (
-    <Drawer open={isOpen} onOpenChange={onClose}>
+    <Drawer open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
       <DrawerContent className="max-h-[90vh]">
         <DrawerHeader>
           <div className="flex items-center justify-between">
@@ -4313,9 +4313,7 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
         </div>
 
         <DrawerFooter>
-          <DrawerClose asChild>
-            <Button variant="outline">Close</Button>
-          </DrawerClose>
+          <Button variant="outline" onClick={onClose}>Close</Button>
         </DrawerFooter>
       </DrawerContent>
     </Drawer>
@@ -4336,13 +4334,15 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
     remark: ''
   })
 
-  // Set default account on mount
+  // Set default account on mount, matching the selected payment mode
   useEffect(() => {
     if (accounts?.length > 0 && !formData.accountId) {
-      const defaultAccount = accounts.find(a => a.isDefault) || accounts[0]
-      setFormData(prev => ({ ...prev, accountId: defaultAccount?.id || '' }))
+      const wantType = formData.paymentMode === 'Cash' ? 'CASH' : 'BANK'
+      const eligible = accounts.filter(a => a.type === wantType)
+      const defaultAccount = eligible.find(a => a.isDefault) || eligible[0]
+      if (defaultAccount) setFormData(prev => ({ ...prev, accountId: defaultAccount.id }))
     }
-  }, [accounts])
+  }, [accounts, formData.paymentMode])
   
   // Reset entry type when ledgerType changes
   useEffect(() => {
@@ -4649,7 +4649,7 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                 </div>
                 <div>
                   <Label>Payment Mode *</Label>
-                  <Select value={formData.paymentMode} onValueChange={v => setFormData({...formData, paymentMode: v})}>
+                  <Select value={formData.paymentMode} onValueChange={v => setFormData({...formData, paymentMode: v, accountId: ''})}>
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
@@ -4667,7 +4667,7 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                       <SelectValue placeholder="Select account" />
                     </SelectTrigger>
                     <SelectContent>
-                      {accounts?.map(acc => (
+                      {accounts?.filter(acc => formData.paymentMode === 'Cash' ? acc.type === 'CASH' : acc.type === 'BANK').map(acc => (
                         <SelectItem key={acc.id} value={acc.id}>{acc.name} ({acc.type})</SelectItem>
                       ))}
                     </SelectContent>
@@ -4746,25 +4746,29 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                                 <Pencil className="w-4 h-4" />
                               </Button>
                             )}
-                            <AlertDialog>
-                              <AlertDialogTrigger asChild>
-                                <Button variant="destructive" size="sm">
-                                  <Trash2 className="w-4 h-4" />
-                                </Button>
-                              </AlertDialogTrigger>
-                              <AlertDialogContent>
-                                <AlertDialogHeader>
-                                  <AlertDialogTitle>Delete Entry?</AlertDialogTitle>
-                                  <AlertDialogDescription>
-                                    This action cannot be undone.
-                                  </AlertDialogDescription>
-                                </AlertDialogHeader>
-                                <AlertDialogFooter>
-                                  <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                  <AlertDialogAction onClick={() => onDeleteEntry(entry.id)}>Delete</AlertDialogAction>
-                                </AlertDialogFooter>
-                              </AlertDialogContent>
-                            </AlertDialog>
+                            {entry.source === 'CUSTOMER_PAYMENT_ALLOCATION' ? (
+                              <Badge variant="outline" className="text-xs">From customer payment</Badge>
+                            ) : (
+                              <AlertDialog>
+                                <AlertDialogTrigger asChild>
+                                  <Button variant="destructive" size="sm">
+                                    <Trash2 className="w-4 h-4" />
+                                  </Button>
+                                </AlertDialogTrigger>
+                                <AlertDialogContent>
+                                  <AlertDialogHeader>
+                                    <AlertDialogTitle>Delete Entry?</AlertDialogTitle>
+                                    <AlertDialogDescription>
+                                      This action cannot be undone.
+                                    </AlertDialogDescription>
+                                  </AlertDialogHeader>
+                                  <AlertDialogFooter>
+                                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                    <AlertDialogAction onClick={() => onDeleteEntry(entry.id)}>Delete</AlertDialogAction>
+                                  </AlertDialogFooter>
+                                </AlertDialogContent>
+                              </AlertDialog>
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>
@@ -5332,7 +5336,7 @@ const EditLedgerEntryForm = ({ entry, accounts, onSubmit, onCancel }) => {
       
       <div>
         <Label>Payment Mode *</Label>
-        <Select value={formData.paymentMode} onValueChange={v => setFormData({...formData, paymentMode: v})} disabled={isSubmitting}>
+        <Select value={formData.paymentMode} onValueChange={v => setFormData({...formData, paymentMode: v, accountId: ''})} disabled={isSubmitting}>
           <SelectTrigger>
             <SelectValue />
           </SelectTrigger>
@@ -5344,7 +5348,7 @@ const EditLedgerEntryForm = ({ entry, accounts, onSubmit, onCancel }) => {
           </SelectContent>
         </Select>
       </div>
-      
+
       <div>
         <Label>Account *</Label>
         <Select value={formData.accountId} onValueChange={v => setFormData({...formData, accountId: v})} disabled={isSubmitting}>
@@ -5352,7 +5356,7 @@ const EditLedgerEntryForm = ({ entry, accounts, onSubmit, onCancel }) => {
             <SelectValue placeholder="Select account" />
           </SelectTrigger>
           <SelectContent>
-            {accounts.map(account => (
+            {accounts.filter(account => formData.paymentMode === 'Cash' ? account.type === 'CASH' : account.type === 'BANK').map(account => (
               <SelectItem key={account.id} value={account.id}>
                 {account.name} ({account.type})
               </SelectItem>
@@ -6333,7 +6337,8 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
       brokerage: parseFloat(formData.brokerage || 0),
       otherCharges: parseFloat(formData.otherCharges || 0),
       originalSaleId: selectedSale?.id,
-      originalSalePrice: selectedSale?.finalAmount
+      originalSalePrice: selectedSale?.finalAmount,
+      originalSalePaid: selectedSale?.totalPaid || 0,
     })
   }
 
@@ -6608,7 +6613,8 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
   const buyerPaid = buyerPayments.reduce((sum, p) => sum + p.amount, 0)
   const buyerBalance = (deal.buyerPurchaseAmount || deal.resalePrice || 0) - buyerPaid
   const sellerPaid = sellerPayouts.reduce((sum, p) => sum + p.amount, 0)
-  const sellerBalance = (deal.sellerPayoutAmount || 0) - sellerPaid
+  const sellerPayoutExpected = deal.sellerPayoutAmount || Math.max(0, (deal.resalePrice || 0) - (deal.companyCommission || 0))
+  const sellerBalance = sellerPayoutExpected - sellerPaid
   
   // Calculate remaining principal and profit
   const totalPrincipalPaid = sellerPayouts.reduce((sum, p) => sum + (p.principalAmount || 0), 0)
@@ -6667,7 +6673,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                            (parseFloat(sellerFormData.chargesDeducted) || 0)
 
   return (
-    <Drawer open={isOpen} onOpenChange={onClose}>
+    <Drawer open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
       <DrawerContent className="max-h-[90vh]">
         <DrawerHeader>
           <DrawerTitle>Resale Payments - {deal?.inventoryName}</DrawerTitle>
@@ -6685,7 +6691,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                 <div className="grid grid-cols-3 gap-2 mt-2">
                   <div>
                     <p className="text-xs text-gray-600">Amount</p>
-                    <p className="font-bold">₹{fmt(deal.buyerPurchaseAmount)}</p>
+                    <p className="font-bold">₹{fmt(deal.buyerPurchaseAmount || deal.resalePrice || 0)}</p>
                   </div>
                   <div>
                     <p className="text-xs text-gray-600">Received</p>
@@ -6693,7 +6699,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                   </div>
                   <div>
                     <p className="text-xs text-gray-600">Due</p>
-                    <p className="font-bold text-orange-600">₹{fmt(buyerBalance)}</p>
+                    <p className="font-bold text-orange-600">₹{fmt(Math.max(0, buyerBalance))}</p>
                   </div>
                 </div>
               </CardContent>
@@ -6705,7 +6711,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                 <div className="grid grid-cols-3 gap-2 mt-2">
                   <div>
                     <p className="text-xs text-gray-600">Amount</p>
-                    <p className="font-bold">₹{fmt(deal.sellerPayoutAmount)}</p>
+                    <p className="font-bold">₹{fmt(sellerPayoutExpected)}</p>
                   </div>
                   <div>
                     <p className="text-xs text-gray-600">Paid</p>
@@ -6713,7 +6719,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                   </div>
                   <div>
                     <p className="text-xs text-gray-600">Due</p>
-                    <p className="font-bold text-orange-600">₹{fmt(sellerBalance)}</p>
+                    <p className="font-bold text-orange-600">₹{fmt(Math.max(0, sellerBalance))}</p>
                   </div>
                 </div>
               </CardContent>
@@ -6759,7 +6765,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                       </div>
                       <div>
                         <Label>Payment Mode *</Label>
-                        <Select value={buyerFormData.paymentMode} onValueChange={v => setBuyerFormData({...buyerFormData, paymentMode: v})}>
+                        <Select value={buyerFormData.paymentMode} onValueChange={v => setBuyerFormData({...buyerFormData, paymentMode: v, accountId: ''})}>
                           <SelectTrigger>
                             <SelectValue />
                           </SelectTrigger>
@@ -6777,7 +6783,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                             <SelectValue placeholder="Select account" />
                           </SelectTrigger>
                           <SelectContent>
-                            {accounts?.map(acc => (
+                            {accounts?.filter(acc => buyerFormData.paymentMode === 'Cash' ? acc.type === 'CASH' : acc.type === 'BANK').map(acc => (
                               <SelectItem key={acc.id} value={acc.id}>{acc.name} ({acc.type})</SelectItem>
                             ))}
                           </SelectContent>
@@ -6956,7 +6962,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                         </div>
                         <div>
                           <Label>Payout Mode *</Label>
-                          <Select value={sellerFormData.payoutMode} onValueChange={v => setSellerFormData({...sellerFormData, payoutMode: v})}>
+                          <Select value={sellerFormData.payoutMode} onValueChange={v => setSellerFormData({...sellerFormData, payoutMode: v, accountId: ''})}>
                             <SelectTrigger>
                               <SelectValue />
                             </SelectTrigger>
@@ -6976,7 +6982,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                               <SelectValue placeholder="Select account" />
                             </SelectTrigger>
                             <SelectContent>
-                              {accounts.map(acc => (
+                              {accounts.filter(acc => sellerFormData.payoutMode === 'Cash' ? acc.type === 'CASH' : acc.type === 'BANK').map(acc => (
                                 <SelectItem key={acc.id} value={acc.id}>{acc.name}</SelectItem>
                               ))}
                             </SelectContent>
@@ -7067,9 +7073,7 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
         </div>
 
         <DrawerFooter>
-          <DrawerClose asChild>
-            <Button variant="outline">Close</Button>
-          </DrawerClose>
+          <Button variant="outline" onClick={onClose}>Close</Button>
         </DrawerFooter>
       </DrawerContent>
     </Drawer>
@@ -7174,22 +7178,25 @@ const CustomerForm = ({ customer, onSubmit, onCancel }) => {
 
 // Customer Payment Form Component
 const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
+  const initialDefault = accounts.filter(a => a.type === 'CASH')
   const [formData, setFormData] = useState({
     customerId: '',
     amount: '',
     paymentDate: new Date().toISOString().split('T')[0],
     paymentMode: 'Cash',
-    accountId: accounts.find(a => a.isDefault)?.id || accounts[0]?.id || '',
+    accountId: (initialDefault.find(a => a.isDefault) || initialDefault[0])?.id || '',
     reference: '',
     remark: ''
   })
 
   useEffect(() => {
     if (accounts.length > 0 && !formData.accountId) {
-      const defaultAccount = accounts.find(a => a.isDefault) || accounts[0]
-      setFormData(prev => ({ ...prev, accountId: defaultAccount?.id || '' }))
+      const wantType = formData.paymentMode === 'Cash' ? 'CASH' : 'BANK'
+      const eligible = accounts.filter(a => a.type === wantType)
+      const defaultAccount = eligible.find(a => a.isDefault) || eligible[0]
+      if (defaultAccount) setFormData(prev => ({ ...prev, accountId: defaultAccount.id }))
     }
-  }, [accounts])
+  }, [accounts, formData.paymentMode])
 
   const handleSubmit = (e) => {
     e.preventDefault()
@@ -7249,7 +7256,7 @@ const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <Label>Payment Mode *</Label>
-          <Select value={formData.paymentMode} onValueChange={v => setFormData({...formData, paymentMode: v})}>
+          <Select value={formData.paymentMode} onValueChange={v => setFormData({...formData, paymentMode: v, accountId: ''})}>
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
@@ -7270,7 +7277,7 @@ const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {accounts.map(a => (
+              {accounts.filter(a => formData.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK').map(a => (
                 <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
               ))}
             </SelectContent>
@@ -7343,8 +7350,8 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
   const isValid = Math.abs(unallocated) < 0.01 // Allow small floating point differences
 
   const handleAllocationChange = (saleId, value) => {
-    setAllocations(prev => prev.map(a => 
-      a.saleId === saleId ? { ...a, amount: parseFloat(value) || 0 } : a
+    setAllocations(prev => prev.map(a =>
+      a.saleId === saleId ? { ...a, amount: value } : a
     ))
   }
 
@@ -7363,7 +7370,7 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
   }
 
   const handleSave = () => {
-    onSave(allocations.map(a => ({ saleId: a.saleId, amount: a.amount })))
+    onSave(allocations.map(a => ({ saleId: a.saleId, amount: parseFloat(a.amount) || 0 })))
   }
 
   const handleCreateSaleSubmit = async (e) => {
@@ -7589,10 +7596,10 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
                       ₹{(sale.pendingBalance || 0).toLocaleString('en-IN')}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Input 
+                      <Input
                         type="number"
                         className="w-32 text-right"
-                        value={allocation?.amount || 0}
+                        value={allocation?.amount ?? ''}
                         onChange={e => handleAllocationChange(sale.id, e.target.value)}
                         max={allocation?.maxAmount || 0}
                         min={0}
@@ -7913,7 +7920,10 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
   const handleCreateAccount = async (e) => {
     e.preventDefault()
     try {
-      await apiCall('/accounts', 'POST', newAccount)
+      await apiCall('/accounts', 'POST', {
+        ...newAccount,
+        openingAmount: parseFloat(newAccount.openingAmount) || 0,
+      })
       await loadAccounts()
       setShowAccountDialog(false)
       setNewAccount({ name: '', type: 'BANK', openingAmount: 0, overdraftEnabled: false, scope: 'GLOBAL', societyId: '' })
@@ -7926,7 +7936,10 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
   const handleUpdateOpeningBalance = async (e) => {
     e.preventDefault()
     try {
-      await apiCall(`/accounts/${selectedAccountForOpening.id}/opening-balance`, 'PUT', openingBalance)
+      await apiCall(`/accounts/${selectedAccountForOpening.id}/opening-balance`, 'PUT', {
+        ...openingBalance,
+        openingAmount: parseFloat(openingBalance.openingAmount) || 0,
+      })
       await loadAccounts()
       onRefresh()
       setShowOpeningBalanceDialog(false)
@@ -8083,7 +8096,7 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
                     )}
                     <div>
                       <Label>Opening Balance</Label>
-                      <Input type="number" value={newAccount.openingAmount} onChange={e => setNewAccount({...newAccount, openingAmount: parseFloat(e.target.value) || 0})} />
+                      <Input type="number" value={newAccount.openingAmount} onChange={e => setNewAccount({...newAccount, openingAmount: e.target.value})} />
                     </div>
                     <div className="flex justify-end gap-2">
                       <Button type="button" variant="outline" onClick={() => setShowAccountDialog(false)}>Cancel</Button>
@@ -8193,7 +8206,7 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
           <form onSubmit={handleUpdateOpeningBalance} className="space-y-4">
             <div>
               <Label>Opening Amount</Label>
-              <Input type="number" value={openingBalance.openingAmount} onChange={e => setOpeningBalance({...openingBalance, openingAmount: parseFloat(e.target.value) || 0})} />
+              <Input type="number" value={openingBalance.openingAmount} onChange={e => setOpeningBalance({...openingBalance, openingAmount: e.target.value})} />
             </div>
             <div>
               <Label>Opening Date</Label>

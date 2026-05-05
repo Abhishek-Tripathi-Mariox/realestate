@@ -851,10 +851,11 @@ export default function ExpensesPage() {
                 <SelectContent>
                   {accounts
                     .filter(a => {
-                      if (formData.scope === 'COMPANY') {
-                        return a.scope === 'GLOBAL' || !a.societyId
-                      }
-                      return a.scope === 'GLOBAL' || !a.societyId || a.societyId === formData.societyId
+                      const scopeOk = formData.scope === 'COMPANY'
+                        ? (a.scope === 'GLOBAL' || !a.societyId)
+                        : (a.scope === 'GLOBAL' || !a.societyId || a.societyId === formData.societyId)
+                      const typeOk = formData.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK'
+                      return scopeOk && typeOk
                     })
                     .map(a => (
                       <SelectItem key={a.id} value={a.id}>
@@ -981,9 +982,9 @@ export default function ExpensesPage() {
               {/* Payment Mode */}
               <div>
                 <Label>Payment Mode</Label>
-                <Select 
-                  value={formData.paymentMode} 
-                  onValueChange={v => setFormData({...formData, paymentMode: v})}
+                <Select
+                  value={formData.paymentMode}
+                  onValueChange={v => setFormData({...formData, paymentMode: v, accountId: ''})}
                 >
                   <SelectTrigger>
                     <SelectValue />

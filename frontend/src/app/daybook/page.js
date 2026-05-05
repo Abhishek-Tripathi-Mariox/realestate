@@ -280,7 +280,10 @@ export default function DaybookPage() {
   const handleCreateAccount = async (e) => {
     e.preventDefault()
     try {
-      await apiCall('/accounts', 'POST', newAccount)
+      await apiCall('/accounts', 'POST', {
+        ...newAccount,
+        openingAmount: parseFloat(newAccount.openingAmount) || 0,
+      })
       await loadAccounts()
       setShowAccountDialog(false)
       setNewAccount({ name: '', type: 'BANK', openingAmount: 0, overdraftEnabled: false, scope: 'GLOBAL', societyId: '' })
@@ -293,7 +296,10 @@ export default function DaybookPage() {
   const handleUpdateOpeningBalance = async (e) => {
     e.preventDefault()
     try {
-      await apiCall(`/accounts/${selectedAccountForOpening.id}/opening-balance`, 'PUT', openingBalance)
+      await apiCall(`/accounts/${selectedAccountForOpening.id}/opening-balance`, 'PUT', {
+        ...openingBalance,
+        openingAmount: parseFloat(openingBalance.openingAmount) || 0,
+      })
       await loadAccounts()
       handleRefresh()
       setShowOpeningBalanceDialog(false)
@@ -529,7 +535,7 @@ export default function DaybookPage() {
                       )}
                       <div>
                         <Label>Opening Balance</Label>
-                        <Input type="number" value={newAccount.openingAmount} onChange={e => setNewAccount({...newAccount, openingAmount: parseFloat(e.target.value) || 0})} />
+                        <Input type="number" value={newAccount.openingAmount} onChange={e => setNewAccount({...newAccount, openingAmount: e.target.value})} />
                       </div>
                       <div className="flex justify-end gap-2">
                         <Button type="button" variant="outline" onClick={() => setShowAccountDialog(false)}>Cancel</Button>
@@ -631,7 +637,7 @@ export default function DaybookPage() {
             <form onSubmit={handleUpdateOpeningBalance} className="space-y-4">
               <div>
                 <Label>Opening Amount</Label>
-                <Input type="number" value={openingBalance.openingAmount} onChange={e => setOpeningBalance({...openingBalance, openingAmount: parseFloat(e.target.value) || 0})} />
+                <Input type="number" value={openingBalance.openingAmount} onChange={e => setOpeningBalance({...openingBalance, openingAmount: e.target.value})} />
               </div>
               <div>
                 <Label>Opening Date</Label>

@@ -22,10 +22,31 @@ const list = async (query) => {
     .limit(limit)
     .lean();
 
+  const paymentIds = payments.map(p => p.id);
+  const allocations = paymentIds.length
+    ? await PaymentAllocation.find({ paymentId: { $in: paymentIds } }).lean()
+    : [];
+  const allocatedByPayment = allocations.reduce((acc, a) => {
+    acc[a.paymentId] = (acc[a.paymentId] || 0) + (a.amount || 0);
+    return acc;
+  }, {});
+
   const enriched = await Promise.all(payments.map(async (p) => {
     const customer = await Customer.findOne({ id: p.customerId }).lean();
     const account = await Account.findOne({ id: p.accountId }).lean();
-    return { ...p, customerName: customer?.name || 'N/A', accountName: account?.name || 'N/A' };
+    const allocatedAmount = allocatedByPayment[p.id] || 0;
+    const unallocatedAmount = Math.max(0, (p.amount || 0) - allocatedAmount);
+    let status = 'PENDING';
+    if (allocatedAmount >= (p.amount || 0) - 0.01) status = 'FULLY_ALLOCATED';
+    else if (allocatedAmount > 0) status = 'PARTIALLY_ALLOCATED';
+    return {
+      ...p,
+      customerName: customer?.name || 'N/A',
+      accountName: account?.name || 'N/A',
+      allocatedAmount,
+      unallocatedAmount,
+      status,
+    };
   }));
 
   return {

@@ -1,7 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const { notDeleted } = require('../../utils/notDeleted');
 const {
-  Customer, Sale, CustomerPayment, PaymentAllocation, Inventory,
+  Customer, Sale, CustomerPayment, PaymentAllocation, Inventory, SalePaymentEntry,
 } = require('../../models');
 
 const stripId = ({ _id, ...rest }) => rest;
@@ -18,9 +18,18 @@ const list = async (query) => {
     CustomerPayment.find(notDeleted({ customerId: { $in: customerIds } })).lean(),
   ]);
   const paymentIds = payments.map(p => p.id);
-  const allocations = paymentIds.length
-    ? await PaymentAllocation.find({ paymentId: { $in: paymentIds } }).lean()
-    : [];
+  const saleIds = sales.map(s => s.id);
+  const [allocations, saleEntries] = await Promise.all([
+    paymentIds.length
+      ? PaymentAllocation.find({ paymentId: { $in: paymentIds } }).lean()
+      : Promise.resolve([]),
+    saleIds.length
+      ? SalePaymentEntry.find(notDeleted({
+        saleId: { $in: saleIds },
+        $or: [{ entryType: 'SALE_PAYMENT' }, { entryType: { $exists: false } }],
+      })).lean()
+      : Promise.resolve([]),
+  ]);
 
   const salesByCustomer = sales.reduce((acc, s) => {
     (acc[s.customerId] = acc[s.customerId] || []).push(s);
@@ -34,12 +43,21 @@ const list = async (query) => {
     acc[a.paymentId] = (acc[a.paymentId] || 0) + (a.amount || 0);
     return acc;
   }, {});
+  const saleEntryAmountBySale = saleEntries.reduce((acc, e) => {
+    acc[e.saleId] = (acc[e.saleId] || 0) + (e.amount || 0);
+    return acc;
+  }, {});
 
   return customers.map((c) => {
     const cSales = salesByCustomer[c.id] || [];
     const cPayments = paymentsByCustomer[c.id] || [];
     const totalSaleAmount = cSales.reduce((s, x) => s + (x.finalAmount || 0), 0);
-    const totalPaid = cPayments.reduce((s, x) => s + (x.amount || 0), 0);
+    // Pull from BOTH payment flows so the customer master reflects every rupee:
+    //  - customer-level payments (CustomerPayment)
+    //  - per-sale ledger payments (SalePaymentEntry, only for this customer's sales)
+    const customerPaymentTotal = cPayments.reduce((s, x) => s + (x.amount || 0), 0);
+    const saleLedgerPaymentTotal = cSales.reduce((s, x) => s + (saleEntryAmountBySale[x.id] || 0), 0);
+    const totalPaid = customerPaymentTotal + saleLedgerPaymentTotal;
     const unallocatedAmount = cPayments.reduce((s, p) => {
       const allocated = allocationsByPayment[p.id] || 0;
       const u = p.unallocatedAmount != null ? p.unallocatedAmount : ((p.amount || 0) - allocated);
@@ -87,8 +105,15 @@ const listSales = async (customerId) => {
   const sales = await Sale.find(notDeleted({ customerId })).lean();
   const enriched = await Promise.all(sales.map(async (s) => {
     const inventory = s.inventoryId ? await Inventory.findOne({ id: s.inventoryId }).lean() : null;
-    const allocations = await PaymentAllocation.find({ saleId: s.id }).lean();
-    const allocatedAmount = allocations.reduce((sum, a) => sum + (a.amount || 0), 0);
+    const [allocations, saleEntries] = await Promise.all([
+      PaymentAllocation.find({ saleId: s.id }).lean(),
+      SalePaymentEntry.find(notDeleted({
+        saleId: s.id,
+        $or: [{ entryType: 'SALE_PAYMENT' }, { entryType: { $exists: false } }],
+      })).lean(),
+    ]);
+    const allocatedAmount = allocations.reduce((sum, a) => sum + (a.amount || 0), 0)
+      + saleEntries.reduce((sum, e) => sum + (e.amount || 0), 0);
     return {
       ...s,
       inventoryNumber: inventory?.inventoryNumber || 'N/A',
@@ -103,9 +128,18 @@ const ledger = async (customerId) => {
   const sales = await Sale.find(notDeleted({ customerId })).lean();
   const payments = await CustomerPayment.find(notDeleted({ customerId })).lean();
   const paymentIds = payments.map(p => p.id);
-  const allocations = paymentIds.length
-    ? await PaymentAllocation.find({ paymentId: { $in: paymentIds } }).lean()
-    : [];
+  const saleIds = sales.map(s => s.id);
+  const [allocations, saleLedgerEntries] = await Promise.all([
+    paymentIds.length
+      ? PaymentAllocation.find({ paymentId: { $in: paymentIds } }).lean()
+      : Promise.resolve([]),
+    saleIds.length
+      ? SalePaymentEntry.find(notDeleted({
+        saleId: { $in: saleIds },
+        $or: [{ entryType: 'SALE_PAYMENT' }, { entryType: { $exists: false } }],
+      })).lean()
+      : Promise.resolve([]),
+  ]);
 
   const inventoryIds = [...new Set(sales.map(s => s.inventoryId).filter(Boolean))];
   const inventories = inventoryIds.length
@@ -114,8 +148,14 @@ const ledger = async (customerId) => {
   const inventoryById = Object.fromEntries(inventories.map(i => [i.id, i]));
   const saleById = Object.fromEntries(sales.map(s => [s.id, s]));
 
+  const saleLedgerAmountBySale = saleLedgerEntries.reduce((acc, e) => {
+    acc[e.saleId] = (acc[e.saleId] || 0) + (e.amount || 0);
+    return acc;
+  }, {});
+
   const saleEntries = sales.map(s => {
     const allocatedForSale = allocations.filter(a => a.saleId === s.id).reduce((sum, a) => sum + (a.amount || 0), 0);
+    const directlyPaidForSale = saleLedgerAmountBySale[s.id] || 0;
     const inv = s.inventoryId ? inventoryById[s.inventoryId] : null;
     return {
       id: `sale-${s.id}`,
@@ -124,7 +164,7 @@ const ledger = async (customerId) => {
       description: `Sale - ${inv?.inventoryNumber || 'Unit'}`,
       debit: s.finalAmount || 0,
       credit: 0,
-      pendingBalance: (s.finalAmount || 0) - allocatedForSale,
+      pendingBalance: (s.finalAmount || 0) - allocatedForSale - directlyPaidForSale,
     };
   });
 
@@ -151,7 +191,25 @@ const ledger = async (customerId) => {
     };
   });
 
-  const ledger = [...saleEntries, ...paymentEntries]
+  // Sale-ledger payments (from the per-sale Sale Ledger drawer) — surface them
+  // here so a customer's ledger view is complete regardless of which flow was
+  // used to record the payment.
+  const saleLedgerPaymentEntries = saleLedgerEntries.map(e => {
+    const sale = saleById[e.saleId];
+    const inv = sale?.inventoryId ? inventoryById[sale.inventoryId] : null;
+    return {
+      id: `sale-pay-${e.id}`,
+      date: e.paymentDate || e.createdAt,
+      type: 'PAYMENT',
+      description: `Payment via ${e.paymentMode || 'Cash'}${e.referenceNo ? ` (${e.referenceNo})` : ''} — ${inv?.inventoryNumber || 'Unit'}`,
+      debit: 0,
+      credit: e.amount || 0,
+      allocationDetails: [{ inventoryNumber: inv?.inventoryNumber || 'N/A', amount: e.amount || 0 }],
+      status: 'FULLY_ALLOCATED',
+    };
+  });
+
+  const ledger = [...saleEntries, ...paymentEntries, ...saleLedgerPaymentEntries]
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 
   let running = 0;
@@ -161,8 +219,10 @@ const ledger = async (customerId) => {
   }
 
   const totalSales = sales.reduce((s, x) => s + (x.finalAmount || 0), 0);
-  const totalPayments = payments.reduce((s, x) => s + (x.amount || 0), 0);
-  const totalAllocated = allocations.reduce((s, x) => s + (x.amount || 0), 0);
+  const totalCustomerPayments = payments.reduce((s, x) => s + (x.amount || 0), 0);
+  const totalSaleLedgerPayments = saleLedgerEntries.reduce((s, x) => s + (x.amount || 0), 0);
+  const totalPayments = totalCustomerPayments + totalSaleLedgerPayments;
+  const totalAllocated = allocations.reduce((s, x) => s + (x.amount || 0), 0) + totalSaleLedgerPayments;
   const unallocatedPayments = payments.reduce((s, x) => s + (x.unallocatedAmount != null ? x.unallocatedAmount : 0), 0);
 
   return {

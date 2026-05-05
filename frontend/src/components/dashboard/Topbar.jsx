@@ -13,13 +13,13 @@ export function Topbar({ user, search, onSearchChange, searchPlaceholder = 'Sear
   }
 
   return (
-    <header className="sticky top-0 z-30 backdrop-blur-xl bg-white/80 border-b border-slate-200/70">
+    <header className="sticky top-0 z-30 bg-white border-b border-slate-200/70">
       <div className="px-3 sm:px-6 py-3 flex items-center gap-2 sm:gap-4">
         {/* Hamburger (mobile) */}
         <button
           type="button"
           onClick={onMenuClick}
-          className="lg:hidden w-10 h-10 rounded-full bg-slate-100/70 hover:bg-slate-200/70 flex items-center justify-center transition-colors shrink-0"
+          className="lg:hidden w-10 h-10 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center transition-colors shrink-0"
           aria-label="Open menu"
         >
           <Menu className="w-5 h-5 text-slate-600" />
@@ -33,7 +33,7 @@ export function Topbar({ user, search, onSearchChange, searchPlaceholder = 'Sear
             value={value}
             onChange={(e) => handleChange(e.target.value)}
             placeholder={searchPlaceholder}
-            className="w-full h-10 pl-11 pr-4 rounded-full bg-slate-100/70 border border-transparent placeholder:text-slate-400 text-sm text-slate-700 outline-none transition-all focus:bg-white focus:border-slate-200 focus:ring-2 focus:ring-primary/20"
+            className="w-full h-10 pl-11 pr-4 rounded-full bg-slate-100 border border-transparent placeholder:text-slate-400 text-sm text-slate-700 outline-none transition-all focus:bg-white focus:border-slate-200 focus:ring-2 focus:ring-primary/20"
           />
         </div>
 
@@ -41,7 +41,7 @@ export function Topbar({ user, search, onSearchChange, searchPlaceholder = 'Sear
           {/* Notification bell */}
           <button
             type="button"
-            className="relative w-10 h-10 rounded-full bg-slate-100/70 hover:bg-slate-200/70 flex items-center justify-center transition-colors"
+            className="relative w-10 h-10 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center transition-colors"
             aria-label="Notifications"
           >
             <Bell className="w-4 h-4 text-slate-600" />

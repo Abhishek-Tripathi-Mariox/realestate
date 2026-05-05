@@ -238,7 +238,7 @@ code {
         }
     }
 
-    /* Auth screen background — plain white surface */
+    /* Auth screen background — plain white */
     .auth-bg {
         background-color: #ffffff;
     }
@@ -247,7 +247,7 @@ code {
         background-image: none;
     }
 
-    /* App surface — kept as plain white per design preference */
+    /* App surface — plain white */
     .estate-pattern {
         background-color: #ffffff;
     }

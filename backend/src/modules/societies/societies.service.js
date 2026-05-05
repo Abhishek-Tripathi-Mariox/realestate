@@ -7,15 +7,32 @@ const {
 
 const stripId = ({ _id, ...rest }) => rest;
 
+const validateName = async (rawName, excludeId = null) => {
+  const name = (rawName || '').trim();
+  if (name.length < 2) return { error: 'Society name must be at least 2 characters', status: 400 };
+  if (name.length > 100) return { error: 'Society name must be 100 characters or less', status: 400 };
+
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const query = { name: { $regex: `^${escaped}$`, $options: 'i' } };
+  if (excludeId) query.id = { $ne: excludeId };
+  const existing = await Society.findOne(query).lean();
+  if (existing) return { error: 'A society with this name already exists', status: 409 };
+
+  return { name };
+};
+
 const list = async () => {
   const societies = await Society.find({}).lean();
   return societies.map(stripId);
 };
 
 const create = async (body) => {
+  const nameCheck = await validateName(body.name);
+  if (nameCheck.error) return nameCheck;
+
   const society = {
     id: uuidv4(),
-    name: body.name,
+    name: nameCheck.name,
     location: body.location,
     totalArea: body.totalArea,
     startDate: body.startDate,
@@ -28,7 +45,14 @@ const create = async (body) => {
 };
 
 const update = async (id, body) => {
-  await Society.updateOne({ id }, { $set: { ...body, updatedAt: new Date() } });
+  const patch = { ...body, updatedAt: new Date() };
+  if (body.name !== undefined) {
+    const nameCheck = await validateName(body.name, id);
+    if (nameCheck.error) return nameCheck;
+    patch.name = nameCheck.name;
+  }
+
+  await Society.updateOne({ id }, { $set: patch });
   const updated = await Society.findOne({ id }).lean();
   if (!updated) return null;
   return stripId(updated);

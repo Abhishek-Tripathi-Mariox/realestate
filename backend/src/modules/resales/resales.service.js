@@ -3,7 +3,7 @@ const { notDeleted } = require('../../utils/notDeleted');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   ResaleDeal, ResaleBuyerPayment, ResaleSellerPayout, Account, Transaction,
-  Inventory, InventoryOwnershipHistory,
+  Inventory, InventoryOwnershipHistory, Sale,
 } = require('../../models');
 
 const stripId = ({ _id, ...rest }) => rest;
@@ -12,7 +12,49 @@ const list = async (query) => {
   const filter = notDeleted();
   if (query.societyId) filter.societyId = query.societyId;
   const deals = await ResaleDeal.find(filter).lean();
-  return deals.map(stripId);
+
+  const inventoryIds = [...new Set(deals.map(d => d.inventoryId).filter(Boolean))];
+  const inventories = inventoryIds.length
+    ? await Inventory.find({ id: { $in: inventoryIds } }).lean()
+    : [];
+  const inventoryById = Object.fromEntries(inventories.map(i => [i.id, i]));
+
+  const dealIds = deals.map(d => d.id);
+  const [buyerPayments, sellerPayouts] = await Promise.all([
+    dealIds.length
+      ? ResaleBuyerPayment.find(notDeleted({ dealId: { $in: dealIds } })).lean()
+      : Promise.resolve([]),
+    dealIds.length
+      ? ResaleSellerPayout.find(notDeleted({ dealId: { $in: dealIds } })).lean()
+      : Promise.resolve([]),
+  ]);
+  const buyerPaidByDeal = buyerPayments.reduce((acc, p) => {
+    acc[p.dealId] = (acc[p.dealId] || 0) + (p.amount || 0);
+    return acc;
+  }, {});
+  const sellerPaidByDeal = sellerPayouts.reduce((acc, p) => {
+    acc[p.dealId] = (acc[p.dealId] || 0) + (p.amount || 0);
+    return acc;
+  }, {});
+
+  return deals.map((d) => {
+    const inv = d.inventoryId ? inventoryById[d.inventoryId] : null;
+    const buyerAmount = d.buyerPurchaseAmount || d.resalePrice || 0;
+    const sellerAmount = d.sellerPayoutAmount || Math.max(0, (d.resalePrice || 0) - (d.companyCommission || 0));
+    const buyerPaid = buyerPaidByDeal[d.id] || 0;
+    const sellerPaid = sellerPaidByDeal[d.id] || 0;
+    const buyerStatus = buyerPaid <= 0 ? 'PENDING' : (buyerPaid >= buyerAmount - 0.01 ? 'PAID' : 'PARTIAL');
+    const sellerStatus = sellerPaid <= 0 ? 'PENDING' : (sellerPaid >= sellerAmount - 0.01 ? 'PAID' : 'PARTIAL');
+    return {
+      ...stripId(d),
+      inventoryName: inv?.inventoryNumber || '-',
+      inventoryNumber: inv?.inventoryNumber || '-',
+      buyerPaid,
+      sellerPaid,
+      buyerStatus,
+      sellerStatus,
+    };
+  });
 };
 
 const create = async (body) => {
@@ -22,6 +64,26 @@ const create = async (body) => {
   const otherCharges = Number(body.otherCharges) || 0;
   // companyCommission defaults to total of all charge fields when not given.
   const companyCommission = Number(body.companyCommission ?? (transferCharges + brokerage + otherCharges)) || 0;
+
+  // Derive seller/buyer amounts so the resale-payments drawer can read them
+  // directly without recomputing. Falls back to the original Sale record if
+  // the client didn't supply originalSalePrice / originalSalePaid.
+  let originalSalePrice = Number(body.originalSalePrice) || 0;
+  let originalSalePaid = Number(body.originalSalePaid) || 0;
+  if (body.originalSaleId && (!originalSalePrice || !originalSalePaid)) {
+    const originalSale = await Sale.findOne({ id: body.originalSaleId }).lean();
+    if (originalSale) {
+      if (!originalSalePrice) originalSalePrice = Number(originalSale.finalAmount) || 0;
+      if (!originalSalePaid) originalSalePaid = Number(originalSale.amountPaid) || 0;
+    }
+  }
+
+  const buyerPurchaseAmount = resalePrice;
+  const grossProfit = resalePrice - originalSalePrice;
+  const netProfit = grossProfit - companyCommission;
+  const sellerPayoutPrincipal = originalSalePaid;
+  const sellerPayoutProfit = netProfit;
+  const sellerPayoutAmount = Math.max(0, sellerPayoutPrincipal + sellerPayoutProfit);
 
   const deal = {
     id: uuidv4(),
@@ -39,6 +101,14 @@ const create = async (body) => {
     otherCharges,
     chargesNotes: body.chargesNotes || '',
     companyCommission,
+    originalSaleId: body.originalSaleId || null,
+    originalSalePrice,
+    originalSalePaid,
+    buyerPurchaseAmount,
+    sellerPayoutPrincipal,
+    sellerPayoutProfit,
+    sellerPayoutAmount,
+    netProfit,
     dealDate: body.dealDate || null,
     notes: body.notes || '',
     status: 'Active',

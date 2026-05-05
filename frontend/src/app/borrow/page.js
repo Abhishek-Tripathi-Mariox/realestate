@@ -504,63 +504,67 @@ export default function BorrowLoansPage() {
           </div>
         </div>
         
-        {/* Summary Cards - Combined View */}
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-          {/* Borrow Summary */}
-          <Card className="bg-purple-50 border-purple-200">
-            <CardContent className="pt-4">
-              <div className="text-center">
-                <p className="text-xs text-purple-600 font-medium">Total Borrowed</p>
-                <p className="text-xl font-bold text-purple-700">₹{fmt(totalBorrowed)}</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="bg-purple-50 border-purple-200">
-            <CardContent className="pt-4">
-              <div className="text-center">
-                <p className="text-xs text-purple-600 font-medium">Borrow Repaid</p>
-                <p className="text-xl font-bold text-green-600">₹{fmt(totalBorrowRepaid)}</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className={`${borrowOutstanding > 0 ? 'bg-orange-50 border-orange-200' : 'bg-green-50 border-green-200'}`}>
-            <CardContent className="pt-4">
-              <div className="text-center">
-                <p className="text-xs text-gray-600 font-medium">We Owe (Borrow)</p>
-                <p className={`text-xl font-bold ${borrowOutstanding > 0 ? 'text-orange-600' : 'text-green-600'}`}>
-                  ₹{fmt(borrowOutstanding)}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-          
-          {/* Give Summary */}
-          <Card className="bg-blue-50 border-blue-200">
-            <CardContent className="pt-4">
-              <div className="text-center">
-                <p className="text-xs text-blue-600 font-medium">Total Given</p>
-                <p className="text-xl font-bold text-blue-700">₹{fmt(totalGiven)}</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="bg-blue-50 border-blue-200">
-            <CardContent className="pt-4">
-              <div className="text-center">
-                <p className="text-xs text-blue-600 font-medium">Given Received</p>
-                <p className="text-xl font-bold text-green-600">₹{fmt(totalGivenReceived)}</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className={`${givenOutstanding > 0 ? 'bg-yellow-50 border-yellow-200' : 'bg-green-50 border-green-200'}`}>
-            <CardContent className="pt-4">
-              <div className="text-center">
-                <p className="text-xs text-gray-600 font-medium">They Owe (Given)</p>
-                <p className={`text-xl font-bold ${givenOutstanding > 0 ? 'text-yellow-600' : 'text-green-600'}`}>
-                  ₹{fmt(givenOutstanding)}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
+        {/* Summary Cards - mode-specific */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {loanMode === 'BORROWED' ? (
+            <>
+              <Card className="bg-purple-50 border-purple-200">
+                <CardContent className="pt-4">
+                  <div className="text-center">
+                    <p className="text-xs text-purple-600 font-medium">Total Borrowed</p>
+                    <p className="text-xl font-bold text-purple-700">₹{fmt(totalBorrowed)}</p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="bg-purple-50 border-purple-200">
+                <CardContent className="pt-4">
+                  <div className="text-center">
+                    <p className="text-xs text-purple-600 font-medium">Borrow Repaid</p>
+                    <p className="text-xl font-bold text-green-600">₹{fmt(totalBorrowRepaid)}</p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className={`${borrowOutstanding > 0 ? 'bg-orange-50 border-orange-200' : 'bg-green-50 border-green-200'}`}>
+                <CardContent className="pt-4">
+                  <div className="text-center">
+                    <p className="text-xs text-gray-600 font-medium">We Owe (Borrow)</p>
+                    <p className={`text-xl font-bold ${borrowOutstanding > 0 ? 'text-orange-600' : 'text-green-600'}`}>
+                      ₹{fmt(borrowOutstanding)}
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+            </>
+          ) : (
+            <>
+              <Card className="bg-blue-50 border-blue-200">
+                <CardContent className="pt-4">
+                  <div className="text-center">
+                    <p className="text-xs text-blue-600 font-medium">Total Given</p>
+                    <p className="text-xl font-bold text-blue-700">₹{fmt(totalGiven)}</p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="bg-blue-50 border-blue-200">
+                <CardContent className="pt-4">
+                  <div className="text-center">
+                    <p className="text-xs text-blue-600 font-medium">Given Received</p>
+                    <p className="text-xl font-bold text-green-600">₹{fmt(totalGivenReceived)}</p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className={`${givenOutstanding > 0 ? 'bg-yellow-50 border-yellow-200' : 'bg-green-50 border-green-200'}`}>
+                <CardContent className="pt-4">
+                  <div className="text-center">
+                    <p className="text-xs text-gray-600 font-medium">They Owe (Given)</p>
+                    <p className={`text-xl font-bold ${givenOutstanding > 0 ? 'text-yellow-600' : 'text-green-600'}`}>
+                      ₹{fmt(givenOutstanding)}
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+            </>
+          )}
         </div>
 
         {/* Mode-specific header */}
@@ -652,15 +656,18 @@ export default function BorrowLoansPage() {
                                 <SelectValue placeholder="Select account" />
                               </SelectTrigger>
                               <SelectContent>
-                                {accounts.map(a => (
-                                  <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
-                                ))}
+                                {accounts
+                                  .filter(a => a.scope !== 'SOCIETY' && !a.societyId)
+                                  .filter(a => loanForm.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK')
+                                  .map(a => (
+                                    <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                                  ))}
                               </SelectContent>
                             </Select>
                           </div>
                           <div>
                             <Label>Payment Mode</Label>
-                            <Select value={loanForm.paymentMode} onValueChange={v => setLoanForm({...loanForm, paymentMode: v})}>
+                            <Select value={loanForm.paymentMode} onValueChange={v => setLoanForm({...loanForm, paymentMode: v, accountId: ''})}>
                               <SelectTrigger>
                                 <SelectValue />
                               </SelectTrigger>
@@ -1036,15 +1043,18 @@ export default function BorrowLoansPage() {
                               <SelectValue placeholder="Account" />
                             </SelectTrigger>
                             <SelectContent>
-                              {accounts.map(a => (
-                                <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
-                              ))}
+                              {accounts
+                                .filter(a => a.scope !== 'SOCIETY' && !a.societyId)
+                                .filter(a => repaymentForm.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK')
+                                .map(a => (
+                                  <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                                ))}
                             </SelectContent>
                           </Select>
                         </div>
                         <div>
                           <Label className="text-xs">Mode</Label>
-                          <Select value={repaymentForm.paymentMode} onValueChange={v => setRepaymentForm({...repaymentForm, paymentMode: v})}>
+                          <Select value={repaymentForm.paymentMode} onValueChange={v => setRepaymentForm({...repaymentForm, paymentMode: v, accountId: ''})}>
                             <SelectTrigger>
                               <SelectValue />
                             </SelectTrigger>

@@ -78,7 +78,7 @@ export function Sidebar({ user, onLogout, mobileOpen = false, onMobileClose }) {
               href={it.href}
               onClick={() => onMobileClose && onMobileClose()}
               className={cn(
-                'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200',
+                'group relative flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200',
                 active
                   ? 'gradient-bg text-white shadow-md'
                   : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'

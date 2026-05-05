@@ -173,8 +173,8 @@ const createLoan = async (body, userId) => {
   if (!body.accountId) return { error: 'Account is required', status: 400 };
   const account = await Account.findOne(notDeleted({ id: body.accountId })).lean();
   if (!account) return { error: 'Account not found', status: 404 };
-  if (account.scope && account.scope !== 'COMPANY') {
-    return { error: 'Account must be a company-level account for loans', status: 400 };
+  if (account.scope === 'SOCIETY' || account.societyId) {
+    return { error: 'Account must be a global (non-society) account for loans', status: 400 };
   }
 
   const paymentMode = body.paymentMode || 'Bank Transfer';
@@ -291,8 +291,8 @@ const createRepayment = async (loanId, body, userId) => {
   if (!body.accountId) return { error: 'Account is required', status: 400 };
   const account = await Account.findOne(notDeleted({ id: body.accountId })).lean();
   if (!account) return { error: 'Account not found', status: 404 };
-  if (account.scope && account.scope !== 'COMPANY') {
-    return { error: 'Account must be a company-level account for loan repayments', status: 400 };
+  if (account.scope === 'SOCIETY' || account.societyId) {
+    return { error: 'Account must be a global (non-society) account for loan repayments', status: 400 };
   }
 
   const paymentMode = body.paymentMode || 'Cash';
