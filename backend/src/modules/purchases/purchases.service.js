@@ -9,7 +9,15 @@ const stripId = ({ _id, ...rest }) => rest;
 
 const listForSociety = async (societyId) => {
   const purchases = await Purchase.find(notDeleted({ societyId })).lean();
-  return purchases.map(stripId);
+  return purchases.map((p) => {
+    const dealAmount = p.dealAmount ?? p.totalCost ?? 0;
+    const totalPaid = p.amountPaid || 0;
+    return {
+      ...stripId(p),
+      totalPaid,
+      balance: dealAmount - totalPaid,
+    };
+  });
 };
 
 const create = async (societyId, body) => {

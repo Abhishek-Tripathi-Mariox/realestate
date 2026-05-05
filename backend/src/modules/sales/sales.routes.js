@@ -16,6 +16,7 @@ flatRouter.get('/:saleId/payments', verifyToken, ctrl.listPayments);
 flatRouter.post('/:saleId/payments', verifyToken, ctrl.addPayment);
 flatRouter.get('/:saleId/ledger', verifyToken, ctrl.listLedger);
 flatRouter.post('/:saleId/ledger', verifyToken, ctrl.addLedgerEntry);
+flatRouter.get('/:id', verifyToken, ctrl.getById);
 flatRouter.put('/:id', verifyToken, ctrl.update);
 flatRouter.delete('/:id', verifyToken, ctrl.remove);
 

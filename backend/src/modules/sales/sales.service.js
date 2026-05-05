@@ -13,12 +13,16 @@ const listForSociety = async (societyId) => {
   const enrichedSales = await Promise.all(sales.map(async (sale) => {
     const inventory = await Inventory.findOne({ id: sale.inventoryId }).lean();
     const customer = sale.customerId ? await Customer.findOne({ id: sale.customerId }).lean() : null;
+    const totalPaid = sale.amountPaid || 0;
     return {
       ...sale,
       inventoryNumber: inventory?.inventoryNumber || 'N/A',
       inventoryType: inventory?.type || 'N/A',
       phase: inventory?.phase || 'N/A',
       customerName: customer?.name || sale.buyerName || 'N/A',
+      customerPhone: customer?.phone || sale.buyerContact || '',
+      totalPaid,
+      balance: (sale.finalAmount || 0) - totalPaid,
     };
   }));
 
@@ -63,6 +67,46 @@ const create = async (societyId, body, userId) => {
   );
 
   return sale;
+};
+
+const getById = async (id) => {
+  const sale = await Sale.findOne(notDeleted({ id })).lean();
+  if (!sale) return null;
+
+  const inventory = sale.inventoryId
+    ? await Inventory.findOne({ id: sale.inventoryId }).lean()
+    : null;
+  const customer = sale.customerId
+    ? await Customer.findOne({ id: sale.customerId }).lean()
+    : null;
+
+  const paymentEntries = await SalePaymentEntry
+    .find(notDeleted({
+      saleId: id,
+      $or: [{ entryType: 'SALE_PAYMENT' }, { entryType: { $exists: false } }],
+    }))
+    .sort({ paymentDate: -1 })
+    .lean();
+
+  const payments = await Promise.all(paymentEntries.map(async (p) => {
+    const account = p.accountId ? await Account.findOne({ id: p.accountId }).lean() : null;
+    return { ...stripId(p), accountName: account?.name || '-' };
+  }));
+
+  const totalPaid = sale.amountPaid || 0;
+  const balance = (sale.finalAmount || 0) - totalPaid;
+
+  return {
+    ...stripId(sale),
+    inventory: inventory ? stripId(inventory) : null,
+    inventoryNumber: inventory?.inventoryNumber || 'N/A',
+    customerName: customer?.name || sale.buyerName || 'N/A',
+    customerPhone: customer?.phone || sale.buyerContact || '',
+    customerAddress: customer?.address || '',
+    totalPaid,
+    balance,
+    payments,
+  };
 };
 
 const update = async (id, body) => {
@@ -260,7 +304,7 @@ const assignCustomer = async (saleId, customerId) => {
 };
 
 module.exports = {
-  listForSociety, create, update, remove,
+  listForSociety, create, getById, update, remove,
   listPayments, addPayment,
   listLedger, addLedgerEntry, deleteSalePayment,
   listUnassigned, assignCustomer,

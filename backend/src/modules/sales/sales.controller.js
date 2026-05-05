@@ -14,6 +14,12 @@ const create = asyncHandler(async (req, res) => {
   res.json(await service.create(req.params.societyId, req.body, req.user.userId));
 });
 
+const getById = asyncHandler(async (req, res) => {
+  const sale = await service.getById(req.params.id);
+  if (!sale) return res.status(404).json({ error: 'Sale not found' });
+  res.json(sale);
+});
+
 const update = asyncHandler(async (req, res) => {
   const updated = await service.update(req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Sale not found' });
@@ -54,7 +60,7 @@ const assignCustomer = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  listForSociety, create, update, remove,
+  listForSociety, create, getById, update, remove,
   listPayments, addPayment,
   listLedger, addLedgerEntry, deleteSalePayment,
   listUnassigned, assignCustomer,

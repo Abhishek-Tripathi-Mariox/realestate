@@ -10,7 +10,50 @@ const list = async (query) => {
   const filter = notDeleted();
   if (query.societyId) filter.societyId = query.societyId;
   const customers = await Customer.find(filter).lean();
-  return customers.map(stripId);
+  if (customers.length === 0) return [];
+
+  const customerIds = customers.map(c => c.id);
+  const [sales, payments] = await Promise.all([
+    Sale.find(notDeleted({ customerId: { $in: customerIds } })).lean(),
+    CustomerPayment.find(notDeleted({ customerId: { $in: customerIds } })).lean(),
+  ]);
+  const paymentIds = payments.map(p => p.id);
+  const allocations = paymentIds.length
+    ? await PaymentAllocation.find({ paymentId: { $in: paymentIds } }).lean()
+    : [];
+
+  const salesByCustomer = sales.reduce((acc, s) => {
+    (acc[s.customerId] = acc[s.customerId] || []).push(s);
+    return acc;
+  }, {});
+  const paymentsByCustomer = payments.reduce((acc, p) => {
+    (acc[p.customerId] = acc[p.customerId] || []).push(p);
+    return acc;
+  }, {});
+  const allocationsByPayment = allocations.reduce((acc, a) => {
+    acc[a.paymentId] = (acc[a.paymentId] || 0) + (a.amount || 0);
+    return acc;
+  }, {});
+
+  return customers.map((c) => {
+    const cSales = salesByCustomer[c.id] || [];
+    const cPayments = paymentsByCustomer[c.id] || [];
+    const totalSaleAmount = cSales.reduce((s, x) => s + (x.finalAmount || 0), 0);
+    const totalPaid = cPayments.reduce((s, x) => s + (x.amount || 0), 0);
+    const unallocatedAmount = cPayments.reduce((s, p) => {
+      const allocated = allocationsByPayment[p.id] || 0;
+      const u = p.unallocatedAmount != null ? p.unallocatedAmount : ((p.amount || 0) - allocated);
+      return s + Math.max(0, u);
+    }, 0);
+    return {
+      ...stripId(c),
+      salesCount: cSales.length,
+      totalSaleAmount,
+      totalPaid,
+      balance: totalSaleAmount - totalPaid,
+      unallocatedAmount,
+    };
+  });
 };
 
 const create = async (body, userId) => {
