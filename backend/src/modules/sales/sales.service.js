@@ -318,6 +318,37 @@ const addLedgerEntry = async (saleId, body, userId) => {
   const entryType = body.entryType || 'SALE_PAYMENT';
   const amount = parseFloat(body.amount) || 0;
 
+  if (amount <= 0) {
+    return { error: 'Amount must be greater than zero', status: 400 };
+  }
+
+  // Block SALE_PAYMENT credits that would push the net running balance past
+  // the sale's final amount — protects against typos like adding an extra
+  if (entryType === 'SALE_PAYMENT') {
+    const existingEntries = await SalePaymentEntry
+      .find(notDeleted({ saleId }))
+      .lean();
+    const allocations = await PaymentAllocation.find({ saleId }).lean();
+    const currentNet = existingEntries.reduce((sum, e) => {
+      const t = e.entryType || 'SALE_PAYMENT';
+      return sum + (t === 'SALE_PAYMENT' ? (e.amount || 0) : -(e.amount || 0));
+    }, 0) + allocations.reduce((sum, a) => sum + (a.amount || 0), 0);
+    const remaining = (sale.finalAmount || 0) - currentNet;
+    if (remaining <= 0) {
+      return {
+        error: 'Sale is already fully paid — no further sale payments can be added.',
+        status: 400,
+      };
+    }
+    if (amount > remaining) {
+      const fmt = (n) => `₹${(n || 0).toLocaleString('en-IN')}`;
+      return {
+        error: `Amount ${fmt(amount)} exceeds remaining Sale Due of ${fmt(remaining)}.`,
+        status: 400,
+      };
+    }
+  }
+
   const entry = {
     id: uuidv4(),
     saleId,
