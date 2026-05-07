@@ -22,6 +22,19 @@ const listForSociety = async (societyId) => {
     return acc;
   }, {});
 
+  // Recompute the net per-sale ledger balance directly from SalePaymentEntry so
+  // legacy rows (where Sale.amountPaid only tracked credits, not withdrawals or
+  // profit payouts) self-heal here without a migration.
+  const ledgerEntries = saleIds.length
+    ? await SalePaymentEntry.find(notDeleted({ saleId: { $in: saleIds } })).lean()
+    : [];
+  const ledgerNetBySale = ledgerEntries.reduce((acc, e) => {
+    const type = e.entryType || 'SALE_PAYMENT';
+    const delta = type === 'SALE_PAYMENT' ? (e.amount || 0) : -(e.amount || 0);
+    acc[e.saleId] = (acc[e.saleId] || 0) + delta;
+    return acc;
+  }, {});
+
   // Self-heal older sales whose resale deal predates the TRANSFERRED-marking
   // logic: if a non-deleted ResaleDeal points at this sale, treat it as
   // transferred even if the Sale row wasn't updated at the time.
@@ -33,7 +46,7 @@ const listForSociety = async (societyId) => {
   const enrichedSales = await Promise.all(sales.map(async (sale) => {
     const inventory = await Inventory.findOne({ id: sale.inventoryId }).lean();
     const customer = sale.customerId ? await Customer.findOne({ id: sale.customerId }).lean() : null;
-    const totalPaid = (sale.amountPaid || 0) + (allocatedBySale[sale.id] || 0);
+    const totalPaid = (ledgerNetBySale[sale.id] || 0) + (allocatedBySale[sale.id] || 0);
     const linkedDeal = dealBySaleId[sale.id];
     const isTransferred = sale.status === 'TRANSFERRED' || Boolean(linkedDeal);
     if (linkedDeal) {
@@ -130,7 +143,9 @@ const getById = async (id) => {
   const paymentEntries = await SalePaymentEntry
     .find(notDeleted({
       saleId: id,
-      $or: [{ entryType: 'SALE_PAYMENT' }, { entryType: { $exists: false } }],
+      // $nin (not $or) so the entryType filter isn't overwritten by
+      // notDeleted()'s own $or via object-spread last-key-wins.
+      entryType: { $nin: ['WITHDRAWAL', 'PROFIT_PAYOUT'] },
     }))
     .sort({ paymentDate: -1 })
     .lean();
@@ -142,7 +157,16 @@ const getById = async (id) => {
 
   const allocations = await PaymentAllocation.find({ saleId: id }).lean();
   const allocatedTotal = allocations.reduce((sum, a) => sum + (a.amount || 0), 0);
-  const totalPaid = (sale.amountPaid || 0) + allocatedTotal;
+
+  // Recompute net ledger balance from entries (credits minus withdrawals /
+  // profit payouts) so legacy rows with stale Sale.amountPaid self-heal.
+  const allEntries = await SalePaymentEntry.find(notDeleted({ saleId: id })).lean();
+  const ledgerNet = allEntries.reduce((sum, e) => {
+    const type = e.entryType || 'SALE_PAYMENT';
+    return sum + (type === 'SALE_PAYMENT' ? (e.amount || 0) : -(e.amount || 0));
+  }, 0);
+
+  const totalPaid = ledgerNet + allocatedTotal;
   const balance = sale.status === 'TRANSFERRED' ? 0 : (sale.finalAmount || 0) - totalPaid;
 
   return {
@@ -311,11 +335,15 @@ const addLedgerEntry = async (saleId, body, userId) => {
 
   await SalePaymentEntry.create(entry);
 
-  if (entryType === 'SALE_PAYMENT') {
-    const newAmountPaid = (sale.amountPaid || 0) + amount;
-    const paymentStatus = newAmountPaid >= sale.finalAmount ? 'Paid' : 'Partial';
-    await Sale.updateOne({ id: saleId }, { $set: { amountPaid: newAmountPaid, paymentStatus } });
-  }
+  // amountPaid stores the NET ledger balance: credits in minus debits out.
+  // SALE_PAYMENT increases it; WITHDRAWAL / PROFIT_PAYOUT decrease it so the
+  // Sales tab's totalPaid stays in sync with the Sale Ledger's running balance.
+  const delta = entryType === 'SALE_PAYMENT' ? amount : -amount;
+  const newAmountPaid = (sale.amountPaid || 0) + delta;
+  const paymentStatus = newAmountPaid <= 0
+    ? 'Pending'
+    : (newAmountPaid >= sale.finalAmount ? 'Paid' : 'Partial');
+  await Sale.updateOne({ id: saleId }, { $set: { amountPaid: newAmountPaid, paymentStatus } });
 
   const direction = entryType === 'SALE_PAYMENT' ? 'IN' : 'OUT';
   await createTransaction({
@@ -344,13 +372,17 @@ const deleteSalePayment = async (id, userId) => {
     await createReversalTransaction(originalTxn, userId, 'Sale ledger entry deleted');
   }
 
-  if ((entry.entryType || 'SALE_PAYMENT') === 'SALE_PAYMENT') {
-    const sale = await Sale.findOne({ id: entry.saleId }).lean();
-    if (sale) {
-      const newAmountPaid = Math.max(0, (sale.amountPaid || 0) - (entry.amount || 0));
-      const paymentStatus = newAmountPaid <= 0 ? 'Pending' : (newAmountPaid >= sale.finalAmount ? 'Paid' : 'Partial');
-      await Sale.updateOne({ id: entry.saleId }, { $set: { amountPaid: newAmountPaid, paymentStatus } });
-    }
+  // Reverse the original delta on the sale's net amountPaid: SALE_PAYMENT
+  // additions get subtracted; WITHDRAWAL / PROFIT_PAYOUT debits get added back.
+  const sale = await Sale.findOne({ id: entry.saleId }).lean();
+  if (sale) {
+    const entryType = entry.entryType || 'SALE_PAYMENT';
+    const reverseDelta = entryType === 'SALE_PAYMENT' ? -(entry.amount || 0) : (entry.amount || 0);
+    const newAmountPaid = (sale.amountPaid || 0) + reverseDelta;
+    const paymentStatus = newAmountPaid <= 0
+      ? 'Pending'
+      : (newAmountPaid >= sale.finalAmount ? 'Paid' : 'Partial');
+    await Sale.updateOne({ id: entry.saleId }, { $set: { amountPaid: newAmountPaid, paymentStatus } });
   }
 
   await SalePaymentEntry.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });

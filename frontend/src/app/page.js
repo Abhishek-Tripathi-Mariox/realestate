@@ -551,13 +551,15 @@ const App = () => {
         // Use new ledger endpoint for sales
         await apiCall(`/sales/${ledgerItem.id}/ledger`, 'POST', formData)
       }
-      
+
       await openLedger(ledgerType, ledgerItem)
       await loadSocietyData()
-      
+
       toast({ title: 'Success', description: 'Entry added successfully' })
+      return true
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
+      return false
     }
   }
 
@@ -4333,6 +4335,7 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
     accountId: '',
     remark: ''
   })
+  const [showAddForm, setShowAddForm] = useState(false)
 
   // Set default account on mount, matching the selected payment mode
   useEffect(() => {
@@ -4358,7 +4361,7 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
     return ''
   }
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
     const payload = {
       amount: parseFloat(formData.amount),
@@ -4366,7 +4369,7 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
       accountId: formData.accountId,
       remark: formData.remark
     }
-    
+
     if (ledgerType === 'partner') {
       payload.type = formData.type
       payload.entryDate = formData.entryDate
@@ -4376,15 +4379,18 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
     } else {
       payload.paymentDate = formData.entryDate
     }
-    
-    onAddEntry(payload)
-    setFormData({ 
-      ...formData,
-      type: ledgerType === 'sale' ? 'SALE_PAYMENT' : 'INVESTMENT',
-      amount: '', 
-      entryDate: '', 
-      remark: '' 
-    })
+
+    const ok = await onAddEntry(payload)
+    if (ok) {
+      setFormData({
+        ...formData,
+        type: ledgerType === 'sale' ? 'SALE_PAYMENT' : 'INVESTMENT',
+        amount: '',
+        entryDate: '',
+        remark: ''
+      })
+      setShowAddForm(false)
+    }
   }
 
   const calculateTotals = () => {
@@ -4590,10 +4596,41 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                 </div>
               </CardContent>
             </Card>
+          ) : ledgerType === 'sale' && totals.saleDue <= 0 ? (
+            <Card className="mb-4 border-green-200 bg-green-50">
+              <CardContent className="py-4">
+                <div className="flex items-center gap-3 text-green-700">
+                  <CheckCircle className="w-5 h-5" />
+                  <div>
+                    <p className="font-medium">Sale fully paid</p>
+                    <p className="text-sm text-green-600">
+                      No further entries can be added — the running balance already covers the final amount.
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ) : !showAddForm ? (
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full mb-4"
+              onClick={() => setShowAddForm(true)}
+            >
+              <Plus className="w-4 h-4 mr-2" /> Add New Entry
+            </Button>
           ) : (
           <Card className="mb-4">
-            <CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle className="text-lg">Add New Entry</CardTitle>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowAddForm(false)}
+              >
+                Cancel
+              </Button>
             </CardHeader>
             <CardContent>
               <form onSubmit={handleSubmit} className="space-y-4">

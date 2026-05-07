@@ -19,15 +19,12 @@ const list = async (query) => {
   ]);
   const paymentIds = payments.map(p => p.id);
   const saleIds = sales.map(s => s.id);
-  const [allocations, saleEntries] = await Promise.all([
+  const [allocations, allSaleEntries] = await Promise.all([
     paymentIds.length
       ? PaymentAllocation.find({ paymentId: { $in: paymentIds } }).lean()
       : Promise.resolve([]),
     saleIds.length
-      ? SalePaymentEntry.find(notDeleted({
-        saleId: { $in: saleIds },
-        $or: [{ entryType: 'SALE_PAYMENT' }, { entryType: { $exists: false } }],
-      })).lean()
+      ? SalePaymentEntry.find(notDeleted({ saleId: { $in: saleIds } })).lean()
       : Promise.resolve([]),
   ]);
 
@@ -43,10 +40,20 @@ const list = async (query) => {
     acc[a.paymentId] = (acc[a.paymentId] || 0) + (a.amount || 0);
     return acc;
   }, {});
-  const saleEntryAmountBySale = saleEntries.reduce((acc, e) => {
-    acc[e.saleId] = (acc[e.saleId] || 0) + (e.amount || 0);
-    return acc;
-  }, {});
+
+  // Split sale-ledger entries: SALE_PAYMENT (or legacy entries with no
+  // entryType) count as credits; WITHDRAWAL / PROFIT_PAYOUT debit the sale's
+  // running balance — they're refunds / payouts that take money back out.
+  const saleEntryCreditBySale = {};
+  const saleEntryDebitBySale = {};
+  for (const e of allSaleEntries) {
+    const type = e.entryType || 'SALE_PAYMENT';
+    if (type === 'SALE_PAYMENT') {
+      saleEntryCreditBySale[e.saleId] = (saleEntryCreditBySale[e.saleId] || 0) + (e.amount || 0);
+    } else {
+      saleEntryDebitBySale[e.saleId] = (saleEntryDebitBySale[e.saleId] || 0) + (e.amount || 0);
+    }
+  }
 
   return customers.map((c) => {
     const cSales = salesByCustomer[c.id] || [];
@@ -56,7 +63,8 @@ const list = async (query) => {
     //  - customer-level payments (CustomerPayment)
     //  - per-sale ledger payments (SalePaymentEntry, only for this customer's sales)
     const customerPaymentTotal = cPayments.reduce((s, x) => s + (x.amount || 0), 0);
-    const saleLedgerPaymentTotal = cSales.reduce((s, x) => s + (saleEntryAmountBySale[x.id] || 0), 0);
+    const saleLedgerPaymentTotal = cSales.reduce((s, x) => s + (saleEntryCreditBySale[x.id] || 0), 0);
+    const saleLedgerDebitTotal = cSales.reduce((s, x) => s + (saleEntryDebitBySale[x.id] || 0), 0);
     const totalPaid = customerPaymentTotal + saleLedgerPaymentTotal;
     const unallocatedAmount = cPayments.reduce((s, p) => {
       const allocated = allocationsByPayment[p.id] || 0;
@@ -68,7 +76,9 @@ const list = async (query) => {
       salesCount: cSales.length,
       totalSaleAmount,
       totalPaid,
-      balance: totalSaleAmount - totalPaid,
+      // Withdrawals/profit-payouts add back to the outstanding because that
+      // money has been pulled out of the sale's deposit pool again.
+      balance: totalSaleAmount - totalPaid + saleLedgerDebitTotal,
       unallocatedAmount,
     };
   });
@@ -109,7 +119,9 @@ const listSales = async (customerId) => {
       PaymentAllocation.find({ saleId: s.id }).lean(),
       SalePaymentEntry.find(notDeleted({
         saleId: s.id,
-        $or: [{ entryType: 'SALE_PAYMENT' }, { entryType: { $exists: false } }],
+        // $nin instead of $or — see list() for why (notDeleted's $or would
+        // overwrite this one and let withdrawals leak in as payments).
+        entryType: { $nin: ['WITHDRAWAL', 'PROFIT_PAYOUT'] },
       })).lean(),
     ]);
     const allocatedAmount = allocations.reduce((sum, a) => sum + (a.amount || 0), 0)
@@ -129,17 +141,24 @@ const ledger = async (customerId) => {
   const payments = await CustomerPayment.find(notDeleted({ customerId })).lean();
   const paymentIds = payments.map(p => p.id);
   const saleIds = sales.map(s => s.id);
-  const [allocations, saleLedgerEntries] = await Promise.all([
+  const [allocations, allLedgerEntries] = await Promise.all([
     paymentIds.length
       ? PaymentAllocation.find({ paymentId: { $in: paymentIds } }).lean()
       : Promise.resolve([]),
     saleIds.length
-      ? SalePaymentEntry.find(notDeleted({
-        saleId: { $in: saleIds },
-        $or: [{ entryType: 'SALE_PAYMENT' }, { entryType: { $exists: false } }],
-      })).lean()
+      ? SalePaymentEntry.find(notDeleted({ saleId: { $in: saleIds } })).lean()
       : Promise.resolve([]),
   ]);
+
+  // Split sale-ledger entries: credits (SALE_PAYMENT or legacy entries with
+  // no entryType) vs debits (WITHDRAWAL / PROFIT_PAYOUT). Both need to surface
+  // on the customer's ledger so the running balance matches the Sale Ledger.
+  const saleLedgerEntries = allLedgerEntries.filter(
+    e => (e.entryType || 'SALE_PAYMENT') === 'SALE_PAYMENT',
+  );
+  const saleLedgerDebitEntries = allLedgerEntries.filter(
+    e => e.entryType === 'WITHDRAWAL' || e.entryType === 'PROFIT_PAYOUT',
+  );
 
   const inventoryIds = [...new Set(sales.map(s => s.inventoryId).filter(Boolean))];
   const inventories = inventoryIds.length
@@ -160,6 +179,7 @@ const ledger = async (customerId) => {
     return {
       id: `sale-${s.id}`,
       date: s.saleDate || s.createdAt,
+      createdAt: s.createdAt,
       type: 'SALE',
       description: `Sale - ${inv?.inventoryNumber || 'Unit'}`,
       debit: s.finalAmount || 0,
@@ -182,6 +202,7 @@ const ledger = async (customerId) => {
     return {
       id: `pay-${p.id}`,
       date: p.paymentDate || p.createdAt,
+      createdAt: p.createdAt,
       type: 'PAYMENT',
       description: `Payment via ${p.paymentMode || 'Cash'}${p.referenceNo ? ` (${p.referenceNo})` : ''}`,
       debit: 0,
@@ -200,6 +221,7 @@ const ledger = async (customerId) => {
     return {
       id: `sale-pay-${e.id}`,
       date: e.paymentDate || e.createdAt,
+      createdAt: e.createdAt,
       type: 'PAYMENT',
       description: `Payment via ${e.paymentMode || 'Cash'}${e.referenceNo ? ` (${e.referenceNo})` : ''} — ${inv?.inventoryNumber || 'Unit'}`,
       debit: 0,
@@ -209,8 +231,38 @@ const ledger = async (customerId) => {
     };
   });
 
-  const ledger = [...saleEntries, ...paymentEntries, ...saleLedgerPaymentEntries]
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
+  // Surface withdrawals and profit payouts as debit rows so the customer
+  // ledger mirrors what the Sale Ledger drawer shows: money taken out of the
+  // sale's deposit pool reverses part of an earlier credit.
+  const saleLedgerDebitRows = saleLedgerDebitEntries.map(e => {
+    const sale = saleById[e.saleId];
+    const inv = sale?.inventoryId ? inventoryById[sale.inventoryId] : null;
+    const label = e.entryType === 'PROFIT_PAYOUT' ? 'Profit Payout' : 'Withdrawal';
+    return {
+      id: `sale-debit-${e.id}`,
+      date: e.paymentDate || e.createdAt,
+      createdAt: e.createdAt,
+      type: e.entryType,
+      description: `${label} via ${e.paymentMode || 'Cash'}${e.referenceNo ? ` (${e.referenceNo})` : ''} — ${inv?.inventoryNumber || 'Unit'}`,
+      debit: e.amount || 0,
+      credit: 0,
+      allocationDetails: [{ inventoryNumber: inv?.inventoryNumber || 'N/A', amount: e.amount || 0 }],
+      status: 'DEBIT',
+    };
+  });
+
+  // Sort chronologically. When two rows share the same payment/sale date
+  // (common — multiple ledger entries on the same day) fall back to
+  // createdAt so the running balance follows the actual sequence in which
+  // the entries were recorded, matching what the Sale Ledger drawer shows.
+  const ledger = [...saleEntries, ...paymentEntries, ...saleLedgerPaymentEntries, ...saleLedgerDebitRows]
+    .sort((a, b) => {
+      const dateDiff = new Date(a.date) - new Date(b.date);
+      if (dateDiff !== 0) return dateDiff;
+      const aCreated = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const bCreated = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return aCreated - bCreated;
+    });
 
   let running = 0;
   for (const e of ledger) {
@@ -221,8 +273,13 @@ const ledger = async (customerId) => {
   const totalSales = sales.reduce((s, x) => s + (x.finalAmount || 0), 0);
   const totalCustomerPayments = payments.reduce((s, x) => s + (x.amount || 0), 0);
   const totalSaleLedgerPayments = saleLedgerEntries.reduce((s, x) => s + (x.amount || 0), 0);
+  const totalSaleLedgerDebits = saleLedgerDebitEntries.reduce((s, x) => s + (x.amount || 0), 0);
   const totalPayments = totalCustomerPayments + totalSaleLedgerPayments;
-  const totalAllocated = allocations.reduce((s, x) => s + (x.amount || 0), 0) + totalSaleLedgerPayments;
+  // Withdrawals & profit payouts cancel part of the allocation: net money
+  // actually retained against this customer's sales.
+  const totalAllocated = allocations.reduce((s, x) => s + (x.amount || 0), 0)
+    + totalSaleLedgerPayments
+    - totalSaleLedgerDebits;
   const unallocatedPayments = payments.reduce((s, x) => s + (x.unallocatedAmount != null ? x.unallocatedAmount : 0), 0);
 
   return {
@@ -230,6 +287,7 @@ const ledger = async (customerId) => {
       totalSales,
       totalPayments,
       totalAllocated,
+      totalWithdrawals: totalSaleLedgerDebits,
       outstandingBalance: totalSales - totalAllocated,
       unallocatedPayments,
     },
