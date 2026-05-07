@@ -36,7 +36,13 @@ const list = async (query) => {
     (acc[p.customerId] = acc[p.customerId] || []).push(p);
     return acc;
   }, {});
-  const allocationsByPayment = allocations.reduce((acc, a) => {
+  // Self-heal: drop allocations whose sale was (soft-)deleted so freed-up
+  // money shows as unallocated again (and stays in totalPaid via the payment
+  // amount itself). `sales` already contains only non-deleted sales for these
+  // customers, so its ids are the canonical "live" set.
+  const liveSaleIds = new Set(sales.map(s => s.id));
+  const liveAllocations = allocations.filter(a => liveSaleIds.has(a.saleId));
+  const allocationsByPayment = liveAllocations.reduce((acc, a) => {
     acc[a.paymentId] = (acc[a.paymentId] || 0) + (a.amount || 0);
     return acc;
   }, {});
@@ -66,10 +72,12 @@ const list = async (query) => {
     const saleLedgerPaymentTotal = cSales.reduce((s, x) => s + (saleEntryCreditBySale[x.id] || 0), 0);
     const saleLedgerDebitTotal = cSales.reduce((s, x) => s + (saleEntryDebitBySale[x.id] || 0), 0);
     const totalPaid = customerPaymentTotal + saleLedgerPaymentTotal;
+    // Compute from live allocations rather than the stored
+    // CustomerPayment.unallocatedAmount, which can be stale after a sale
+    // delete leaves orphan allocations behind.
     const unallocatedAmount = cPayments.reduce((s, p) => {
       const allocated = allocationsByPayment[p.id] || 0;
-      const u = p.unallocatedAmount != null ? p.unallocatedAmount : ((p.amount || 0) - allocated);
-      return s + Math.max(0, u);
+      return s + Math.max(0, (p.amount || 0) - allocated);
     }, 0);
     return {
       ...stripId(c),

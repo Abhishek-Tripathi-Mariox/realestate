@@ -3,6 +3,7 @@ const { notDeleted } = require('../../utils/notDeleted');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   CustomerPayment, Customer, Account, PaymentAllocation, Transaction,
+  Sale, SalePaymentEntry,
 } = require('../../models');
 
 const list = async (query) => {
@@ -23,9 +24,20 @@ const list = async (query) => {
     .lean();
 
   const paymentIds = payments.map(p => p.id);
-  const allocations = paymentIds.length
+  const rawAllocations = paymentIds.length
     ? await PaymentAllocation.find({ paymentId: { $in: paymentIds } }).lean()
     : [];
+
+  // Self-heal: drop allocations whose sale has been (soft-)deleted, so a
+  // payment whose sale was removed shows the freed-up money as unallocated
+  // again — even if PaymentAllocation cleanup wasn't run at delete time.
+  const allocSaleIds = [...new Set(rawAllocations.map(a => a.saleId).filter(Boolean))];
+  const liveSales = allocSaleIds.length
+    ? await Sale.find(notDeleted({ id: { $in: allocSaleIds } })).lean()
+    : [];
+  const liveSaleIds = new Set(liveSales.map(s => s.id));
+  const allocations = rawAllocations.filter(a => liveSaleIds.has(a.saleId));
+
   const allocatedByPayment = allocations.reduce((acc, a) => {
     acc[a.paymentId] = (acc[a.paymentId] || 0) + (a.amount || 0);
     return acc;
@@ -131,6 +143,59 @@ const setAllocations = async (paymentId, body, userId) => {
   const totalAllocated = incoming.reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0);
   if (totalAllocated > (payment.amount || 0) + 0.01) {
     return { error: `Allocation total (${totalAllocated}) exceeds payment amount (${payment.amount})`, status: 400 };
+  }
+
+  // Per-sale cap: each new allocation, combined with the sale's existing net
+  // ledger balance and OTHER payments' allocations, must not push that sale's
+  // total paid past its finalAmount. Stops typo over-allocation (e.g. typing
+  // an extra zero on a single line) from bypassing the per-payment check.
+  const incomingBySale = {};
+  for (const a of incoming) {
+    const amt = parseFloat(a.amount) || 0;
+    if (amt > 0 && a.saleId) {
+      incomingBySale[a.saleId] = (incomingBySale[a.saleId] || 0) + amt;
+    }
+  }
+  const incomingSaleIds = Object.keys(incomingBySale);
+  if (incomingSaleIds.length) {
+    const [sales, otherAllocs, ledgerEntries] = await Promise.all([
+      Sale.find({ id: { $in: incomingSaleIds } }).lean(),
+      // Existing allocations for these sales from OTHER payments — the current
+      // payment's rows are about to be replaced, so exclude them from the cap.
+      PaymentAllocation.find({
+        saleId: { $in: incomingSaleIds },
+        paymentId: { $ne: paymentId },
+      }).lean(),
+      SalePaymentEntry.find(notDeleted({ saleId: { $in: incomingSaleIds } })).lean(),
+    ]);
+    const saleById = Object.fromEntries(sales.map(s => [s.id, s]));
+    const otherAllocBySale = otherAllocs.reduce((acc, a) => {
+      acc[a.saleId] = (acc[a.saleId] || 0) + (a.amount || 0);
+      return acc;
+    }, {});
+    const ledgerNetBySale = ledgerEntries.reduce((acc, e) => {
+      const t = e.entryType || 'SALE_PAYMENT';
+      const delta = t === 'SALE_PAYMENT' ? (e.amount || 0) : -(e.amount || 0);
+      acc[e.saleId] = (acc[e.saleId] || 0) + delta;
+      return acc;
+    }, {});
+
+    for (const saleId of incomingSaleIds) {
+      const sale = saleById[saleId];
+      if (!sale) {
+        return { error: `Sale ${saleId} not found`, status: 400 };
+      }
+      const alreadyPaid = (ledgerNetBySale[saleId] || 0) + (otherAllocBySale[saleId] || 0);
+      const remaining = (sale.finalAmount || 0) - alreadyPaid;
+      const requested = incomingBySale[saleId];
+      if (requested > remaining + 0.01) {
+        const fmt = (n) => `₹${(n || 0).toLocaleString('en-IN')}`;
+        return {
+          error: `Allocation ${fmt(requested)} for sale exceeds its remaining balance ${fmt(remaining)}.`,
+          status: 400,
+        };
+      }
+    }
   }
 
   await PaymentAllocation.deleteMany({ paymentId });

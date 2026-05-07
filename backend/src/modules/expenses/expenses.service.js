@@ -93,10 +93,10 @@ const listExpenses = async (query) => {
   const scope = (query.scope || '').toUpperCase();
 
   // Scope-aware source-type rules:
-  //   SOCIETY tab → only expense outflows for that society.
-  //   COMPANY tab → company-level expenses (no societyId) + every commission
-  //     payout regardless of society, since broker commissions are paid out
-  //     of the company bank, not the society's account.
+  //   COMPANY tab → company-level expenses only (no society, no commissions).
+  //   SOCIETY tab → society expenses + broker COMMISSION_PAYMENTs that belong
+  //     to that society (a commission is tied to a sale, and the sale lives
+  //     under a society — so the cost is a society expense, not a company one).
   const filter = {
     direction: 'OUT',
     isVoided: { $ne: true },
@@ -104,22 +104,17 @@ const listExpenses = async (query) => {
     isReversed: { $ne: true },
   };
   if (scope === 'COMPANY') {
-    filter.$or = [
-      {
-        sourceType: { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] },
-        $or: [{ societyId: null }, { societyId: { $exists: false } }],
-      },
-      { sourceType: 'COMMISSION_PAYMENT' },
-    ];
-  } else if (scope === 'SOCIETY') {
     filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] };
+    filter.$or = [{ societyId: null }, { societyId: { $exists: false } }];
+  } else if (scope === 'SOCIETY') {
+    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'COMMISSION_PAYMENT'] };
     if (query.societyId && query.societyId !== 'all') {
       filter.societyId = query.societyId;
     } else {
       filter.societyId = { $ne: null };
     }
   } else {
-    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] };
+    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'COMMISSION_PAYMENT'] };
     if (query.societyId && query.societyId !== 'all') {
       filter.societyId = query.societyId;
     }
@@ -183,14 +178,20 @@ const listExpenses = async (query) => {
     if (query.endDate) billFilter.billDate.$lte = query.endDate;
   }
 
-  // Expense bills follow the scope filter normally; commission bills only
-  // surface in the COMPANY tab since they're paid out of the company bank.
   const expenseBillQuery = { ...billFilter, status: { $ne: 'Paid' } };
   const openExpenseBills = await ExpenseBill.find(expenseBillQuery).lean();
 
+  // Commission bills surface under SOCIETY scope (the sale they're tied to
+  // belongs to a society, so the cost is a society expense). COMPANY scope
+  // never carries them.
   let openCommissionBills = [];
-  if (scope === 'COMPANY') {
+  if (scope === 'SOCIETY' || scope === '') {
     const commissionFilter = notDeleted({ status: { $ne: 'Paid' } });
+    if (query.societyId && query.societyId !== 'all') {
+      commissionFilter.societyId = query.societyId;
+    } else if (scope === 'SOCIETY') {
+      commissionFilter.societyId = { $ne: null };
+    }
     if (query.startDate || query.endDate) {
       commissionFilter.billDate = {};
       if (query.startDate) commissionFilter.billDate.$gte = query.startDate;
@@ -232,7 +233,7 @@ const listExpenses = async (query) => {
         sourceId: b.id,
         txnDate: b.billDate || b.commissionDate || null,
         societyId: b.societyId || null,
-        scope: 'COMPANY',
+        scope: 'SOCIETY',
         accountId: null,
         direction: 'OUT',
         amount: balance,

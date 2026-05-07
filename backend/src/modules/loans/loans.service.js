@@ -2,7 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const { notDeleted } = require('../../utils/notDeleted');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
-  Party, Loan, LoanRepayment, Account, Transaction,
+  Party, Loan, LoanRepayment, Account, Transaction, Society,
 } = require('../../models');
 
 const LOAN_PAYMENT_MODES = ['Cash', 'Bank Transfer', 'Cheque', 'RTGS', 'UPI'];
@@ -135,15 +135,22 @@ const listLoans = async (query) => {
   if (query.direction) filter.direction = query.direction;
   if (query.status && query.status !== 'all') filter.status = query.status;
   if (query.partyId && query.partyId !== 'all') filter.partyId = query.partyId;
+  if (query.societyId === 'company') {
+    filter.$or = [{ societyId: null }, { societyId: { $exists: false } }, { societyId: '' }];
+  } else if (query.societyId && query.societyId !== 'all') {
+    filter.societyId = query.societyId;
+  }
 
   const loans = await Loan.find(filter).lean();
   const enriched = await Promise.all(loans.map(async (loan) => {
     const party = await Party.findOne({ id: loan.partyId }).lean();
     const account = await Account.findOne({ id: loan.accountId }).lean();
+    const society = loan.societyId ? await Society.findOne({ id: loan.societyId }).lean() : null;
     return {
       ...loan,
       partyName: party?.name || 'Unknown',
       accountName: account?.name || 'Unknown',
+      societyName: society?.name || (loan.societyId ? 'Unknown' : 'Company'),
     };
   }));
   return enriched.map(stripId);
@@ -173,8 +180,21 @@ const createLoan = async (body, userId) => {
   if (!body.accountId) return { error: 'Account is required', status: 400 };
   const account = await Account.findOne(notDeleted({ id: body.accountId })).lean();
   if (!account) return { error: 'Account not found', status: 404 };
-  if (account.scope === 'SOCIETY' || account.societyId) {
-    return { error: 'Account must be a global (non-society) account for loans', status: 400 };
+
+  // societyId is optional — if provided, the loan is recorded against that
+  // society and the chosen account must belong to it. Otherwise it stays
+  // company-level and the account must be a global / non-society account.
+  const societyId = body.societyId || null;
+  if (societyId) {
+    const accountSocietyId = account.societyId || null;
+    if (accountSocietyId && accountSocietyId !== societyId) {
+      return { error: 'Selected account belongs to a different society', status: 400 };
+    }
+    if (account.scope === 'COMPANY' && !accountSocietyId) {
+      return { error: 'Selected society but chose a company-level account — pick a society account or clear the society', status: 400 };
+    }
+  } else if (account.scope === 'SOCIETY' || account.societyId) {
+    return { error: 'Society account selected but no society chosen — pick a society or use a company-level account', status: 400 };
   }
 
   const paymentMode = body.paymentMode || 'Bank Transfer';
@@ -190,6 +210,7 @@ const createLoan = async (body, userId) => {
   const loan = {
     id: uuidv4(),
     partyId: body.partyId,
+    societyId,
     direction,
     principalAmount,
     loanDate: body.loanDate,
@@ -210,7 +231,7 @@ const createLoan = async (body, userId) => {
 
   await createTransaction({
     txnDate: loan.loanDate,
-    societyId: null,
+    societyId,
     accountId: loan.accountId,
     direction: txnDirection,
     amount: loan.principalAmount,
@@ -291,8 +312,21 @@ const createRepayment = async (loanId, body, userId) => {
   if (!body.accountId) return { error: 'Account is required', status: 400 };
   const account = await Account.findOne(notDeleted({ id: body.accountId })).lean();
   if (!account) return { error: 'Account not found', status: 404 };
-  if (account.scope === 'SOCIETY' || account.societyId) {
-    return { error: 'Account must be a global (non-society) account for loan repayments', status: 400 };
+
+  // Repayment must use an account scoped to the same level as the loan: a
+  // company-level loan needs a global account, a society loan needs an
+  // account in that society.
+  const loanSocietyId = loan.societyId || null;
+  const accountSocietyId = account.societyId || null;
+  if (loanSocietyId) {
+    if (accountSocietyId && accountSocietyId !== loanSocietyId) {
+      return { error: 'Repayment account belongs to a different society than the loan', status: 400 };
+    }
+    if (account.scope === 'COMPANY' && !accountSocietyId) {
+      return { error: 'Loan is society-scoped — pick an account from the same society', status: 400 };
+    }
+  } else if (account.scope === 'SOCIETY' || accountSocietyId) {
+    return { error: 'Loan is company-level — repayment account must be global', status: 400 };
   }
 
   const paymentMode = body.paymentMode || 'Cash';
@@ -334,7 +368,7 @@ const createRepayment = async (loanId, body, userId) => {
 
   await createTransaction({
     txnDate: repayment.repaymentDate,
-    societyId: null,
+    societyId: loan.societyId || null,
     accountId: repayment.accountId,
     direction: txnDirection,
     amount,

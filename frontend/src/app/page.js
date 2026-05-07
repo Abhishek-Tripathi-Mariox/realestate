@@ -1762,13 +1762,14 @@ const App = () => {
               />
               <StatCard
                 label="Total Expenses"
-                value={`₹${fmt(summary.totalExpenses)}`}
+                value={`₹${fmt((summary.totalExpenses || 0) + (summary.totalCommissions || 0))}`}
                 sub={`${(summary.expenseBillCount || 0) + (summary.commissionBillCount || 0)} bills`}
                 color="orange"
                 Icon={TrendingDown}
                 percent={(() => {
-                  const total = (summary.totalExpenses || 0) + (summary.totalSalesAmount || 0)
-                  return total > 0 ? Math.min(100, ((summary.totalExpenses || 0) / total) * 100) : 0
+                  const combined = (summary.totalExpenses || 0) + (summary.totalCommissions || 0)
+                  const total = combined + (summary.totalSalesAmount || 0)
+                  return total > 0 ? Math.min(100, (combined / total) * 100) : 0
                 })()}
               />
               <StatCard
@@ -1778,7 +1779,7 @@ const App = () => {
                 color="amber"
                 Icon={CreditCard}
                 percent={(() => {
-                  const total = (summary.totalExpenses || 0)
+                  const total = (summary.totalExpenses || 0) + (summary.totalCommissions || 0)
                   return total > 0 ? Math.min(100, ((summary.totalPayables || 0) / total) * 100) : 0
                 })()}
               />
@@ -2236,9 +2237,6 @@ const App = () => {
                                   </Button>
                                   <Button variant="outline" size="sm" onClick={() => { setEditingCustomer(customer); setShowCustomerForm(true); }}>
                                     <Pencil className="w-4 h-4" />
-                                  </Button>
-                                  <Button variant="outline" size="sm" className="text-red-500" onClick={() => handleDeleteCustomer(customer.id)}>
-                                    <Trash2 className="w-4 h-4" />
                                   </Button>
                                 </div>
                               </TableCell>
@@ -4581,6 +4579,25 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
             </CardContent>
           </Card>
 
+          {/* Informational: sale already fully paid. Form stays open below
+              so withdrawals / profit payouts can still be recorded; the
+              backend blocks further SALE_PAYMENT entries on its own. */}
+          {ledgerType === 'sale' && ledgerItem?.status !== 'TRANSFERRED' && totals.saleDue <= 0 && (
+            <Card className="mb-4 border-green-200 bg-green-50">
+              <CardContent className="py-4">
+                <div className="flex items-center gap-3 text-green-700">
+                  <CheckCircle className="w-5 h-5" />
+                  <div>
+                    <p className="font-medium">Sale fully paid</p>
+                    <p className="text-sm text-green-600">
+                      Running balance already covers the final amount. Withdrawals and profit payouts can still be added below.
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Entry Form - Hide for transferred sales */}
           {ledgerType === 'sale' && ledgerItem?.status === 'TRANSFERRED' ? (
             <Card className="mb-4 border-purple-200 bg-purple-50">
@@ -4591,20 +4608,6 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                     <p className="font-medium">This sale has been transferred via Resale</p>
                     <p className="text-sm text-purple-600">
                       New owner: {ledgerItem.transferredTo}. Use the Resale module for payment tracking.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          ) : ledgerType === 'sale' && totals.saleDue <= 0 ? (
-            <Card className="mb-4 border-green-200 bg-green-50">
-              <CardContent className="py-4">
-                <div className="flex items-center gap-3 text-green-700">
-                  <CheckCircle className="w-5 h-5" />
-                  <div>
-                    <p className="font-medium">Sale fully paid</p>
-                    <p className="text-sm text-green-600">
-                      No further entries can be added — the running balance already covers the final amount.
                     </p>
                   </div>
                 </div>
@@ -7387,9 +7390,27 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
   const isValid = Math.abs(unallocated) < 0.01 // Allow small floating point differences
 
   const handleAllocationChange = (saleId, value) => {
-    setAllocations(prev => prev.map(a =>
-      a.saleId === saleId ? { ...a, amount: value } : a
-    ))
+    // Allow empty string (user clearing the field)
+    if (value === '') {
+      setAllocations(prev => prev.map(a => a.saleId === saleId ? { ...a, amount: '' } : a))
+      return
+    }
+    const numValue = parseFloat(value)
+    if (isNaN(numValue) || numValue < 0) return
+
+    setAllocations(prev => {
+      const target = prev.find(a => a.saleId === saleId)
+      if (!target) return prev
+      // Cap by both: this sale's remaining balance AND the payment's
+      // unallocated portion — neither limit can be exceeded.
+      const otherAllocated = prev
+        .filter(a => a.saleId !== saleId)
+        .reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0)
+      const remainingPayment = Math.max(0, (payment.amount || 0) - otherAllocated)
+      const cap = Math.min(target.maxAmount || 0, remainingPayment)
+      const capped = Math.min(numValue, cap)
+      return prev.map(a => a.saleId === saleId ? { ...a, amount: capped } : a)
+    })
   }
 
   const handleAutoAllocate = () => {

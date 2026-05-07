@@ -3,6 +3,7 @@ const { mongoose, buildSchema } = require('./baseSchema');
 const schema = buildSchema({
   id: { type: String, required: true, unique: true },
   partyId: String,
+  societyId: String,            // null/undefined = company-level loan
   direction: String,
   principalAmount: Number,
   loanDate: String,

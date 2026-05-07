@@ -97,6 +97,7 @@ export default function BorrowLoansPage() {
   const [parties, setParties] = useState([])
   const [loans, setLoans] = useState([])
   const [accounts, setAccounts] = useState([])
+  const [societies, setSocieties] = useState([])
   
   // Dialog/Drawer states
   const [showPartyDialog, setShowPartyDialog] = useState(false)
@@ -106,9 +107,9 @@ export default function BorrowLoansPage() {
   
   // Form data
   const [partyForm, setPartyForm] = useState({ name: '', phone: '', address: '', notes: '' })
-  const [loanForm, setLoanForm] = useState({ 
-    partyId: '', principalAmount: '', loanDate: '', accountId: '', 
-    purpose: '', paymentMode: 'Bank Transfer'
+  const [loanForm, setLoanForm] = useState({
+    partyId: '', principalAmount: '', loanDate: '', accountId: '',
+    purpose: '', paymentMode: 'Bank Transfer', societyId: ''
   })
   const [repaymentForm, setRepaymentForm] = useState({
     amount: '', repaymentDate: '', accountId: '', paymentMode: 'Cash', remark: ''
@@ -189,6 +190,7 @@ export default function BorrowLoansPage() {
       loadParties()
       loadLoans()
       loadAccounts()
+      loadSocieties()
     }
   }, [isAuthenticated])
 
@@ -223,11 +225,21 @@ export default function BorrowLoansPage() {
 
   const loadAccounts = async () => {
     try {
-      // Loans are company-level only — never show society-scoped accounts here
-      const data = await apiCall('/accounts?scope=COMPANY')
+      // Pull every account; the form filters by chosen society on render so
+      // both global and society accounts can be picked from the same list.
+      const data = await apiCall('/accounts')
       setAccounts(data)
     } catch (error) {
       console.error('Failed to load accounts:', error)
+    }
+  }
+
+  const loadSocieties = async () => {
+    try {
+      const data = await apiCall('/societies')
+      setSocieties(Array.isArray(data) ? data : [])
+    } catch (error) {
+      console.error('Failed to load societies:', error)
     }
   }
 
@@ -298,9 +310,9 @@ export default function BorrowLoansPage() {
       await loadLoans()
       await loadParties()
       setShowLoanDialog(false)
-      setLoanForm({ 
-        partyId: '', principalAmount: '', loanDate: '', accountId: '', 
-        purpose: '', paymentMode: 'Bank Transfer'
+      setLoanForm({
+        partyId: '', principalAmount: '', loanDate: '', accountId: '',
+        purpose: '', paymentMode: 'Bank Transfer', societyId: ''
       })
       toast({ 
         title: 'Success', 
@@ -628,6 +640,23 @@ export default function BorrowLoansPage() {
                               </SelectContent>
                             </Select>
                           </div>
+                          <div className="col-span-2">
+                            <Label>Society</Label>
+                            <Select
+                              value={loanForm.societyId || 'company'}
+                              onValueChange={v => setLoanForm({ ...loanForm, societyId: v === 'company' ? '' : v, accountId: '' })}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="company">Company Level (no society)</SelectItem>
+                                {societies.map(s => (
+                                  <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
                           <div>
                             <Label>Principal Amount *</Label>
                             <Input
@@ -657,7 +686,9 @@ export default function BorrowLoansPage() {
                               </SelectTrigger>
                               <SelectContent>
                                 {accounts
-                                  .filter(a => a.scope !== 'SOCIETY' && !a.societyId)
+                                  .filter(a => loanForm.societyId
+                                    ? a.societyId === loanForm.societyId
+                                    : (a.scope !== 'SOCIETY' && !a.societyId))
                                   .filter(a => loanForm.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK')
                                   .map(a => (
                                     <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
@@ -1045,7 +1076,9 @@ export default function BorrowLoansPage() {
                               </SelectTrigger>
                               <SelectContent>
                                 {accounts
-                                  .filter(a => a.scope !== 'SOCIETY' && !a.societyId)
+                                  .filter(a => selectedLoan?.societyId
+                                    ? a.societyId === selectedLoan.societyId
+                                    : (a.scope !== 'SOCIETY' && !a.societyId))
                                   .filter(a => repaymentForm.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK')
                                   .map(a => (
                                     <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>

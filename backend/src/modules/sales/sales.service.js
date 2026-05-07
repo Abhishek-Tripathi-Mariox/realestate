@@ -208,6 +208,27 @@ const remove = async (id) => {
       { $set: { status: 'Available', soldDate: null } },
     );
   }
+
+  // Free up any customer-payment allocations pointing to this sale and bump
+  // up unallocatedAmount on each affected payment, otherwise the deployed
+  // funds stay "stuck" against a deleted sale and can't be reallocated.
+  const allocations = await PaymentAllocation.find({ saleId: id }).lean();
+  if (allocations.length) {
+    const affectedPaymentIds = [...new Set(allocations.map(a => a.paymentId).filter(Boolean))];
+    await PaymentAllocation.deleteMany({ saleId: id });
+    for (const pid of affectedPaymentIds) {
+      const payment = await CustomerPayment.findOne({ id: pid }).lean();
+      if (!payment) continue;
+      const remaining = await PaymentAllocation.find({ paymentId: pid }).lean();
+      const totalAllocated = remaining.reduce((s, a) => s + (a.amount || 0), 0);
+      const unallocatedAmount = (payment.amount || 0) - totalAllocated;
+      await CustomerPayment.updateOne(
+        { id: pid },
+        { $set: { unallocatedAmount, updatedAt: new Date() } },
+      );
+    }
+  }
+
   await Sale.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
 };
 
