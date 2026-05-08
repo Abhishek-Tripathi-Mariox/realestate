@@ -3,7 +3,7 @@ const {
   Purchase, Vendor, CommissionBill, ResaleDeal, CustomerPayment,
   SalePaymentEntry, PurchasePaymentEntry, ExpensePayment, CommissionPayment,
   PartnerLedgerEntry, ResaleBuyerPayment, ResaleSellerPayout, LoanRepayment,
-  Party,
+  Party, Society, SocietyPhase,
 } = require('../../models');
 
 // One source of truth for every collection that participates in soft-delete /
@@ -14,6 +14,8 @@ const {
 //   label         — human-readable badge text on the FE.
 //   model         — the Mongoose model.
 const TRASH_BUCKETS = [
+  { slug: 'societies',             collection: 'societies',                label: 'Society',              model: Society },
+  { slug: 'societyPhases',         collection: 'society_phases',           label: 'Society Phase',        model: SocietyPhase },
   { slug: 'sales',                 collection: 'sales',                    label: 'Sale',                 model: Sale },
   { slug: 'salePayments',          collection: 'sale_payment_entries',     label: 'Sale Payment',         model: SalePaymentEntry },
   { slug: 'inventory',             collection: 'inventory',                label: 'Inventory',            model: Inventory },
@@ -85,15 +87,51 @@ const list = async (query = {}) => {
   };
 };
 
+const RESTORE_UPDATE = {
+  $set: { isDeleted: false },
+  $unset: { deletedAt: '', deletedBy: '', deletedReason: '' },
+};
+
+// When a society is restored, bring back every child that was soft-deleted as
+// part of the same cascade (i.e. tagged with deletedReason 'Society deleted'
+// in societies.service.remove). Matching on societyId + deletedReason ensures
+// children that were independently trashed earlier stay in trash.
+const cascadeRestoreSocietyChildren = async (societyId) => {
+  const filter = { societyId, isDeleted: true, deletedReason: 'Society deleted' };
+  const childModels = [Sale, Purchase, ExpenseBill, Vendor, Inventory, Partner, SocietyPhase];
+
+  const restoredSales = await Sale.find(filter, { id: 1 }).lean();
+  const saleIds = restoredSales.map(s => s.id);
+
+  let restored = 0;
+  for (const Model of childModels) {
+    const result = await Model.updateMany(filter, RESTORE_UPDATE);
+    restored += result.modifiedCount || 0;
+  }
+
+  if (saleIds.length > 0) {
+    const result = await SalePaymentEntry.updateMany(
+      { saleId: { $in: saleIds }, isDeleted: true, deletedReason: 'Society deleted' },
+      RESTORE_UPDATE,
+    );
+    restored += result.modifiedCount || 0;
+  }
+
+  return restored;
+};
+
 const restore = async (typeKey, id) => {
   const bucket = BUCKETS_BY_KEY[typeKey];
   if (!bucket) return { error: 'Unknown trash type', status: 400 };
 
-  const result = await bucket.model.updateOne(
-    { id },
-    { $set: { isDeleted: false }, $unset: { deletedAt: '', deletedBy: '', deletedReason: '' } },
-  );
+  const result = await bucket.model.updateOne({ id }, RESTORE_UPDATE);
   if (result.matchedCount === 0) return { error: 'Record not found', status: 404 };
+
+  if (bucket.slug === 'societies') {
+    const cascadeCount = await cascadeRestoreSocietyChildren(id);
+    return { message: `Society restored along with ${cascadeCount} related record(s)` };
+  }
+
   return { message: 'Record restored' };
 };
 

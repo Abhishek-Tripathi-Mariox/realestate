@@ -12,6 +12,7 @@ import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
 import { Trash2, RefreshCw, RotateCcw, X, AlertTriangle } from 'lucide-react'
 import { AppShell } from '@/components/dashboard/AppShell'
+import { getDeleteOtp, refreshDeleteOtp } from '@/lib/deleteOtp'
 
 const formatDate = (value) => {
   if (!value) return '—'
@@ -74,14 +75,37 @@ export default function TrashPage() {
 
   const apiCall = useCallback(async (endpoint, options = {}) => {
     const authToken = token || localStorage.getItem('token')
-    const res = await fetch(`/api${endpoint}`, {
+    const method = (options.method || 'GET').toUpperCase()
+
+    const buildOptions = (otp) => ({
       ...options,
+      method,
       headers: {
         'Content-Type': 'application/json',
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        ...(otp ? { 'X-Delete-Otp': otp } : {}),
         ...(options.headers || {}),
       },
     })
+
+    let otp = null
+    if (method === 'DELETE') {
+      otp = getDeleteOtp()
+      if (!otp) throw new Error('Delete cancelled — OTP required')
+    }
+
+    let res = await fetch(`/api${endpoint}`, buildOptions(otp))
+
+    // Re-prompt once if server says the OTP was wrong/missing.
+    if (res.status === 403 && method === 'DELETE') {
+      const errBody = await res.clone().json().catch(() => ({}))
+      if (errBody?.code === 'DELETE_OTP_REQUIRED') {
+        const fresh = refreshDeleteOtp()
+        if (!fresh) throw new Error('Delete cancelled — OTP required')
+        res = await fetch(`/api${endpoint}`, buildOptions(fresh))
+      }
+    }
+
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Request failed' }))
       throw new Error(err.error || 'Request failed')

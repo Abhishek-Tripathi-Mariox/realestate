@@ -22,7 +22,7 @@ const validateName = async (rawName, excludeId = null) => {
 };
 
 const list = async () => {
-  const societies = await Society.find({}).lean();
+  const societies = await Society.find(notDeleted()).lean();
   return societies.map(stripId);
 };
 
@@ -59,20 +59,35 @@ const update = async (id, body) => {
 };
 
 const remove = async (societyId) => {
-  // Cascade hard-delete (legacy behavior preserved).
-  await Transaction.deleteMany({ societyId });
-  const sales = await Sale.find({ societyId }).lean();
-  for (const sale of sales) {
-    await SalePaymentEntry.deleteMany({ saleId: sale.id });
+  // Soft-cascade delete: mark the society and every child as isDeleted so they
+  // disappear from the active app but stay recoverable from /trash. Each child
+  // gets a `deletedReason` of 'Society deleted' so it's clear in the trash UI
+  // why these records were removed alongside the society.
+  const stamp = { isDeleted: true, deletedAt: new Date(), deletedReason: 'Society deleted' };
+
+  const sales = await Sale.find({ societyId, isDeleted: { $ne: true } }, { id: 1 }).lean();
+  const saleIds = sales.map(s => s.id);
+  if (saleIds.length > 0) {
+    await SalePaymentEntry.updateMany(
+      { saleId: { $in: saleIds }, isDeleted: { $ne: true } },
+      { $set: stamp },
+    );
   }
-  await Sale.deleteMany({ societyId });
-  await Purchase.deleteMany({ societyId });
-  await ExpenseBill.deleteMany({ societyId });
-  await Vendor.deleteMany({ societyId });
-  await Inventory.deleteMany({ societyId });
-  await Partner.deleteMany({ societyId });
-  await SocietyPhase.deleteMany({ societyId });
-  await Society.deleteOne({ id: societyId });
+
+  await Promise.all([
+    Sale.updateMany({ societyId, isDeleted: { $ne: true } }, { $set: stamp }),
+    Purchase.updateMany({ societyId, isDeleted: { $ne: true } }, { $set: stamp }),
+    ExpenseBill.updateMany({ societyId, isDeleted: { $ne: true } }, { $set: stamp }),
+    Vendor.updateMany({ societyId, isDeleted: { $ne: true } }, { $set: stamp }),
+    Inventory.updateMany({ societyId, isDeleted: { $ne: true } }, { $set: stamp }),
+    Partner.updateMany({ societyId, isDeleted: { $ne: true } }, { $set: stamp }),
+    SocietyPhase.updateMany({ societyId, isDeleted: { $ne: true } }, { $set: stamp }),
+    // Transactions don't follow the soft-delete pattern (no notDeleted filter
+    // anywhere); hard-delete them as before so daybook stays consistent.
+    Transaction.deleteMany({ societyId }),
+  ]);
+
+  await Society.updateOne({ id: societyId }, { $set: stamp });
 };
 
 const summary = async (societyId) => {
