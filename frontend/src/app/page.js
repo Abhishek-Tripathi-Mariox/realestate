@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -240,6 +240,11 @@ const App = () => {
     setLoading(false)
   }, [])
 
+  // Tracks which dashboard tabs have already pulled their data for the
+  // currently-selected society. Cleared when the society changes so a fresh
+  // load happens, but switching back to an already-loaded tab is a no-op.
+  const loadedTabsRef = useRef(new Set())
+
   useEffect(() => {
     if (isAuthenticated) {
       loadSocieties()
@@ -250,16 +255,26 @@ const App = () => {
   useEffect(() => {
     if (isAuthenticated) {
       loadAccounts()
-      loadDaybook()
+      // Daybook lives on its own /daybook page — don't pre-fetch it on the
+      // dashboard. The page loader pulls fresh data when the user navigates.
     }
   }, [isAuthenticated])
 
   useEffect(() => {
     if (selectedSociety) {
-      loadSocietyData()
-      loadAccounts()  // Reload accounts when society changes (for scope filtering)
+      // Society changed — invalidate per-tab caches and load only the data
+      // the user needs right now (top summary cards + the active tab). Other
+      // tabs lazy-load on first switch via the activeTab effect below.
+      loadedTabsRef.current = new Set()
+      loadSocietySummary()
+      ensureTabLoaded(activeTab)
+      loadAccounts() // Reload accounts when society changes (for scope filtering)
     }
   }, [selectedSociety])
+
+  useEffect(() => {
+    if (selectedSociety) ensureTabLoaded(activeTab)
+  }, [activeTab])
 
   const loadMasterData = async () => {
     try {
@@ -417,58 +432,159 @@ const App = () => {
     }
   }
 
-  const loadSocietyData = async () => {
+  // Top summary cards (Total Purchases / Sales / Expenses / Payables /
+  // Net Profit) — needed regardless of which tab is open. Loaded on every
+  // society change.
+  const loadSocietySummary = async () => {
     try {
-      const [partnersData, inventoryData, purchasesData, salesData, vendorsData, expenseBillsData, commissionBillsData, resaleDealsData, summaryData, customersData] = await Promise.all([
-        apiCall(`/societies/${selectedSociety}/partners`),
-        apiCall(`/societies/${selectedSociety}/inventory`),
-        apiCall(`/societies/${selectedSociety}/purchases`),
-        apiCall(`/societies/${selectedSociety}/sales`),
-        apiCall(`/vendors?societyId=${selectedSociety}`),
-        apiCall(`/expense-bills?societyId=${selectedSociety}`),
-        apiCall(`/commission-bills?societyId=${selectedSociety}`),
-        apiCall(`/resales?societyId=${selectedSociety}`),
-        apiCall(`/societies/${selectedSociety}/summary`),
-        apiCall(`/customers?societyId=${selectedSociety}`)
-      ])
-      
-      // Handle new partners response format with summary
-      if (partnersData.partners) {
-        setPartners(partnersData.partners)
-        setPartnerSummary(partnersData.summary)
-      } else {
-        setPartners(partnersData)
-        setPartnerSummary(null)
-      }
-      
-      setInventory(inventoryData)
-      setPurchases(purchasesData)
-      
-      // Handle new sales response format with summary
-      if (salesData.sales) {
-        setSales(salesData.sales)
-        setSalesSummary(salesData.summary)
-      } else {
-        setSales(salesData)
-        setSalesSummary(null)
-      }
-      
-      setVendors(vendorsData)
-      setExpenseBills(expenseBillsData)
-      setCommissionBills(commissionBillsData)
-      setResaleDeals(resaleDealsData)
+      const summaryData = await apiCall(`/societies/${selectedSociety}/summary`)
       setSummary(summaryData)
-      setCustomers(customersData || [])
-      
-      // Load customer payments with pagination (reset to page 1)
-      await loadCustomerPayments(1, customerPaymentsPagination.limit)
     } catch (error) {
-      toast({
-        title: 'Error',
-        description: error.message,
-        variant: 'destructive'
-      })
+      console.error('Failed to load summary:', error)
     }
+  }
+
+  // Per-tab loaders. Each pulls only what its own tab + the dialogs it
+  // launches need. Cross-tab dependencies (e.g. SaleForm needs inventory)
+  // are folded into the relevant tab loader so opening the tab is enough.
+  const loadPartnersTab = async () => {
+    const data = await apiCall(`/societies/${selectedSociety}/partners`)
+    if (data.partners) {
+      setPartners(data.partners)
+      setPartnerSummary(data.summary)
+    } else {
+      setPartners(data)
+      setPartnerSummary(null)
+    }
+  }
+
+  const loadInventoryTab = async () => {
+    const data = await apiCall(`/societies/${selectedSociety}/inventory`)
+    setInventory(data)
+  }
+
+  const loadPurchasesTab = async () => {
+    const data = await apiCall(`/societies/${selectedSociety}/purchases`)
+    setPurchases(data)
+  }
+
+  const loadCustomersTab = async () => {
+    const data = await apiCall(`/customers?societyId=${selectedSociety}`)
+    setCustomers(data || [])
+    await loadCustomerPayments(1, customerPaymentsPagination.limit)
+  }
+
+  const loadSalesTab = async () => {
+    // Sales tab list renders denormalized fields, but Add/Edit Sale dialogs
+    // need inventory + customers — fetch those alongside so the form is
+    // ready when the user clicks Add.
+    const [salesData, inventoryData, customersData] = await Promise.all([
+      apiCall(`/societies/${selectedSociety}/sales`),
+      apiCall(`/societies/${selectedSociety}/inventory`),
+      apiCall(`/customers?societyId=${selectedSociety}`),
+    ])
+    if (salesData?.sales) {
+      setSales(salesData.sales)
+      setSalesSummary(salesData.summary)
+    } else {
+      setSales(salesData)
+      setSalesSummary(null)
+    }
+    setInventory(inventoryData)
+    setCustomers(customersData || [])
+  }
+
+  const loadResalesTab = async () => {
+    // Resales: list deals; ResaleForm picks from Sold inventory and
+    // existing sales for the seller side.
+    const [dealsData, inventoryData, salesData] = await Promise.all([
+      apiCall(`/resales?societyId=${selectedSociety}`),
+      apiCall(`/societies/${selectedSociety}/inventory`),
+      apiCall(`/societies/${selectedSociety}/sales`),
+    ])
+    setResaleDeals(dealsData)
+    setInventory(inventoryData)
+    if (salesData?.sales) {
+      setSales(salesData.sales)
+      setSalesSummary(salesData.summary)
+    } else if (salesData) {
+      setSales(salesData)
+      setSalesSummary(null)
+    }
+  }
+
+  const loadVendorsTab = async () => {
+    const data = await apiCall(`/vendors?societyId=${selectedSociety}`)
+    setVendors(data)
+  }
+
+  const loadExpensesTab = async () => {
+    // Expense form needs vendor list; bundle.
+    const [billsData, vendorsData] = await Promise.all([
+      apiCall(`/expense-bills?societyId=${selectedSociety}`),
+      apiCall(`/vendors?societyId=${selectedSociety}`),
+    ])
+    setExpenseBills(billsData)
+    setVendors(vendorsData)
+  }
+
+  const loadCommissionsTab = async () => {
+    // Commission form picks a sale + inventory.
+    const [billsData, inventoryData, salesData] = await Promise.all([
+      apiCall(`/commission-bills?societyId=${selectedSociety}`),
+      apiCall(`/societies/${selectedSociety}/inventory`),
+      apiCall(`/societies/${selectedSociety}/sales`),
+    ])
+    setCommissionBills(billsData)
+    setInventory(inventoryData)
+    if (salesData?.sales) {
+      setSales(salesData.sales)
+      setSalesSummary(salesData.summary)
+    } else if (salesData) {
+      setSales(salesData)
+      setSalesSummary(null)
+    }
+  }
+
+  const tabLoaders = {
+    partners: loadPartnersTab,
+    inventory: loadInventoryTab,
+    purchases: loadPurchasesTab,
+    customers: loadCustomersTab,
+    sales: loadSalesTab,
+    resales: loadResalesTab,
+    vendors: loadVendorsTab,
+    expenses: loadExpensesTab,
+    commissions: loadCommissionsTab,
+  }
+
+  // Lazy-load a tab's data on first visit. Reuses the cached fetch across
+  // tab toggles. On error, drops the cache marker so the next visit retries.
+  const ensureTabLoaded = async (tab) => {
+    if (!selectedSociety) return
+    const loader = tabLoaders[tab]
+    if (!loader) return
+    if (loadedTabsRef.current.has(tab)) return
+    loadedTabsRef.current.add(tab)
+    try {
+      await loader()
+    } catch (error) {
+      loadedTabsRef.current.delete(tab)
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  // Called by CRUD handlers after a mutation. Refreshes the top summary
+  // cards plus only the tabs the user has actually visited — untouched
+  // tabs stay cold and load fresh on first switch.
+  const loadSocietyData = async () => {
+    if (!selectedSociety) return
+    const visitedTabs = Array.from(loadedTabsRef.current)
+    loadedTabsRef.current = new Set()
+    await Promise.all([
+      loadSocietySummary(),
+      ...visitedTabs.map(tab => ensureTabLoaded(tab)),
+    ])
   }
   
   // Dedicated function to load customer payments with pagination
