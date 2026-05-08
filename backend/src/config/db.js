@@ -25,17 +25,17 @@ const initializeDefaults = async () => {
   
   try {
     // Create default admin
-    const adminExists = await User.findOne({ email: 'admin@realestate.com' })
+    const adminExists = await User.findOne({ email: 'garg9034102@gmail.com' })
     if (!adminExists) {
       const hashedPassword = await bcrypt.hash('Admin@123', 10)
       await User.create({
         id: uuidv4(),
-        email: 'admin@realestate.com',
+        email: 'garg9034102@gmail.com',
         password: hashedPassword,
         name: 'Super Admin',
         role: 'super_admin'
       })
-      console.log('Default Super Admin created: admin@realestate.com / Admin@123')
+      console.log('Default Super Admin created: garg9034102@gmail.com / Admin@123')
     }
     
     // Create default accounts

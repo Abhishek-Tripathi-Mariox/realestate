@@ -17,12 +17,12 @@ const initializeDatabase = async () => {
   // don't manually loop through collections any more — declared `unique` on
   // each schema's `id` (and User's `email`) is enough.
 
-  const adminExists = await User.findOne({ email: 'admin@realestate.com' }).lean();
+  const adminExists = await User.findOne({ email: 'garg9034102@gmail.com' }).lean();
   if (!adminExists) {
     const hashedPassword = await bcrypt.hash('Admin@123', 10);
     await User.create({
       id: uuidv4(),
-      email: 'admin@realestate.com',
+      email: 'garg9034102@gmail.com',
       password: hashedPassword,
       name: 'Super Admin',
       role: 'super_admin',

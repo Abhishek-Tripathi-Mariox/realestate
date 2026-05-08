@@ -203,6 +203,19 @@ const App = () => {
     totalPages: 0
   })
   const [customerPaymentsLoading, setCustomerPaymentsLoading] = useState(false)
+
+  // Change password dialog state
+  const [showChangePassword, setShowChangePassword] = useState(false)
+  const [changePasswordForm, setChangePasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  })
+  const [changePasswordSubmitting, setChangePasswordSubmitting] = useState(false)
+  const [showCurrentPwd, setShowCurrentPwd] = useState(false)
+  const [showNewPwd, setShowNewPwd] = useState(false)
+  const [showConfirmPwd, setShowConfirmPwd] = useState(false)
+
   const [showCustomerForm, setShowCustomerForm] = useState(false)
   const [editingCustomer, setEditingCustomer] = useState(null)
   const [showPaymentForm, setShowPaymentForm] = useState(false)
@@ -374,6 +387,46 @@ const App = () => {
       title: 'Logged Out',
       description: 'You have been logged out successfully'
     })
+  }
+
+  const openChangePassword = () => {
+    setChangePasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' })
+    setShowCurrentPwd(false)
+    setShowNewPwd(false)
+    setShowConfirmPwd(false)
+    setShowChangePassword(true)
+  }
+
+  const handleChangePassword = async (e) => {
+    e.preventDefault()
+    const { currentPassword, newPassword, confirmPassword } = changePasswordForm
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      toast({ title: 'Error', description: 'All fields are required', variant: 'destructive' })
+      return
+    }
+    if (newPassword.length < 6) {
+      toast({ title: 'Error', description: 'New password must be at least 6 characters', variant: 'destructive' })
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      toast({ title: 'Error', description: 'New passwords do not match', variant: 'destructive' })
+      return
+    }
+    if (currentPassword === newPassword) {
+      toast({ title: 'Error', description: 'New password must be different from current password', variant: 'destructive' })
+      return
+    }
+    try {
+      setChangePasswordSubmitting(true)
+      await apiCall('/auth/change-password', 'POST', { currentPassword, newPassword })
+      toast({ title: 'Success', description: 'Password changed successfully' })
+      setShowChangePassword(false)
+      setChangePasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    } finally {
+      setChangePasswordSubmitting(false)
+    }
   }
 
   const loadSocieties = async () => {
@@ -1442,7 +1495,7 @@ const App = () => {
                 <Input
                   id="email"
                   type="email"
-                  placeholder="admin@realestate.com"
+                  placeholder="email@example.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="h-11 bg-white/80 border-slate-200 focus-visible:ring-2 focus-visible:ring-primary/40"
@@ -1470,14 +1523,6 @@ const App = () => {
                 Sign In
               </Button>
             </form>
-            {/* <div className="mt-6 pt-5 border-t border-slate-200/70">
-              <p className="text-xs text-center text-slate-500">
-                Default credentials:{' '}
-                <span className="font-mono text-slate-700">admin@realestate.com</span>{' '}
-                /{' '}
-                <span className="font-mono text-slate-700">Admin@123</span>
-              </p>
-            </div> */}
           </div>
 
           <p className="mt-6 text-center text-xs text-slate-400">
@@ -1765,8 +1810,105 @@ const App = () => {
   }
 
   return (
-    <AppShell user={user} onLogout={handleLogout} searchPlaceholder="Search properties, customers, partners...">
+    <AppShell user={user} onLogout={handleLogout} onChangePassword={openChangePassword} searchPlaceholder="Search properties, customers, partners...">
       <Toaster />
+
+      {/* Change Password Dialog */}
+      <Dialog open={showChangePassword} onOpenChange={setShowChangePassword}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Lock className="w-4 h-4" /> Change Password
+            </DialogTitle>
+            <DialogDescription>
+              Enter your current password and choose a new one.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleChangePassword} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="cp-current">Current Password</Label>
+              <div className="relative">
+                <Input
+                  id="cp-current"
+                  type={showCurrentPwd ? 'text' : 'password'}
+                  value={changePasswordForm.currentPassword}
+                  onChange={(e) => setChangePasswordForm({ ...changePasswordForm, currentPassword: e.target.value })}
+                  placeholder="Enter current password"
+                  required
+                  autoComplete="current-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowCurrentPwd(v => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700"
+                  aria-label={showCurrentPwd ? 'Hide password' : 'Show password'}
+                >
+                  {showCurrentPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="cp-new">New Password</Label>
+              <div className="relative">
+                <Input
+                  id="cp-new"
+                  type={showNewPwd ? 'text' : 'password'}
+                  value={changePasswordForm.newPassword}
+                  onChange={(e) => setChangePasswordForm({ ...changePasswordForm, newPassword: e.target.value })}
+                  placeholder="At least 6 characters"
+                  required
+                  minLength={6}
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewPwd(v => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700"
+                  aria-label={showNewPwd ? 'Hide password' : 'Show password'}
+                >
+                  {showNewPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="cp-confirm">Confirm New Password</Label>
+              <div className="relative">
+                <Input
+                  id="cp-confirm"
+                  type={showConfirmPwd ? 'text' : 'password'}
+                  value={changePasswordForm.confirmPassword}
+                  onChange={(e) => setChangePasswordForm({ ...changePasswordForm, confirmPassword: e.target.value })}
+                  placeholder="Re-enter new password"
+                  required
+                  minLength={6}
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmPwd(v => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700"
+                  aria-label={showConfirmPwd ? 'Hide password' : 'Show password'}
+                >
+                  {showConfirmPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setShowChangePassword(false)}
+                disabled={changePasswordSubmitting}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={changePasswordSubmitting} className="gradient-bg text-white">
+                {changePasswordSubmitting ? 'Changing...' : 'Change Password'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <div className="mb-6 flex items-center justify-between">
         <div>

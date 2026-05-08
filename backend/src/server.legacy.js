@@ -348,12 +348,12 @@ const initializeDatabase = async () => {
   
   // Create admin user
   const usersCollection = db.collection('users');
-  const adminExists = await usersCollection.findOne({ email: 'admin@realestate.com' });
+  const adminExists = await usersCollection.findOne({ email: 'garg9034102@gmail.com' });
   if (!adminExists) {
     const hashedPassword = await bcrypt.hash('Admin@123', 10);
     await usersCollection.insertOne({
       id: uuidv4(),
-      email: 'admin@realestate.com',
+      email: 'garg9034102@gmail.com',
       password: hashedPassword,
       name: 'Super Admin',
       role: 'super_admin',

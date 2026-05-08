@@ -7,6 +7,7 @@ import { Topbar } from './Topbar'
 export function AppShell({
   user,
   onLogout,
+  onChangePassword,
   search,
   onSearchChange,
   searchPlaceholder,
@@ -19,6 +20,7 @@ export function AppShell({
       <Sidebar
         user={user}
         onLogout={onLogout}
+        onChangePassword={onChangePassword}
         mobileOpen={mobileNavOpen}
         onMobileClose={() => setMobileNavOpen(false)}
       />

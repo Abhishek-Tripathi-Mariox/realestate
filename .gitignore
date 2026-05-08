@@ -19,6 +19,13 @@ out/
 **/.env
 **/.env.local
 
+# Secrets & local backups
+**/credentials/
+backend/backups/
+backend/scripts/backupToDrive.js
+backend/scripts/restoreFromDrive.js
+backend/scripts/backup-cron.sh
+
 # Logs
 *.log
 npm-debug.log*

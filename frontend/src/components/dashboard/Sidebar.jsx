@@ -14,6 +14,7 @@ import {
   History,
   Layers,
   Trash2,
+  KeyRound,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -42,7 +43,7 @@ function BrandMark({ className = '' }) {
   )
 }
 
-export function Sidebar({ user, onLogout, mobileOpen = false, onMobileClose }) {
+export function Sidebar({ user, onLogout, onChangePassword, mobileOpen = false, onMobileClose }) {
   const pathname = usePathname() || '/'
 
   const items = [
@@ -92,7 +93,19 @@ export function Sidebar({ user, onLogout, mobileOpen = false, onMobileClose }) {
           )
         })}
       </nav>
-      <div className="p-3 border-t border-slate-200/70">
+      <div className="p-3 border-t border-slate-200/70 space-y-1">
+        {onChangePassword && (
+          <button
+            onClick={() => {
+              onChangePassword()
+              onMobileClose && onMobileClose()
+            }}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors"
+          >
+            <KeyRound className="w-4 h-4 text-slate-500 shrink-0" />
+            <span>Change Password</span>
+          </button>
+        )}
         <button
           onClick={onLogout}
           className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors"
