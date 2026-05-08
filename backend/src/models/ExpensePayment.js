@@ -16,4 +16,8 @@ const schema = buildSchema({
   createdAt: Date,
 });
 
+schema.index({ billId: 1, isDeleted: 1 });
+schema.index({ societyId: 1 });
+schema.index({ accountId: 1 });
+
 module.exports = mongoose.model('ExpensePayment', schema, 'expense_payments');

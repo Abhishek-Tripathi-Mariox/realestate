@@ -16,4 +16,7 @@ const schema = buildSchema({
   createdAt: Date,
 });
 
+schema.index({ dealId: 1, isDeleted: 1 });
+schema.index({ accountId: 1 });
+
 module.exports = mongoose.model('ResaleBuyerPayment', schema, 'resale_buyer_payments');

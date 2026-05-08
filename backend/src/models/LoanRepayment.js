@@ -15,4 +15,8 @@ const schema = buildSchema({
   createdAt: Date,
 });
 
+schema.index({ loanId: 1, isDeleted: 1 });
+schema.index({ partyId: 1 });
+schema.index({ accountId: 1 });
+
 module.exports = mongoose.model('LoanRepayment', schema, 'loan_repayments');

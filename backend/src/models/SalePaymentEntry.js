@@ -17,4 +17,8 @@ const schema = buildSchema({
   createdAt: Date,
 });
 
+schema.index({ saleId: 1, isDeleted: 1 });
+schema.index({ societyId: 1 });
+schema.index({ accountId: 1 });
+
 module.exports = mongoose.model('SalePaymentEntry', schema, 'sale_payment_entries');

@@ -43,9 +43,21 @@ const listForSociety = async (societyId) => {
     : [];
   const dealBySaleId = Object.fromEntries(resaleDeals.map(d => [d.originalSaleId, d]));
 
-  const enrichedSales = await Promise.all(sales.map(async (sale) => {
-    const inventory = await Inventory.findOne({ id: sale.inventoryId }).lean();
-    const customer = sale.customerId ? await Customer.findOne({ id: sale.customerId }).lean() : null;
+  // Bulk-fetch related inventory and customers in one query each instead of
+  // firing per-sale findOne() calls (was N+1 → now 2 queries regardless of
+  // result size).
+  const inventoryIds = [...new Set(sales.map(s => s.inventoryId).filter(Boolean))];
+  const customerIds = [...new Set(sales.map(s => s.customerId).filter(Boolean))];
+  const [inventoryDocs, customerDocs] = await Promise.all([
+    inventoryIds.length ? Inventory.find({ id: { $in: inventoryIds } }).lean() : [],
+    customerIds.length ? Customer.find({ id: { $in: customerIds } }).lean() : [],
+  ]);
+  const inventoryById = Object.fromEntries(inventoryDocs.map(i => [i.id, i]));
+  const customerById = Object.fromEntries(customerDocs.map(c => [c.id, c]));
+
+  const enrichedSales = sales.map((sale) => {
+    const inventory = inventoryById[sale.inventoryId] || null;
+    const customer = sale.customerId ? customerById[sale.customerId] : null;
     const totalPaid = (ledgerNetBySale[sale.id] || 0) + (allocatedBySale[sale.id] || 0);
     const linkedDeal = dealBySaleId[sale.id];
     const isTransferred = sale.status === 'TRANSFERRED' || Boolean(linkedDeal);
@@ -68,7 +80,7 @@ const listForSociety = async (societyId) => {
       totalPaid,
       balance,
     };
-  }));
+  });
 
   const totalAmount = enrichedSales.reduce((sum, s) => sum + (s.finalAmount || 0), 0);
   const totalReceived = enrichedSales.reduce((sum, s) => sum + s.totalPaid, 0);
@@ -150,9 +162,15 @@ const getById = async (id) => {
     .sort({ paymentDate: -1 })
     .lean();
 
-  const payments = await Promise.all(paymentEntries.map(async (p) => {
-    const account = p.accountId ? await Account.findOne({ id: p.accountId }).lean() : null;
-    return { ...stripId(p), accountName: account?.name || '-' };
+  // Bulk-fetch all referenced accounts in one query instead of per-payment.
+  const accountIds = [...new Set(paymentEntries.map(p => p.accountId).filter(Boolean))];
+  const accountDocs = accountIds.length
+    ? await Account.find({ id: { $in: accountIds } }).lean()
+    : [];
+  const accountById = Object.fromEntries(accountDocs.map(a => [a.id, a]));
+  const payments = paymentEntries.map((p) => ({
+    ...stripId(p),
+    accountName: (p.accountId && accountById[p.accountId]?.name) || '-',
   }));
 
   const allocations = await PaymentAllocation.find({ saleId: id }).lean();
@@ -445,9 +463,14 @@ const listUnassigned = async (societyId) => {
   const filter = notDeleted({ $or: [{ customerId: null }, { customerId: '' }, { customerId: { $exists: false } }] });
   if (societyId) filter.societyId = societyId;
   const sales = await Sale.find(filter).lean();
-  const enriched = await Promise.all(sales.map(async (s) => {
-    const inventory = s.inventoryId ? await Inventory.findOne({ id: s.inventoryId }).lean() : null;
-    return { ...s, inventoryNumber: inventory?.inventoryNumber || 'N/A' };
+  const inventoryIds = [...new Set(sales.map(s => s.inventoryId).filter(Boolean))];
+  const inventoryDocs = inventoryIds.length
+    ? await Inventory.find({ id: { $in: inventoryIds } }).lean()
+    : [];
+  const inventoryById = Object.fromEntries(inventoryDocs.map(i => [i.id, i]));
+  const enriched = sales.map((s) => ({
+    ...s,
+    inventoryNumber: (s.inventoryId && inventoryById[s.inventoryId]?.inventoryNumber) || 'N/A',
   }));
   return enriched.map(stripId);
 };

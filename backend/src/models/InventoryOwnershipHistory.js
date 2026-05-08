@@ -10,4 +10,7 @@ const schema = buildSchema({
   transferredBy: String,
 });
 
+schema.index({ inventoryId: 1 });
+schema.index({ dealId: 1 });
+
 module.exports = mongoose.model('InventoryOwnershipHistory', schema, 'inventory_ownership_history');

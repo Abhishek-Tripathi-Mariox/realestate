@@ -16,4 +16,8 @@ const schema = buildSchema({
   createdAt: Date,
 });
 
+schema.index({ societyId: 1, isDeleted: 1 });
+schema.index({ inventoryId: 1 });
+schema.index({ originalSaleId: 1 });
+
 module.exports = mongoose.model('ResaleDeal', schema, 'resale_deals');

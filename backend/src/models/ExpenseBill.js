@@ -19,4 +19,8 @@ const schema = buildSchema({
   createdAt: Date,
 });
 
+schema.index({ societyId: 1, isDeleted: 1 });
+schema.index({ vendorId: 1 });
+schema.index({ scope: 1 });
+
 module.exports = mongoose.model('ExpenseBill', schema, 'expense_bills');

@@ -8,6 +8,53 @@ const AUDIT_SKIP_PATHS = [
   /^\/api\/admin\/audit-logs/,
 ];
 
+// Batched audit-log writer. Each non-GET request used to fire its own
+// AuditLog.create() concurrently which saturated the Mongo connection pool
+// under load. We now buffer entries in memory and flush them with a single
+// insertMany() either on a timer or once the buffer fills.
+const AUDIT_BUFFER = [];
+const AUDIT_FLUSH_INTERVAL_MS = 2000;
+const AUDIT_BUFFER_MAX = 200;
+let auditFlushTimer = null;
+let auditFlushing = false;
+
+const flushAuditBuffer = async () => {
+  if (auditFlushing || AUDIT_BUFFER.length === 0) return;
+  auditFlushing = true;
+  const batch = AUDIT_BUFFER.splice(0, AUDIT_BUFFER.length);
+  try {
+    await AuditLog.insertMany(batch, { ordered: false });
+  } catch (err) {
+    console.error('[audit] flush failed:', err.message);
+  } finally {
+    auditFlushing = false;
+  }
+};
+
+const scheduleAuditFlush = () => {
+  if (auditFlushTimer) return;
+  auditFlushTimer = setTimeout(() => {
+    auditFlushTimer = null;
+    flushAuditBuffer();
+  }, AUDIT_FLUSH_INTERVAL_MS);
+  if (auditFlushTimer.unref) auditFlushTimer.unref();
+};
+
+const enqueueAuditEntry = (entry) => {
+  AUDIT_BUFFER.push(entry);
+  if (AUDIT_BUFFER.length >= AUDIT_BUFFER_MAX) {
+    flushAuditBuffer();
+  } else {
+    scheduleAuditFlush();
+  }
+};
+
+// Best-effort flush on shutdown so we don't lose the tail of the buffer.
+const flushOnExit = () => { flushAuditBuffer().catch(() => {}); };
+process.once('SIGINT', flushOnExit);
+process.once('SIGTERM', flushOnExit);
+process.once('beforeExit', flushOnExit);
+
 const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OID_RX = /^[0-9a-f]{24}$/i;
 
@@ -81,9 +128,7 @@ const autoAudit = (req, res, next) => {
         timestamp: new Date(),
       };
 
-      AuditLog.create(entry).catch((err) => {
-        console.error('[audit] failed to insert log:', err.message);
-      });
+      enqueueAuditEntry(entry);
     } catch (err) {
       console.error('[audit] middleware error:', err.message);
     }

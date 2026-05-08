@@ -11,4 +11,6 @@ const schema = buildSchema({
   updatedAt: Date,
 });
 
+schema.index({ societyId: 1, isDeleted: 1 });
+
 module.exports = mongoose.model('SocietyPhase', schema, 'society_phases');

@@ -9,4 +9,7 @@ const schema = buildSchema({
   createdAt: Date,
 });
 
+schema.index({ saleId: 1 });
+schema.index({ paymentId: 1 });
+
 module.exports = mongoose.model('PaymentAllocation', schema, 'payment_allocations');

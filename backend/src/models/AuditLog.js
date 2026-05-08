@@ -15,4 +15,8 @@ const schema = buildSchema({
   timestamp: Date,
 });
 
+schema.index({ timestamp: -1 });
+schema.index({ entityType: 1, entityId: 1 });
+schema.index({ userId: 1, timestamp: -1 });
+
 module.exports = mongoose.model('AuditLog', schema, 'audit_logs');

@@ -15,4 +15,7 @@ const schema = buildSchema({
   updatedAt: Date,
 });
 
+schema.index({ societyId: 1, isDeleted: 1 });
+schema.index({ phone: 1 });
+
 module.exports = mongoose.model('Customer', schema, 'customers');

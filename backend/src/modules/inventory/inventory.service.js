@@ -172,9 +172,20 @@ const listGlobalAdmin = async (query) => {
   };
 };
 
-const listGlobal = async () => {
-  const inventory = await Inventory.find(notDeleted()).lean();
-  const societies = await Society.find({}).lean();
+// Paginated by default — without `?page=&limit=` callers get capped to a
+// sane window instead of dumping the entire collection, which used to OOM
+// large clients and stall response serialization.
+const listGlobal = async (query = {}) => {
+  const pageNum = Math.max(1, parseInt(query.page) || 1);
+  const limitNum = Math.max(1, Math.min(500, parseInt(query.limit) || 100));
+  const skip = (pageNum - 1) * limitNum;
+
+  const filter = notDeleted();
+  const [inventory, total, societies] = await Promise.all([
+    Inventory.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limitNum).lean(),
+    Inventory.countDocuments(filter),
+    Society.find({}).lean(),
+  ]);
   const societyMap = {};
   societies.forEach(s => societyMap[s.id] = s.name);
 
@@ -183,7 +194,10 @@ const listGlobal = async () => {
     societyName: societyMap[item.societyId] || 'Unknown',
   }));
 
-  return enriched.map(stripId);
+  return {
+    inventory: enriched.map(stripId),
+    pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+  };
 };
 
 module.exports = { listForSociety, create, update, remove, listGlobalAdmin, listGlobal };

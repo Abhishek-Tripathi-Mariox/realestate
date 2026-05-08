@@ -22,4 +22,9 @@ const schema = buildSchema({
   updatedAt: Date,
 });
 
+schema.index({ societyId: 1, isDeleted: 1 });
+schema.index({ inventoryId: 1 });
+schema.index({ customerId: 1 });
+schema.index({ status: 1 });
+
 module.exports = mongoose.model('Sale', schema, 'sales');

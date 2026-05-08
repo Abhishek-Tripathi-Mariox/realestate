@@ -18,4 +18,8 @@ const schema = buildSchema({
   updatedAt: Date,
 });
 
+schema.index({ customerId: 1, isDeleted: 1 });
+schema.index({ societyId: 1, isDeleted: 1 });
+schema.index({ accountId: 1 });
+
 module.exports = mongoose.model('CustomerPayment', schema, 'customer_payments');

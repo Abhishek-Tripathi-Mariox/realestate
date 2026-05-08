@@ -21,4 +21,8 @@ const schema = buildSchema({
   updatedAt: Date,
 });
 
+schema.index({ societyId: 1, isDeleted: 1 });
+schema.index({ status: 1 });
+schema.index({ societyId: 1, status: 1 });
+
 module.exports = mongoose.model('Inventory', schema, 'inventory');

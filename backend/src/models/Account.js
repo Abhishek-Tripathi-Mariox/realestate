@@ -14,4 +14,7 @@ const schema = buildSchema({
   updatedAt: Date,
 });
 
+schema.index({ scope: 1, societyId: 1 });
+schema.index({ isDefault: 1 });
+
 module.exports = mongoose.model('Account', schema, 'accounts');

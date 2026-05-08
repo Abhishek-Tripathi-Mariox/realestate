@@ -13,4 +13,6 @@ const schema = buildSchema({
   updatedAt: Date,
 });
 
+schema.index({ societyId: 1, isDeleted: 1 });
+
 module.exports = mongoose.model('Partner', schema, 'partners');

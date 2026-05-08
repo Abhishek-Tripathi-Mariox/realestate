@@ -15,4 +15,7 @@ const schema = buildSchema({
   createdAt: Date,
 });
 
+schema.index({ societyId: 1, isDeleted: 1 });
+schema.index({ saleId: 1 });
+
 module.exports = mongoose.model('CommissionBill', schema, 'commission_bills');

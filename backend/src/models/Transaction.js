@@ -25,4 +25,9 @@ const schema = buildSchema({
   createdAt: Date,
 });
 
+schema.index({ sourceType: 1, sourceId: 1 });
+schema.index({ societyId: 1, txnDate: -1 });
+schema.index({ accountId: 1, txnDate: -1 });
+schema.index({ originalTxnId: 1 });
+
 module.exports = mongoose.model('Transaction', schema, 'transactions');

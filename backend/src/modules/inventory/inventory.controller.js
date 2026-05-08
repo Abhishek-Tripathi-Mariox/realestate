@@ -31,7 +31,7 @@ const listGlobalAdmin = asyncHandler(async (req, res) => {
 });
 
 const listGlobal = asyncHandler(async (req, res) => {
-  res.json(await service.listGlobal());
+  res.json(await service.listGlobal(req.query));
 });
 
 module.exports = { listForSociety, create, update, remove, listGlobalAdmin, listGlobal };

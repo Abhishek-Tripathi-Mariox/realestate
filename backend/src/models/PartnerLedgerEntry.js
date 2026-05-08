@@ -17,4 +17,8 @@ const schema = buildSchema({
   updatedAt: Date,
 });
 
+schema.index({ partnerId: 1, isDeleted: 1 });
+schema.index({ societyId: 1 });
+schema.index({ accountId: 1 });
+
 module.exports = mongoose.model('PartnerLedgerEntry', schema, 'partner_ledger_entries');
