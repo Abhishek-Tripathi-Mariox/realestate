@@ -13,6 +13,7 @@ import {
   LogOut,
   History,
   Layers,
+  Trash2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -57,6 +58,7 @@ export function Sidebar({ user, onLogout, mobileOpen = false, onMobileClose }) {
   }
   if (user?.role === 'super_admin') {
     items.push({ label: 'Audit Logs', href: '/audit-logs', icon: History })
+    items.push({ label: 'Trash', href: '/trash', icon: Trash2 })
   }
 
   const isActive = (href) =>

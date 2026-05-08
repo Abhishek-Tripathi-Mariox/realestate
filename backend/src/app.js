@@ -24,6 +24,7 @@ const commissionsRoutes = require('./modules/commissions/commissions.routes');
 const resalesRoutes = require('./modules/resales/resales.routes');
 const loansRoutes = require('./modules/loans/loans.routes');
 const adminRoutes = require('./modules/admin/admin.routes');
+const trashRoutes = require('./modules/trash/trash.routes');
 
 const app = express();
 
@@ -88,6 +89,7 @@ app.use('/api/loans', loansRoutes.loansRouter);
 
 app.use('/api/admin', adminRoutes.adminRouter);
 app.use('/api/cleanup-orphans', adminRoutes.cleanupOrphansRouter);
+app.use('/api/trash', trashRoutes);
 
 // 404 fallback
 app.use((req, res) => {
