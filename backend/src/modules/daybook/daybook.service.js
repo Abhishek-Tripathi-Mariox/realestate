@@ -1,4 +1,5 @@
 const { createTransaction } = require('../../utils/transactions');
+const { filterAliveTransactions } = require('../../utils/aliveTransactions');
 const { Transaction, Account, Society } = require('../../models');
 
 const list = async (query) => {
@@ -38,6 +39,13 @@ const list = async (query) => {
     .limit(limit)
     .lean();
 
+  // Tag each row with isOrphan so the UI can dim/hide rows whose parent
+  // sale / bill / etc. has been soft-deleted. We don't drop them here so
+  // pagination math stays straightforward — the summary() endpoint is the
+  // place where orphans are actually excluded from totals.
+  const aliveTxns = await filterAliveTransactions(transactions);
+  const aliveIds = new Set(aliveTxns.map((t) => t.id));
+
   const accounts = await Account.find({}).lean();
   const accountMap = {};
   accounts.forEach(a => accountMap[a.id] = a.name);
@@ -50,6 +58,7 @@ const list = async (query) => {
     ...txn,
     accountName: accountMap[txn.accountId] || 'Unknown',
     societyName: txn.societyId ? (societyMap[txn.societyId] || 'Unknown') : 'Company Level',
+    isOrphan: !aliveIds.has(txn.id),
   }));
 
   return {
@@ -74,7 +83,11 @@ const summary = async (query) => {
     filter.txnDate.$lte = query.endDate;
   }
 
-  const transactions = await Transaction.find(filter).lean();
+  const rawTxns = await Transaction.find(filter).lean();
+  // Drop orphans (parent sale / bill / payment soft-deleted) so the daybook
+  // totals match reality — without this, deleting a sale leaves its IN
+  // payment hanging in the summary forever.
+  const transactions = await filterAliveTransactions(rawTxns);
 
   let totalIn = 0, totalOut = 0;
   transactions.forEach(txn => {

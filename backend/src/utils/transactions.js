@@ -5,12 +5,15 @@ const getAccountBalance = async (accountId) => {
   const account = await Account.findOne({ id: accountId }).lean();
   if (!account) return { balance: 0, account: null };
 
-  const transactions = await Transaction.find({
+  const rawTxns = await Transaction.find({
     accountId,
     isVoided: { $ne: true },
     isReversed: { $ne: true },
     isReversal: { $ne: true },
   }).lean();
+  // Lazy-require to avoid a circular import (aliveTransactions ↔ models ↔ utils).
+  const { filterAliveTransactions } = require('./aliveTransactions');
+  const transactions = await filterAliveTransactions(rawTxns);
 
   let balance = 0;
   for (const txn of transactions) {
