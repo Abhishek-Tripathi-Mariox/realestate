@@ -132,6 +132,19 @@ const restore = async (typeKey, id) => {
     return { message: `Society restored along with ${cascadeCount} related record(s)` };
   }
 
+  // When a sale is restored, mark its inventory unit as Sold again so the
+  // unit doesn't show up as Available even though it now has an active sale
+  // pointing at it.
+  if (bucket.slug === 'sales') {
+    const sale = await Sale.findOne({ id }).lean();
+    if (sale && sale.inventoryId && sale.status !== 'TRANSFERRED') {
+      await Inventory.updateOne(
+        { id: sale.inventoryId },
+        { $set: { status: 'Sold', soldDate: sale.saleDate || new Date().toISOString().slice(0, 10) } },
+      );
+    }
+  }
+
   return { message: 'Record restored' };
 };
 

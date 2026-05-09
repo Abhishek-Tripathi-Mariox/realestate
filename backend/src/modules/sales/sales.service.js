@@ -220,11 +220,32 @@ const update = async (id, body) => {
 
 const remove = async (id) => {
   const sale = await Sale.findOne({ id }).lean();
-  if (sale) {
-    await Inventory.updateOne(
-      { id: sale.inventoryId },
-      { $set: { status: 'Available', soldDate: null } },
-    );
+
+  // Free up the inventory unit so it can be re-sold. Skip when the sale was
+  // already transferred via a resale deal — the unit is owned by someone
+  // else now and shouldn't be flipped back to Available.
+  if (sale && sale.inventoryId && sale.status !== 'TRANSFERRED') {
+    // Make sure no other live sale or resale deal still references this
+    // inventory before we mark it Available — guards against accidental
+    // double-bookings (or a corrupt history) clobbering an active sale.
+    const otherSale = await Sale.findOne(notDeleted({
+      inventoryId: sale.inventoryId,
+      id: { $ne: id },
+      status: { $ne: 'TRANSFERRED' },
+    })).lean();
+    const liveDeal = await ResaleDeal.findOne(notDeleted({
+      inventoryId: sale.inventoryId,
+    })).lean();
+
+    if (!otherSale && !liveDeal) {
+      const result = await Inventory.updateOne(
+        { id: sale.inventoryId },
+        { $set: { status: 'Available', soldDate: null } },
+      );
+      if (result.matchedCount === 0) {
+        console.warn(`[sales.remove] inventory ${sale.inventoryId} not found while freeing sale ${id}`);
+      }
+    }
   }
 
   // Free up any customer-payment allocations pointing to this sale and bump
@@ -246,6 +267,14 @@ const remove = async (id) => {
       );
     }
   }
+
+  // Soft-delete child sale-payment ledger entries so they disappear from the
+  // sale-ledger views alongside the parent sale. Leaving them live keeps
+  // stale entries hanging around with a missing parent.
+  await SalePaymentEntry.updateMany(
+    { saleId: id, isDeleted: { $ne: true } },
+    { $set: { isDeleted: true, deletedAt: new Date(), deletedReason: 'Sale deleted' } },
+  );
 
   await Sale.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
 };
