@@ -49,10 +49,18 @@ const enqueueAuditEntry = (entry) => {
   }
 };
 
-// Best-effort flush on shutdown so we don't lose the tail of the buffer.
-const flushOnExit = () => { flushAuditBuffer().catch(() => {}); };
-process.once('SIGINT', flushOnExit);
-process.once('SIGTERM', flushOnExit);
+// Flush on shutdown so we don't lose the tail of the buffer. SIGINT /
+// SIGTERM handlers must await the flush before letting Node exit, so we
+// wrap process.exit to give the buffer a chance to drain.
+const flushOnExit = async () => {
+  try { await flushAuditBuffer(); } catch { /* swallow — best-effort */ }
+};
+const handleSignal = (signal) => async () => {
+  await flushOnExit();
+  process.exit(signal === 'SIGINT' ? 130 : 143);
+};
+process.once('SIGINT', handleSignal('SIGINT'));
+process.once('SIGTERM', handleSignal('SIGTERM'));
 process.once('beforeExit', flushOnExit);
 
 const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -103,14 +111,41 @@ const autoAudit = (req, res, next) => {
       const userId = req.user?.userId || req.user?.id || null;
       const userName = req.user?.name || req.user?.email || (action === 'LOGIN' ? (req.body?.email || null) : null);
 
+      // Redact a wider field set than just token/password — keys carrying
+      // secrets / PII shouldn't be persisted in the audit collection at all.
+      const SENSITIVE_KEYS = new Set([
+        'token', 'password', 'currentPassword', 'newPassword', 'confirmPassword',
+        'apiKey', 'secret', 'jwt', 'authorization', 'cookie', 'sessionId',
+        'otp', 'pin', 'cvv', 'cardNumber', 'panNumber', 'aadhaar', 'aadhar',
+      ]);
+      const redact = (val) => {
+        if (val === null || val === undefined) return val;
+        if (Array.isArray(val)) return val.map(redact);
+        if (typeof val !== 'object') return val;
+        const out = {};
+        for (const k of Object.keys(val)) {
+          out[k] = SENSITIVE_KEYS.has(k) ? '***' : redact(val[k]);
+        }
+        return out;
+      };
+
       let after = null;
       if (action !== 'DELETE' && capturedBody && typeof capturedBody === 'object') {
         try {
-          after = JSON.parse(JSON.stringify(capturedBody));
-          if (after.token) after.token = '***';
-          if (after.password) after.password = '***';
+          after = redact(JSON.parse(JSON.stringify(capturedBody)));
         } catch {
           after = null;
+        }
+      }
+      // Capture request-side payload as `before` for UPDATE/DELETE so we
+      // can see what the client sent (the *previous* DB state would
+      // require a pre-handler hook; this is a pragmatic compromise).
+      let before = null;
+      if ((action === 'UPDATE' || action === 'DELETE') && req.body && typeof req.body === 'object') {
+        try {
+          before = redact(JSON.parse(JSON.stringify(req.body)));
+        } catch {
+          before = null;
         }
       }
 
@@ -123,7 +158,7 @@ const autoAudit = (req, res, next) => {
         path: req.path,
         userId,
         userName,
-        before: null,
+        before,
         after,
         timestamp: new Date(),
       };

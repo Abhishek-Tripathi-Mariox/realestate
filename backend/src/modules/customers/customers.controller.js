@@ -16,8 +16,8 @@ const update = asyncHandler(async (req, res) => {
 });
 
 const remove = asyncHandler(async (req, res) => {
-  await service.remove(req.params.id);
-  res.json({ message: 'Customer deleted' });
+  const result = await service.remove(req.params.id);
+  res.json(result || { message: 'Customer deleted' });
 });
 
 const listSales = asyncHandler(async (req, res) => {

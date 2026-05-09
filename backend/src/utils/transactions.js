@@ -1,5 +1,5 @@
 const { v4: uuidv4 } = require('uuid');
-const { Account, Transaction } = require('../models');
+const { Account, Transaction, AccountOpeningBalance } = require('../models');
 
 const getAccountBalance = async (accountId) => {
   const account = await Account.findOne({ id: accountId }).lean();
@@ -15,7 +15,11 @@ const getAccountBalance = async (accountId) => {
   const { filterAliveTransactions } = require('./aliveTransactions');
   const transactions = await filterAliveTransactions(rawTxns);
 
-  let balance = 0;
+  // Start from the opening balance the user entered when creating the
+  // account — without this, a fresh bank with ₹25L pre-existing cash shows
+  // ₹0 until activity flows through.
+  const opening = await AccountOpeningBalance.findOne({ accountId }).lean();
+  let balance = Number(opening?.openingAmount) || 0;
   for (const txn of transactions) {
     const amt = Number(txn.amount) || 0;
     if (txn.direction === 'IN') balance += amt;

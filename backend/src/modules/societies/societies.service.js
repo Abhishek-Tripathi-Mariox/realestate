@@ -1,9 +1,12 @@
 const { v4: uuidv4 } = require('uuid');
 const { notDeleted } = require('../../utils/notDeleted');
+const { pick } = require('../../utils/pick');
 const {
   Society, Sale, SalePaymentEntry, Purchase, ExpenseBill, Vendor,
   Inventory, Partner, SocietyPhase, Transaction, CommissionBill,
 } = require('../../models');
+
+const SOCIETY_UPDATABLE = ['name', 'location', 'totalArea', 'startDate', 'status', 'notes'];
 
 const stripId = ({ _id, ...rest }) => rest;
 
@@ -45,7 +48,7 @@ const create = async (body) => {
 };
 
 const update = async (id, body) => {
-  const patch = { ...body, updatedAt: new Date() };
+  const patch = { ...pick(body, SOCIETY_UPDATABLE), updatedAt: new Date() };
   if (body.name !== undefined) {
     const nameCheck = await validateName(body.name, id);
     if (nameCheck.error) return nameCheck;
@@ -82,9 +85,13 @@ const remove = async (societyId) => {
     Inventory.updateMany({ societyId, isDeleted: { $ne: true } }, { $set: stamp }),
     Partner.updateMany({ societyId, isDeleted: { $ne: true } }, { $set: stamp }),
     SocietyPhase.updateMany({ societyId, isDeleted: { $ne: true } }, { $set: stamp }),
-    // Transactions don't follow the soft-delete pattern (no notDeleted filter
-    // anywhere); hard-delete them as before so daybook stays consistent.
-    Transaction.deleteMany({ societyId }),
+    // Mark transactions as voided rather than hard-deleting so a /trash
+    // restore can revive the society's daybook history. The aliveTxns
+    // filter already drops voided/orphan rows from totals.
+    Transaction.updateMany(
+      { societyId, isVoided: { $ne: true } },
+      { $set: { isVoided: true, voidedAt: new Date(), voidedReason: 'Society deleted' } },
+    ),
   ]);
 
   await Society.updateOne({ id: societyId }, { $set: stamp });

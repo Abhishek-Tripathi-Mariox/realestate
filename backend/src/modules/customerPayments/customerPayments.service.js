@@ -43,9 +43,19 @@ const list = async (query) => {
     return acc;
   }, {});
 
-  const enriched = await Promise.all(payments.map(async (p) => {
-    const customer = await Customer.findOne({ id: p.customerId }).lean();
-    const account = await Account.findOne({ id: p.accountId }).lean();
+  // Bulk-fetch customers/accounts in two queries instead of N+N findOnes.
+  const customerIds = [...new Set(payments.map(p => p.customerId).filter(Boolean))];
+  const accountIds = [...new Set(payments.map(p => p.accountId).filter(Boolean))];
+  const [customerDocs, accountDocs] = await Promise.all([
+    customerIds.length ? Customer.find({ id: { $in: customerIds } }).lean() : [],
+    accountIds.length ? Account.find({ id: { $in: accountIds } }).lean() : [],
+  ]);
+  const customerById = Object.fromEntries(customerDocs.map(c => [c.id, c]));
+  const accountById = Object.fromEntries(accountDocs.map(a => [a.id, a]));
+
+  const enriched = payments.map((p) => {
+    const customer = customerById[p.customerId];
+    const account = accountById[p.accountId];
     const allocatedAmount = allocatedByPayment[p.id] || 0;
     const unallocatedAmount = Math.max(0, (p.amount || 0) - allocatedAmount);
     let status = 'PENDING';
@@ -59,7 +69,7 @@ const list = async (query) => {
       unallocatedAmount,
       status,
     };
-  }));
+  });
 
   return {
     data: enriched.map(({ _id, ...rest }) => rest),
@@ -159,7 +169,10 @@ const setAllocations = async (paymentId, body, userId) => {
   const incomingSaleIds = Object.keys(incomingBySale);
   if (incomingSaleIds.length) {
     const [sales, otherAllocs, ledgerEntries] = await Promise.all([
-      Sale.find({ id: { $in: incomingSaleIds } }).lean(),
+      // Only allocate against live sales — without notDeleted, money could
+      // be allocated to a trashed sale and the per-sale cap check would
+      // succeed against stale finalAmount.
+      Sale.find(notDeleted({ id: { $in: incomingSaleIds } })).lean(),
       // Existing allocations for these sales from OTHER payments — the current
       // payment's rows are about to be replaced, so exclude them from the cap.
       PaymentAllocation.find({

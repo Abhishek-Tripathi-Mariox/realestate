@@ -1,7 +1,10 @@
 const { v4: uuidv4 } = require('uuid');
+const { pick } = require('../../utils/pick');
 const { SocietyPhase } = require('../../models');
 
 const stripId = ({ _id, ...rest }) => rest;
+
+const PHASE_UPDATABLE = ['name', 'description'];
 
 const listForSociety = async (societyId) => {
   const phases = await SocietyPhase.find({ societyId }).lean();
@@ -21,7 +24,8 @@ const create = async (societyId, body) => {
 };
 
 const update = async (id, body) => {
-  await SocietyPhase.updateOne({ id }, { $set: { ...body, updatedAt: new Date() } });
+  const patch = { ...pick(body, PHASE_UPDATABLE), updatedAt: new Date() };
+  await SocietyPhase.updateOne({ id }, { $set: patch });
   const updated = await SocietyPhase.findOne({ id }).lean();
   if (!updated) return null;
   return stripId(updated);

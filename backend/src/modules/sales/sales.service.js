@@ -1,10 +1,19 @@
 const { v4: uuidv4 } = require('uuid');
 const { notDeleted } = require('../../utils/notDeleted');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
+const { pick } = require('../../utils/pick');
+const { gteMoney, eqMoney } = require('../../utils/money');
 const {
   Sale, SalePaymentEntry, Inventory, Customer, Account, Transaction,
   PaymentAllocation, CustomerPayment, ResaleDeal,
 } = require('../../models');
+
+// Allow customer/buyer info, price/discount tweaks, notes — but NOT
+// amountPaid, paymentStatus, isDeleted, status (TRANSFERRED tag), etc.
+const SALE_UPDATABLE = [
+  'customerId', 'buyerName', 'buyerContact', 'saleDate',
+  'dealPrice', 'agreedPrice', 'discount', 'notes',
+];
 
 const stripId = ({ _id, ...rest }) => rest;
 
@@ -201,12 +210,13 @@ const getById = async (id) => {
 };
 
 const update = async (id, body) => {
-  const updates = { ...body, updatedAt: new Date() };
-  const incomingPrice = body.dealPrice ?? body.agreedPrice;
-  if (incomingPrice !== undefined || body.discount !== undefined) {
+  const safe = pick(body, SALE_UPDATABLE);
+  const updates = { ...safe, updatedAt: new Date() };
+  const incomingPrice = safe.dealPrice ?? safe.agreedPrice;
+  if (incomingPrice !== undefined || safe.discount !== undefined) {
     const sale = await Sale.findOne({ id }).lean();
     const dealPrice = Number(incomingPrice ?? sale.dealPrice ?? sale.agreedPrice) || 0;
-    const discount = Number(body.discount ?? sale.discount) || 0;
+    const discount = Number(safe.discount ?? sale.discount) || 0;
     updates.dealPrice = dealPrice;
     updates.discount = discount;
     updates.finalAmount = dealPrice - discount;
@@ -298,6 +308,9 @@ const addPayment = async (saleId, body, userId) => {
   }
 
   const amount = Number(body.amount) || 0;
+  if (!(amount > 0)) {
+    return { error: 'Payment amount must be greater than zero', status: 400 };
+  }
   const payment = {
     id: uuidv4(),
     saleId,
@@ -314,9 +327,18 @@ const addPayment = async (saleId, body, userId) => {
 
   await SalePaymentEntry.create(payment);
 
-  const newAmountPaid = (sale.amountPaid || 0) + amount;
-  const paymentStatus = newAmountPaid >= sale.finalAmount ? 'Paid' : 'Partial';
-  await Sale.updateOne({ id: saleId }, { $set: { amountPaid: newAmountPaid, paymentStatus } });
+  // Atomic counter — two concurrent payments would otherwise race and
+  // lose one update with the read-modify-write pattern.
+  const updated = await Sale.findOneAndUpdate(
+    { id: saleId },
+    { $inc: { amountPaid: amount } },
+    { new: true },
+  ).lean();
+  const paymentStatus = gteMoney(updated.amountPaid || 0, sale.finalAmount || 0)
+    || eqMoney(updated.amountPaid || 0, sale.finalAmount || 0)
+    ? 'Paid'
+    : 'Partial';
+  await Sale.updateOne({ id: saleId }, { $set: { paymentStatus } });
 
   await createTransaction({
     txnDate: body.paymentDate,
@@ -437,12 +459,18 @@ const addLedgerEntry = async (saleId, body, userId) => {
   // amountPaid stores the NET ledger balance: credits in minus debits out.
   // SALE_PAYMENT increases it; WITHDRAWAL / PROFIT_PAYOUT decrease it so the
   // Sales tab's totalPaid stays in sync with the Sale Ledger's running balance.
+  // Use $inc so concurrent ledger entries can't lose updates.
   const delta = entryType === 'SALE_PAYMENT' ? amount : -amount;
-  const newAmountPaid = (sale.amountPaid || 0) + delta;
+  const updatedSale = await Sale.findOneAndUpdate(
+    { id: saleId },
+    { $inc: { amountPaid: delta } },
+    { new: true },
+  ).lean();
+  const newAmountPaid = updatedSale.amountPaid || 0;
   const paymentStatus = newAmountPaid <= 0
     ? 'Pending'
-    : (newAmountPaid >= sale.finalAmount ? 'Paid' : 'Partial');
-  await Sale.updateOne({ id: saleId }, { $set: { amountPaid: newAmountPaid, paymentStatus } });
+    : (gteMoney(newAmountPaid, sale.finalAmount || 0) ? 'Paid' : 'Partial');
+  await Sale.updateOne({ id: saleId }, { $set: { paymentStatus } });
 
   const direction = entryType === 'SALE_PAYMENT' ? 'IN' : 'OUT';
   await createTransaction({
@@ -473,15 +501,21 @@ const deleteSalePayment = async (id, userId) => {
 
   // Reverse the original delta on the sale's net amountPaid: SALE_PAYMENT
   // additions get subtracted; WITHDRAWAL / PROFIT_PAYOUT debits get added back.
-  const sale = await Sale.findOne({ id: entry.saleId }).lean();
-  if (sale) {
-    const entryType = entry.entryType || 'SALE_PAYMENT';
-    const reverseDelta = entryType === 'SALE_PAYMENT' ? -(entry.amount || 0) : (entry.amount || 0);
-    const newAmountPaid = (sale.amountPaid || 0) + reverseDelta;
+  // Atomic $inc avoids the read-modify-write race when several payments are
+  // deleted concurrently.
+  const entryType = entry.entryType || 'SALE_PAYMENT';
+  const reverseDelta = entryType === 'SALE_PAYMENT' ? -(entry.amount || 0) : (entry.amount || 0);
+  const updatedSale = await Sale.findOneAndUpdate(
+    { id: entry.saleId },
+    { $inc: { amountPaid: reverseDelta } },
+    { new: true },
+  ).lean();
+  if (updatedSale) {
+    const newAmountPaid = updatedSale.amountPaid || 0;
     const paymentStatus = newAmountPaid <= 0
       ? 'Pending'
-      : (newAmountPaid >= sale.finalAmount ? 'Paid' : 'Partial');
-    await Sale.updateOne({ id: entry.saleId }, { $set: { amountPaid: newAmountPaid, paymentStatus } });
+      : (gteMoney(newAmountPaid, updatedSale.finalAmount || 0) ? 'Paid' : 'Partial');
+    await Sale.updateOne({ id: entry.saleId }, { $set: { paymentStatus } });
   }
 
   await SalePaymentEntry.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });

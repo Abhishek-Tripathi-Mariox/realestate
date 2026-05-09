@@ -1,6 +1,15 @@
 const { v4: uuidv4 } = require('uuid');
 const { notDeleted } = require('../../utils/notDeleted');
+const { pick } = require('../../utils/pick');
 const { Inventory, Society } = require('../../models');
+
+// Status changes happen via the sale/resale flows — admins shouldn't edit
+// it directly via the inventory PUT (would let them mark a Sold unit
+// Available without dealing with the active sale).
+const INVENTORY_UPDATABLE = [
+  'inventoryNumber', 'type', 'phase', 'area', 'pricePerSqft',
+  'floor', 'facing', 'notes',
+];
 
 const stripId = ({ _id, ...rest }) => rest;
 
@@ -53,10 +62,11 @@ const update = async (id, body) => {
   const current = await Inventory.findOne({ id }).lean();
   if (!current) return null;
 
-  const updates = { ...body, updatedAt: new Date() };
+  const safe = pick(body, INVENTORY_UPDATABLE);
+  const updates = { ...safe, updatedAt: new Date() };
 
-  if (body.inventoryNumber !== undefined) {
-    const inventoryNumber = (body.inventoryNumber || '').trim();
+  if (safe.inventoryNumber !== undefined) {
+    const inventoryNumber = (safe.inventoryNumber || '').trim();
     if (!inventoryNumber) return { error: 'Inventory number is required', status: 400 };
     if (inventoryNumber !== current.inventoryNumber) {
       const clash = await Inventory.findOne(notDeleted({
@@ -71,9 +81,9 @@ const update = async (id, body) => {
     updates.inventoryNumber = inventoryNumber;
   }
 
-  if (body.area !== undefined || body.pricePerSqft !== undefined) {
-    const area = body.area !== undefined ? Number(body.area) : current.area;
-    const pricePerSqft = body.pricePerSqft !== undefined ? Number(body.pricePerSqft) : current.pricePerSqft;
+  if (safe.area !== undefined || safe.pricePerSqft !== undefined) {
+    const area = safe.area !== undefined ? Number(safe.area) : current.area;
+    const pricePerSqft = safe.pricePerSqft !== undefined ? Number(safe.pricePerSqft) : current.pricePerSqft;
     updates.totalPrice = computeTotalPrice(area, pricePerSqft);
   }
   await Inventory.updateOne({ id }, { $set: updates });

@@ -26,27 +26,34 @@ const stripId = ({ _id, ...rest }) => rest;
 
 const listParties = async () => {
   const parties = await Party.find(notDeleted()).lean();
+  if (parties.length === 0) return [];
 
-  const enriched = await Promise.all(parties.map(async (party) => {
-    const borrowLoans = await Loan.find({ partyId: party.id, direction: 'BORROWED', isDeleted: { $ne: true } }).lean();
-    const givenLoans = await Loan.find({ partyId: party.id, direction: 'GIVEN', isDeleted: { $ne: true } }).lean();
+  // Bulk-fetch all loans for these parties in ONE query instead of 2·N.
+  const partyIds = parties.map(p => p.id);
+  const allLoans = await Loan
+    .find({ partyId: { $in: partyIds }, isDeleted: { $ne: true } })
+    .lean();
+  const loansByParty = allLoans.reduce((acc, l) => {
+    (acc[l.partyId] = acc[l.partyId] || []).push(l);
+    return acc;
+  }, {});
 
-    const totalBorrowed = borrowLoans.reduce((sum, l) => sum + l.principalAmount, 0);
-    const totalBorrowRepaid = borrowLoans.reduce((sum, l) => sum + (l.totalRepaid || 0), 0);
-    const totalGiven = givenLoans.reduce((sum, l) => sum + l.principalAmount, 0);
-    const totalGivenReceived = givenLoans.reduce((sum, l) => sum + (l.totalRepaid || 0), 0);
+  const enriched = parties.map((party) => {
+    const partyLoans = loansByParty[party.id] || [];
+    const borrowLoans = partyLoans.filter(l => l.direction === 'BORROWED');
+    const givenLoans = partyLoans.filter(l => l.direction === 'GIVEN');
 
     return {
       ...party,
-      totalBorrowed,
-      totalBorrowRepaid,
-      totalGiven,
-      totalGivenReceived,
+      totalBorrowed: borrowLoans.reduce((sum, l) => sum + l.principalAmount, 0),
+      totalBorrowRepaid: borrowLoans.reduce((sum, l) => sum + (l.totalRepaid || 0), 0),
+      totalGiven: givenLoans.reduce((sum, l) => sum + l.principalAmount, 0),
+      totalGivenReceived: givenLoans.reduce((sum, l) => sum + (l.totalRepaid || 0), 0),
       openBorrowLoans: borrowLoans.filter(l => l.status === 'OPEN').length,
       openGivenLoans: givenLoans.filter(l => l.status === 'OPEN').length,
       totalLoans: borrowLoans.length + givenLoans.length,
     };
-  }));
+  });
 
   return enriched.map(stripId);
 };
@@ -72,7 +79,35 @@ const createParty = async (body) => {
 };
 
 const removeParty = async (id) => {
-  await Party.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
+  // Block delete when there are open loans — the party still owes us
+  // money or we still owe them. Once open balances are zero, soft-cascade
+  // closed loans + repayments so the per-party ledger doesn't show orphan
+  // rows. The aliveTransactions filter drops the daybook entries because
+  // its LOAN_BORROWED chain checks that the parent Loan is alive.
+  const openLoans = await Loan.countDocuments({
+    partyId: id,
+    isDeleted: { $ne: true },
+    status: 'OPEN',
+  });
+  if (openLoans > 0) {
+    return {
+      error: `Party has ${openLoans} open loan(s). Close or settle them before deleting.`,
+      status: 409,
+    };
+  }
+
+  const stamp = { isDeleted: true, deletedAt: new Date(), deletedReason: 'Party deleted' };
+  const loans = await Loan.find({ partyId: id, isDeleted: { $ne: true } }, { id: 1 }).lean();
+  const loanIds = loans.map(l => l.id);
+  if (loanIds.length) {
+    await LoanRepayment.updateMany(
+      { loanId: { $in: loanIds }, isDeleted: { $ne: true } },
+      { $set: stamp },
+    );
+    await Loan.updateMany({ id: { $in: loanIds } }, { $set: stamp });
+  }
+  await Party.updateOne({ id }, { $set: stamp });
+  return { message: `Party deleted (${loanIds.length} closed loan(s) cascaded)` };
 };
 
 const partyLedger = async (partyId) => {
@@ -142,16 +177,27 @@ const listLoans = async (query) => {
   }
 
   const loans = await Loan.find(filter).lean();
-  const enriched = await Promise.all(loans.map(async (loan) => {
-    const party = await Party.findOne({ id: loan.partyId }).lean();
-    const account = await Account.findOne({ id: loan.accountId }).lean();
-    const society = loan.societyId ? await Society.findOne({ id: loan.societyId }).lean() : null;
-    return {
-      ...loan,
-      partyName: party?.name || 'Unknown',
-      accountName: account?.name || 'Unknown',
-      societyName: society?.name || (loan.societyId ? 'Unknown' : 'Company'),
-    };
+  if (loans.length === 0) return [];
+
+  // Bulk-fetch parties / accounts / societies in 3 queries instead of 3·N
+  // findOnes — at scale this was the dominant cost of the loans page.
+  const partyIds = [...new Set(loans.map(l => l.partyId).filter(Boolean))];
+  const accountIds = [...new Set(loans.map(l => l.accountId).filter(Boolean))];
+  const societyIds = [...new Set(loans.map(l => l.societyId).filter(Boolean))];
+  const [parties, accounts, societies] = await Promise.all([
+    partyIds.length ? Party.find({ id: { $in: partyIds } }).lean() : [],
+    accountIds.length ? Account.find({ id: { $in: accountIds } }).lean() : [],
+    societyIds.length ? Society.find({ id: { $in: societyIds } }).lean() : [],
+  ]);
+  const partyById = Object.fromEntries(parties.map(p => [p.id, p]));
+  const accountById = Object.fromEntries(accounts.map(a => [a.id, a]));
+  const societyById = Object.fromEntries(societies.map(s => [s.id, s]));
+
+  const enriched = loans.map((loan) => ({
+    ...loan,
+    partyName: partyById[loan.partyId]?.name || 'Unknown',
+    accountName: accountById[loan.accountId]?.name || 'Unknown',
+    societyName: societyById[loan.societyId]?.name || (loan.societyId ? 'Unknown' : 'Company'),
   }));
   return enriched.map(stripId);
 };

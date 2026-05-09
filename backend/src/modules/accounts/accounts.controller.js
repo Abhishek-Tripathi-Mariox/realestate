@@ -20,8 +20,15 @@ const updateOpeningBalance = asyncHandler(async (req, res) => {
 });
 
 const remove = asyncHandler(async (req, res) => {
-  await service.remove(req.params.id);
-  res.json({ message: 'Account deleted' });
+  const result = await service.remove(req.params.id);
+  if (result?.error) return res.status(result.status || 500).json({ error: result.error });
+  res.json(result || { message: 'Account deleted' });
 });
 
-module.exports = { list, create, update, updateOpeningBalance, remove };
+const setDefault = asyncHandler(async (req, res) => {
+  const result = await service.setDefault(req.params.id);
+  if (result?.error) return res.status(result.status || 500).json({ error: result.error });
+  res.json(result);
+});
+
+module.exports = { list, create, update, updateOpeningBalance, setDefault, remove };

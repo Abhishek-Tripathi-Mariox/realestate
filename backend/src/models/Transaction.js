@@ -29,5 +29,14 @@ schema.index({ sourceType: 1, sourceId: 1 });
 schema.index({ societyId: 1, txnDate: -1 });
 schema.index({ accountId: 1, txnDate: -1 });
 schema.index({ originalTxnId: 1 });
+// Direction is filtered on every daybook/expense/account-balance query —
+// add a compound to support the common (society + direction + date) read.
+schema.index({ societyId: 1, direction: 1, txnDate: -1 });
+// `isVoided` / `isReversed` are filtered on every summary/balance call;
+// the partial index keeps it small (most rows are neither).
+schema.index(
+  { isVoided: 1, isReversed: 1 },
+  { partialFilterExpression: { $or: [{ isVoided: true }, { isReversed: true }] } },
+);
 
 module.exports = mongoose.model('Transaction', schema, 'transactions');

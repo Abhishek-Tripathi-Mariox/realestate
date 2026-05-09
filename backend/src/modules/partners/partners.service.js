@@ -1,9 +1,12 @@
 const { v4: uuidv4 } = require('uuid');
 const { notDeleted } = require('../../utils/notDeleted');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
+const { pick } = require('../../utils/pick');
 const {
   Partner, PartnerLedgerEntry, Account, Transaction,
 } = require('../../models');
+
+const PARTNER_UPDATABLE = ['name', 'percentage', 'expectedInvestment', 'notes'];
 
 const stripId = ({ _id, ...rest }) => rest;
 
@@ -56,13 +59,38 @@ const create = async (societyId, body) => {
 };
 
 const update = async (id, body) => {
-  await Partner.updateOne({ id }, { $set: { ...body, updatedAt: new Date() } });
+  // Cap-check: if percentage changes, make sure the partner percentages
+  // for this society still sum to <= 100. Without this an editor can
+  // bump one partner above the cap and silently break profit splits.
+  const partner = await Partner.findOne({ id }).lean();
+  if (!partner) return null;
+  if (body.percentage !== undefined) {
+    const newPct = Number(body.percentage) || 0;
+    const others = await Partner.find(notDeleted({
+      societyId: partner.societyId,
+      id: { $ne: id },
+    })).lean();
+    const otherTotal = others.reduce((s, p) => s + (Number(p.percentage) || 0), 0);
+    if (otherTotal + newPct > 100) {
+      return { error: 'Total partner percentage cannot exceed 100%', status: 400 };
+    }
+  }
+
+  const patch = { ...pick(body, PARTNER_UPDATABLE), updatedAt: new Date() };
+  await Partner.updateOne({ id }, { $set: patch });
   const updated = await Partner.findOne({ id }).lean();
   if (!updated) return null;
   return stripId(updated);
 };
 
 const remove = async (id) => {
+  // Cascade: soft-delete partner ledger entries so the per-partner ledger
+  // view doesn't show orphan rows. The aliveTransactions filter already
+  // excludes PARTNER_CAPITAL daybook entries when the partner is gone.
+  await PartnerLedgerEntry.updateMany(
+    { partnerId: id, isDeleted: { $ne: true } },
+    { $set: { isDeleted: true, deletedAt: new Date(), deletedReason: 'Partner deleted' } },
+  );
   await Partner.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
 };
 

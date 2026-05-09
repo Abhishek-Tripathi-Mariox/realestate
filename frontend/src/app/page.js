@@ -47,6 +47,7 @@ import { useRouter } from 'next/navigation'
 import Papa from 'papaparse'
 import { jsPDF } from 'jspdf'
 import 'jspdf-autotable'
+import { Ta } from 'zod/v4/locales'
 
 const VENDOR_TYPES = ['Electrician', 'Broker', 'Labour', 'Legal', 'Marketing', 'Plumber', 'Civil', 'Other']
 const EXPENSE_CATEGORIES = ['Civil', 'Tiles', 'Electrical', 'Plumbing', 'Paint', 'Labour', 'Legal', 'Marketing', 'Office', 'Other']
@@ -2126,6 +2127,7 @@ const App = () => {
                             <TableHead>Name</TableHead>
                             <TableHead>%</TableHead>
                             <TableHead>Expected Investment</TableHead>
+                            <TableHead>Notes</TableHead>
                             <TableHead>Total Investment</TableHead>
                             <TableHead>Withdrawals</TableHead>
                             <TableHead>Profit Paid</TableHead>
@@ -2168,6 +2170,16 @@ const App = () => {
                                     <span className="text-slate-400">—</span>
                                   )}
                                 </TableCell>
+                                <TableCell className="text-slate-600">
+                                  {partner.notes && (
+                                    <div
+                                      className="text-xs text-slate-500 italic mt-0.5 max-w-xs truncate"
+                                      title={partner.notes}
+                                    >
+                                      {partner.notes}
+                                    </div>
+                                  )}
+                                </TableCell>  
                                 <TableCell className="text-green-600">₹{fmt(partner.totalInvestment)}</TableCell>
                                 <TableCell className="text-orange-600">₹{fmt(partner.totalWithdrawal)}</TableCell>
                                 <TableCell className="text-purple-600">₹{fmt(partner.totalProfitPaid)}</TableCell>
@@ -2254,6 +2266,7 @@ const App = () => {
                             <TableHead>Phase</TableHead>
                             <TableHead>Floor</TableHead>
                             <TableHead>Facing</TableHead>
+                            <TableHead>Notes</TableHead>
                             <TableHead>Status</TableHead>
                             <TableHead>Actions</TableHead>
                           </TableRow>
@@ -2271,6 +2284,7 @@ const App = () => {
                               <TableCell>{item.phase || '—'}</TableCell>
                               <TableCell>{item.floor || '—'}</TableCell>
                               <TableCell>{item.facing || '—'}</TableCell>
+                              <TableCell>{item.notes||'-'}</TableCell>
                               <TableCell>
                                 <Badge variant={item.status === 'Sold' ? 'destructive' : item.status === 'Blocked' ? 'outline' : 'default'}>
                                   {item.status}
@@ -2348,6 +2362,7 @@ const App = () => {
                             <TableHead>Deal Amount</TableHead>
                             <TableHead>Total Paid</TableHead>
                             <TableHead>Balance</TableHead>
+                            <TableHead>Notes</TableHead>
                             <TableHead>Date</TableHead>
                             <TableHead>Actions</TableHead>
                           </TableRow>
@@ -2359,6 +2374,7 @@ const App = () => {
                               <TableCell>₹{fmt(purchase.dealAmount)}</TableCell>
                               <TableCell className="text-green-600">₹{fmt(purchase.totalPaid)}</TableCell>
                               <TableCell className="text-orange-600">₹{fmt(purchase.balance)}</TableCell>
+                              <TableCell>{purchase.notes || '-'}</TableCell>
                               <TableCell>{new Date(purchase.agreementDate).toLocaleDateString()}</TableCell>
                               <TableCell>
                                 <div className="flex items-center gap-2">
@@ -2464,6 +2480,7 @@ const App = () => {
                           <TableRow>
                             <TableHead>Customer Name</TableHead>
                             <TableHead>Phone</TableHead>
+                            <TableHead>Notes</TableHead>
                             <TableHead className="text-right">Flats</TableHead>
                             <TableHead className="text-right">Total Sale</TableHead>
                             <TableHead className="text-right">Total Paid</TableHead>
@@ -2477,6 +2494,7 @@ const App = () => {
                             <TableRow key={customer.id}>
                               <TableCell className="font-medium">{customer.name}</TableCell>
                               <TableCell>{customer.phone || '-'}</TableCell>
+                              <TableCell>{customer.notes||"-"}</TableCell>
                               <TableCell className="text-right">{customer.salesCount || 0}</TableCell>
                               <TableCell className="text-right">₹{fmt(customer.totalSaleAmount || 0)}</TableCell>
                               <TableCell className="text-right text-green-600">₹{fmt(customer.totalPaid || 0)}</TableCell>
@@ -2726,6 +2744,7 @@ const App = () => {
                               <TableHead>Inventory</TableHead>
                               <TableHead>Customer</TableHead>
                               <TableHead>Phone</TableHead>
+                              <TableHead>Notes</TableHead>
                               <TableHead>Final Amount</TableHead>
                               <TableHead>Total Paid</TableHead>
                               <TableHead>Balance</TableHead>
@@ -2742,6 +2761,9 @@ const App = () => {
                                 </TableCell>
                                 <TableCell className="font-medium">{sale.customerName}</TableCell>
                                 <TableCell>{sale.customerPhone}</TableCell>
+                                <TableCell className="max-w-[220px] truncate text-slate-600" title={sale.notes || ''}>
+                                  {sale.notes || '-'}
+                                </TableCell>
                                 <TableCell>₹{fmt(sale.finalAmount)}</TableCell>
                                 <TableCell className="text-green-600">₹{fmt(sale.totalPaid)}</TableCell>
                                 <TableCell className="text-orange-600">₹{fmt(sale.balance)}</TableCell>
@@ -2994,6 +3016,7 @@ const App = () => {
                               <TableHead>Date</TableHead>
                               <TableHead>Inventory</TableHead>
                               <TableHead>Seller → Buyer</TableHead>
+                              <TableHead>Notes</TableHead>
                               <TableHead>Buyer Amt</TableHead>
                               <TableHead>Buyer Paid</TableHead>
                               <TableHead>Seller Amt</TableHead>
@@ -3014,6 +3037,9 @@ const App = () => {
                                     <span className="mx-1">→</span>
                                     <span className="text-green-600">{deal.buyerName}</span>
                                   </div>
+                                </TableCell>
+                                <TableCell className="max-w-[200px] truncate text-slate-600" title={deal.notes || ''}>
+                                  {deal.notes || '-'}
                                 </TableCell>
                                 <TableCell>₹{fmt(deal.buyerPurchaseAmount || deal.resalePrice || 0)}</TableCell>
                                 <TableCell>
@@ -3134,6 +3160,7 @@ const App = () => {
                             <TableHead>Name</TableHead>
                             <TableHead>Type</TableHead>
                             <TableHead>Phone</TableHead>
+                            <TableHead>Notes</TableHead>
                             <TableHead>Total Paid</TableHead>
                             <TableHead>Total Due</TableHead>
                             <TableHead>Actions</TableHead>
@@ -3149,6 +3176,7 @@ const App = () => {
                                 </Badge>
                               </TableCell>
                               <TableCell>{vendor.phone || '-'}</TableCell>
+                              <TableCell>{vendor.notes||'-'}</TableCell>
                               <TableCell className="text-green-600 font-medium">₹{fmt(vendor.totalPaid)}</TableCell>
                               <TableCell className="text-orange-600 font-medium">₹{fmt(vendor.totalDue)}</TableCell>
                               <TableCell>
@@ -3339,6 +3367,7 @@ const App = () => {
                               <TableHead>Date</TableHead>
                               <TableHead>Vendor</TableHead>
                               <TableHead>Category</TableHead>
+                              <TableHead>Description</TableHead>
                               <TableHead>Bill Amount</TableHead>
                               <TableHead>Paid</TableHead>
                               <TableHead>Balance</TableHead>
@@ -3352,6 +3381,7 @@ const App = () => {
                                 <TableCell>{new Date(bill.billDate).toLocaleDateString()}</TableCell>
                                 <TableCell className="font-medium">{bill.vendorName}</TableCell>
                                 <TableCell>{bill.categoryName || '-'}</TableCell>
+                                <TableCell>{bill.description || '-'}</TableCell>
                                 <TableCell>₹{fmt(bill.billAmount)}</TableCell>
                                 <TableCell className="text-green-600">₹{fmt(bill.totalPaid)}</TableCell>
                                 <TableCell className="text-orange-600">₹{fmt(bill.balance)}</TableCell>
@@ -3531,6 +3561,7 @@ const App = () => {
                               <TableHead>Date</TableHead>
                               <TableHead>Broker</TableHead>
                               <TableHead>Sale (Customer)</TableHead>
+                              <TableHead>Description</TableHead>
                               <TableHead>Inventory</TableHead>
                               <TableHead>Commission</TableHead>
                               <TableHead>Paid</TableHead>
@@ -3546,6 +3577,7 @@ const App = () => {
                                 <TableCell className="font-medium">{bill.brokerName}</TableCell>
                                 <TableCell>{bill.customerName}</TableCell>
                                 <TableCell>{bill.inventoryName}</TableCell>
+                                <TableCell>{bill.description || '-'}</TableCell>
                                 <TableCell>₹{fmt(bill.commissionAmount)}</TableCell>
                                 <TableCell className="text-green-600">₹{fmt(bill.totalPaid)}</TableCell>
                                 <TableCell className="text-orange-600">₹{fmt(bill.balance)}</TableCell>

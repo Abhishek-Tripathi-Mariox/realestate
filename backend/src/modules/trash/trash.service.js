@@ -3,7 +3,7 @@ const {
   Purchase, Vendor, CommissionBill, ResaleDeal, CustomerPayment,
   SalePaymentEntry, PurchasePaymentEntry, ExpensePayment, CommissionPayment,
   PartnerLedgerEntry, ResaleBuyerPayment, ResaleSellerPayout, LoanRepayment,
-  Party, Society, SocietyPhase,
+  Party, Society, SocietyPhase, Transaction,
 } = require('../../models');
 
 // One source of truth for every collection that participates in soft-delete /
@@ -116,6 +116,17 @@ const cascadeRestoreSocietyChildren = async (societyId) => {
     );
     restored += result.modifiedCount || 0;
   }
+
+  // Un-void the daybook transactions that society.remove voided so the
+  // restored society's history reappears in the daybook.
+  const txnResult = await Transaction.updateMany(
+    { societyId, isVoided: true, voidedReason: 'Society deleted' },
+    {
+      $set: { isVoided: false },
+      $unset: { voidedAt: '', voidedReason: '' },
+    },
+  );
+  restored += txnResult.modifiedCount || 0;
 
   return restored;
 };

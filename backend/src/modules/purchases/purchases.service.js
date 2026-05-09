@@ -1,5 +1,6 @@
 const { v4: uuidv4 } = require('uuid');
 const { notDeleted } = require('../../utils/notDeleted');
+const { addMoney, gteMoney, eqMoney } = require('../../utils/money');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   Purchase, PurchasePaymentEntry, Account, Transaction,
@@ -50,17 +51,33 @@ const remove = async (id, userId) => {
   const purchase = await Purchase.findOne({ id }).lean();
   if (!purchase) return { error: 'Purchase not found', status: 404 };
 
-  const txns = await Transaction.find({
-    sourceType: { $in: ['PURCHASE', 'PURCHASE_PAYMENT'] },
-    sourceId: id,
-    isReversal: { $ne: true },
+  // PURCHASE_PAYMENT transactions are keyed by the payment-entry id, not the
+  // purchase id (see addPayment: sourceId = entry.id). The previous query
+  // looked up `sourceId = id` (purchase id) so it found nothing — payments
+  // stayed live in the daybook. Enumerate the children, reverse each, then
+  // soft-delete them so they vanish from per-purchase listings too.
+  const liveEntries = await PurchasePaymentEntry.find({
+    purchaseId: id,
+    isDeleted: { $ne: true },
   }).lean();
-  for (const t of txns) {
-    await createReversalTransaction(t, userId, 'Purchase deleted');
+  for (const entry of liveEntries) {
+    const t = await Transaction.findOne({
+      sourceType: 'PURCHASE_PAYMENT',
+      sourceId: entry.id,
+      isReversed: { $ne: true },
+      isReversal: { $ne: true },
+    }).lean();
+    if (t) await createReversalTransaction(t, userId, 'Purchase deleted');
+  }
+  if (liveEntries.length) {
+    await PurchasePaymentEntry.updateMany(
+      { purchaseId: id, isDeleted: { $ne: true } },
+      { $set: { isDeleted: true, deletedAt: new Date(), deletedReason: 'Purchase deleted' } },
+    );
   }
 
   await Purchase.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
-  return { message: 'Purchase deleted with reversal' };
+  return { message: `Purchase deleted (${liveEntries.length} payment(s) reversed)` };
 };
 
 const listPayments = async (purchaseId) => {
@@ -82,6 +99,18 @@ const addPayment = async (purchaseId, body, userId) => {
   }
 
   const amount = parseFloat(body.amount) || 0;
+  if (!(amount > 0)) {
+    return { error: 'Payment amount must be greater than zero', status: 400 };
+  }
+  const dealAmount = purchase.dealAmount ?? purchase.totalAmount ?? purchase.totalCost ?? 0;
+  const proposedPaid = addMoney(purchase.amountPaid || 0, amount);
+  if (!gteMoney(dealAmount, proposedPaid)) {
+    return {
+      error: `Payment exceeds purchase balance (deal ${dealAmount}, already paid ${purchase.amountPaid || 0}, attempted ${amount})`,
+      status: 400,
+    };
+  }
+
   const entry = {
     id: uuidv4(),
     purchaseId,
@@ -98,9 +127,15 @@ const addPayment = async (purchaseId, body, userId) => {
 
   await PurchasePaymentEntry.create(entry);
 
-  const newPaid = (purchase.amountPaid || 0) + amount;
-  const status = newPaid >= (purchase.dealAmount || purchase.totalAmount || 0) ? 'Paid' : 'Partial';
-  await Purchase.updateOne({ id: purchaseId }, { $set: { amountPaid: newPaid, paymentStatus: status } });
+  const updated = await Purchase.findOneAndUpdate(
+    { id: purchaseId },
+    { $inc: { amountPaid: amount } },
+    { new: true },
+  ).lean();
+  const status = eqMoney(updated.amountPaid || 0, dealAmount) || gteMoney(updated.amountPaid || 0, dealAmount)
+    ? 'Paid'
+    : 'Partial';
+  await Purchase.updateOne({ id: purchaseId }, { $set: { paymentStatus: status } });
 
   await createTransaction({
     txnDate: entry.paymentDate,
@@ -128,15 +163,146 @@ const deletePayment = async (id, userId) => {
     await createReversalTransaction(originalTxn, userId, 'Purchase payment deleted');
   }
 
-  const purchase = await Purchase.findOne({ id: entry.purchaseId }).lean();
-  if (purchase) {
-    const newPaid = Math.max(0, (purchase.amountPaid || 0) - (entry.amount || 0));
-    const status = newPaid <= 0 ? 'Pending' : (newPaid >= (purchase.dealAmount || purchase.totalAmount || 0) ? 'Paid' : 'Partial');
-    await Purchase.updateOne({ id: entry.purchaseId }, { $set: { amountPaid: newPaid, paymentStatus: status } });
+  const updated = await Purchase.findOneAndUpdate(
+    { id: entry.purchaseId },
+    { $inc: { amountPaid: -(entry.amount || 0) } },
+    { new: true },
+  ).lean();
+  if (updated) {
+    const dealAmount = updated.dealAmount ?? updated.totalAmount ?? updated.totalCost ?? 0;
+    const newPaid = Math.max(0, updated.amountPaid || 0);
+    const status = newPaid <= 0
+      ? 'Pending'
+      : (gteMoney(newPaid, dealAmount) ? 'Paid' : 'Partial');
+    await Purchase.updateOne(
+      { id: entry.purchaseId },
+      { $set: { amountPaid: newPaid, paymentStatus: status } },
+    );
   }
 
   await PurchasePaymentEntry.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
   return { message: 'Purchase payment deleted with reversal' };
 };
 
-module.exports = { listForSociety, create, remove, listPayments, addPayment, deletePayment };
+// Update an existing payment entry. For non-trivial edits (amount / mode /
+// account / date) we reverse the original daybook transaction and write a
+// fresh one so the audit trail stays clean. Pure remark / referenceNo
+// edits update in place because they don't affect any totals.
+const updatePayment = async (id, body, userId) => {
+  const entry = await PurchasePaymentEntry.findOne({ id }).lean();
+  if (!entry) return { error: 'Entry not found', status: 404 };
+  if (entry.isDeleted) return { error: 'Entry is deleted', status: 400 };
+
+  // Accept both `paymentDate` and `entryDate` like addPayment does.
+  const incomingAmount = body.amount !== undefined ? parseFloat(body.amount) : entry.amount;
+  if (!(incomingAmount > 0)) {
+    return { error: 'Payment amount must be greater than zero', status: 400 };
+  }
+  const newAmount = Number(incomingAmount);
+  const newPaymentDate = body.paymentDate || body.entryDate || entry.paymentDate;
+  const newPaymentMode = body.paymentMode || entry.paymentMode;
+  const newAccountId = body.accountId || entry.accountId;
+  const newReferenceNo = body.referenceNo !== undefined ? body.referenceNo : (entry.referenceNo || '');
+  const newRemark = body.remark !== undefined ? body.remark : (entry.remark || '');
+
+  const totalsAffectingChange =
+    !eqMoney(newAmount, entry.amount || 0)
+    || newPaymentMode !== entry.paymentMode
+    || newAccountId !== entry.accountId
+    || newPaymentDate !== entry.paymentDate;
+
+  // Re-validate the parent's cap on amount changes only.
+  if (!eqMoney(newAmount, entry.amount || 0)) {
+    const purchase = await Purchase.findOne({ id: entry.purchaseId }).lean();
+    if (!purchase) return { error: 'Parent purchase not found', status: 404 };
+    const dealAmount = purchase.dealAmount ?? purchase.totalAmount ?? purchase.totalCost ?? 0;
+    const otherPaid = (purchase.amountPaid || 0) - (entry.amount || 0);
+    if (!gteMoney(dealAmount, otherPaid + newAmount)) {
+      return {
+        error: `Updated amount exceeds purchase balance (deal ${dealAmount}, other payments ${otherPaid}, attempted ${newAmount})`,
+        status: 400,
+      };
+    }
+  }
+
+  if (totalsAffectingChange) {
+    // Reverse the original daybook txn and write a replacement so the
+    // running cash balance / aliveTransactions filter stay correct.
+    const originalTxn = await Transaction.findOne({
+      sourceType: 'PURCHASE_PAYMENT',
+      sourceId: id,
+      isReversed: { $ne: true },
+      isReversal: { $ne: true },
+    }).lean();
+    if (originalTxn) {
+      await createReversalTransaction(originalTxn, userId, 'Purchase payment edited');
+    }
+
+    // Atomic adjustment of parent's amountPaid by the delta.
+    const delta = newAmount - (entry.amount || 0);
+    const updatedPurchase = await Purchase.findOneAndUpdate(
+      { id: entry.purchaseId },
+      { $inc: { amountPaid: delta } },
+      { new: true },
+    ).lean();
+
+    await PurchasePaymentEntry.updateOne(
+      { id },
+      {
+        $set: {
+          amount: newAmount,
+          paymentDate: newPaymentDate,
+          paymentMode: newPaymentMode,
+          accountId: newAccountId,
+          referenceNo: newReferenceNo,
+          remark: newRemark,
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (updatedPurchase) {
+      const dealAmount = updatedPurchase.dealAmount ?? updatedPurchase.totalAmount ?? updatedPurchase.totalCost ?? 0;
+      const newPaid = Math.max(0, updatedPurchase.amountPaid || 0);
+      const status = newPaid <= 0
+        ? 'Pending'
+        : (gteMoney(newPaid, dealAmount) ? 'Paid' : 'Partial');
+      await Purchase.updateOne(
+        { id: entry.purchaseId },
+        { $set: { paymentStatus: status } },
+      );
+
+      await createTransaction({
+        txnDate: newPaymentDate,
+        societyId: updatedPurchase.societyId,
+        accountId: newAccountId,
+        direction: 'OUT',
+        amount: newAmount,
+        paymentMode: newPaymentMode,
+        partyType: 'Vendor',
+        partyName: updatedPurchase.partyName || updatedPurchase.sellerName || 'Seller',
+        sourceType: 'PURCHASE_PAYMENT',
+        sourceId: id,
+        referenceNo: newReferenceNo,
+        remark: newRemark || `Purchase payment - ${updatedPurchase.partyName || ''}`,
+      }, userId);
+    }
+  } else {
+    // Pure metadata change — no totals affected, no reversal needed.
+    await PurchasePaymentEntry.updateOne(
+      { id },
+      {
+        $set: {
+          referenceNo: newReferenceNo,
+          remark: newRemark,
+          updatedAt: new Date(),
+        },
+      },
+    );
+  }
+
+  const fresh = await PurchasePaymentEntry.findOne({ id }).lean();
+  return { message: 'Purchase payment updated', entry: fresh };
+};
+
+module.exports = { listForSociety, create, remove, listPayments, addPayment, deletePayment, updatePayment };

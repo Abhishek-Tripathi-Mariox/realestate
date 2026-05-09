@@ -1,6 +1,6 @@
 const { v4: uuidv4 } = require('uuid');
 const { notDeleted } = require('../../utils/notDeleted');
-const { roundPaise } = require('../../utils/money');
+const { roundPaise, addMoney, subMoney, gteMoney, eqMoney } = require('../../utils/money');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   ExpenseBill, ExpensePayment, Account, Transaction, Vendor, ExpenseCategory,
@@ -74,13 +74,42 @@ const deleteBill = async (id, userId) => {
   const bill = await ExpenseBill.findOne({ id }).lean();
   if (!bill) return { error: 'Bill not found', status: 404 };
 
-  const originalTxn = await Transaction.findOne({ sourceType: 'EXPENSE_PAYMENT', sourceId: id }).lean();
-  if (originalTxn) {
-    await createReversalTransaction(originalTxn, userId, 'Expense bill deleted');
+  // Each ExpensePayment row got its own daybook txn keyed by the payment's
+  // own id (see addBillPayment: sourceId = payment.id). The previous code
+  // looked up `sourceId = bill.id` which only matched quick-expense txns —
+  // payments via "Add Payment" were left live in the daybook. Enumerate
+  // the children, reverse each, then soft-delete them alongside the bill.
+  const livePayments = await ExpensePayment.find({
+    billId: id,
+    isDeleted: { $ne: true },
+  }).lean();
+  for (const p of livePayments) {
+    const txn = await Transaction.findOne({
+      sourceType: 'EXPENSE_PAYMENT',
+      sourceId: p.id,
+      isReversed: { $ne: true },
+      isReversal: { $ne: true },
+    }).lean();
+    if (txn) await createReversalTransaction(txn, userId, 'Expense bill deleted');
   }
 
+  // Quick-expense bills carry their own direct txn keyed by the bill id.
+  const directTxn = await Transaction.findOne({
+    sourceType: { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] },
+    sourceId: id,
+    isReversed: { $ne: true },
+    isReversal: { $ne: true },
+  }).lean();
+  if (directTxn) await createReversalTransaction(directTxn, userId, 'Expense bill deleted');
+
+  if (livePayments.length) {
+    await ExpensePayment.updateMany(
+      { billId: id, isDeleted: { $ne: true } },
+      { $set: { isDeleted: true, deletedAt: new Date(), deletedReason: 'Bill deleted' } },
+    );
+  }
   await ExpenseBill.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
-  return { message: 'Expense bill deleted with reversal' };
+  return { message: `Expense bill deleted (${livePayments.length} payment(s) reversed)` };
 };
 
 // ============ Expenses listing (transactions-backed) ============
@@ -362,6 +391,22 @@ const addBillPayment = async (billId, body, userId) => {
   }
 
   const amount = parseFloat(body.amount) || 0;
+  if (!(amount > 0)) {
+    return { error: 'Payment amount must be greater than zero', status: 400 };
+  }
+
+  // Over-payment guard — without this, typing an extra zero on a 1L bill
+  // creates a 10L OUT transaction with no warning. addMoney/gteMoney use
+  // integer-paise math so this doesn't false-positive on float drift.
+  const billAmount = bill.amount ?? bill.billAmount ?? 0;
+  const proposedPaid = addMoney(bill.paidAmount || 0, amount);
+  if (!gteMoney(billAmount, proposedPaid)) {
+    return {
+      error: `Payment exceeds bill balance (bill ${billAmount}, already paid ${bill.paidAmount || 0}, attempted ${amount})`,
+      status: 400,
+    };
+  }
+
   const payment = {
     id: uuidv4(),
     billId,
@@ -378,9 +423,17 @@ const addBillPayment = async (billId, body, userId) => {
 
   await ExpensePayment.create(payment);
 
-  const newPaid = (bill.paidAmount || 0) + amount;
-  const status = newPaid >= (bill.amount || 0) ? 'Paid' : 'Partial';
-  await ExpenseBill.updateOne({ id: billId }, { $set: { paidAmount: newPaid, status } });
+  // Atomic increment so two concurrent payments can't lose an update.
+  // Recompute status from the returned doc using paise-safe comparison.
+  const updated = await ExpenseBill.findOneAndUpdate(
+    { id: billId },
+    { $inc: { paidAmount: amount } },
+    { new: true },
+  ).lean();
+  const status = eqMoney(updated.paidAmount || 0, billAmount) || gteMoney(updated.paidAmount || 0, billAmount)
+    ? 'Paid'
+    : 'Partial';
+  await ExpenseBill.updateOne({ id: billId }, { $set: { status } });
 
   await createTransaction({
     txnDate: payment.paymentDate,
@@ -408,11 +461,22 @@ const deleteBillPayment = async (id, userId) => {
     await createReversalTransaction(originalTxn, userId, 'Expense payment deleted');
   }
 
-  const bill = await ExpenseBill.findOne({ id: payment.billId }).lean();
-  if (bill) {
-    const newPaid = Math.max(0, (bill.paidAmount || 0) - (payment.amount || 0));
-    const status = newPaid <= 0 ? 'Pending' : (newPaid >= (bill.amount || 0) ? 'Paid' : 'Partial');
-    await ExpenseBill.updateOne({ id: payment.billId }, { $set: { paidAmount: newPaid, status } });
+  // Atomic decrement; recompute status from the returned document.
+  const updated = await ExpenseBill.findOneAndUpdate(
+    { id: payment.billId },
+    { $inc: { paidAmount: -(payment.amount || 0) } },
+    { new: true },
+  ).lean();
+  if (updated) {
+    const billAmount = updated.amount ?? updated.billAmount ?? 0;
+    const newPaid = Math.max(0, updated.paidAmount || 0);
+    const status = newPaid <= 0
+      ? 'Pending'
+      : (gteMoney(newPaid, billAmount) ? 'Paid' : 'Partial');
+    await ExpenseBill.updateOne(
+      { id: payment.billId },
+      { $set: { status, paidAmount: newPaid } },
+    );
   }
 
   await ExpensePayment.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });

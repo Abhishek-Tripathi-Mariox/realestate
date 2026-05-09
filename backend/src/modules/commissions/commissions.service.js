@@ -1,5 +1,6 @@
 const { v4: uuidv4 } = require('uuid');
 const { notDeleted } = require('../../utils/notDeleted');
+const { addMoney, gteMoney, eqMoney } = require('../../utils/money');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   CommissionBill, CommissionPayment, Account, Transaction, Vendor,
@@ -94,16 +95,16 @@ const deleteBill = async (id, userId) => {
     const t = await Transaction.findOne({
       sourceType: 'COMMISSION_PAYMENT',
       sourceId: cp.id,
+      isReversed: { $ne: true },
       isReversal: { $ne: true },
     }).lean();
     if (t) await createReversalTransaction(t, userId, 'Commission bill deleted');
   }
-  const directTxn = await Transaction.findOne({
-    sourceType: 'COMMISSION_PAYMENT',
-    sourceId: id,
-    isReversal: { $ne: true },
-  }).lean();
-  if (directTxn) await createReversalTransaction(directTxn, userId, 'Commission bill deleted');
+  // Note: removed the legacy "directTxn" lookup keyed by bill id — no
+  // current code path creates such a transaction (commission txns are
+  // always keyed by the payment row id), and the lookup risked
+  // double-reversing if anyone ever did create one. The aliveTransactions
+  // filter handles any stragglers via the BROKER_COMMISSION chain.
 
   await CommissionBill.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
   await CommissionPayment.updateMany({ billId: id }, { $set: { isDeleted: true, deletedAt: new Date() } });
@@ -129,6 +130,18 @@ const addBillPayment = async (billId, body, userId) => {
   }
 
   const amount = parseFloat(body.amount) || 0;
+  if (!(amount > 0)) {
+    return { error: 'Payment amount must be greater than zero', status: 400 };
+  }
+  const billAmount = bill.amount ?? bill.commissionAmount ?? 0;
+  const proposedPaid = addMoney(bill.paidAmount || 0, amount);
+  if (!gteMoney(billAmount, proposedPaid)) {
+    return {
+      error: `Payment exceeds commission balance (bill ${billAmount}, already paid ${bill.paidAmount || 0}, attempted ${amount})`,
+      status: 400,
+    };
+  }
+
   const payment = {
     id: uuidv4(),
     billId,
@@ -145,9 +158,15 @@ const addBillPayment = async (billId, body, userId) => {
 
   await CommissionPayment.create(payment);
 
-  const newPaid = (bill.paidAmount || 0) + amount;
-  const status = newPaid >= (bill.amount || 0) ? 'Paid' : 'Partial';
-  await CommissionBill.updateOne({ id: billId }, { $set: { paidAmount: newPaid, status } });
+  const updated = await CommissionBill.findOneAndUpdate(
+    { id: billId },
+    { $inc: { paidAmount: amount } },
+    { new: true },
+  ).lean();
+  const status = eqMoney(updated.paidAmount || 0, billAmount) || gteMoney(updated.paidAmount || 0, billAmount)
+    ? 'Paid'
+    : 'Partial';
+  await CommissionBill.updateOne({ id: billId }, { $set: { status } });
 
   await createTransaction({
     txnDate: payment.paymentDate,
@@ -175,11 +194,21 @@ const deleteBillPayment = async (id, userId) => {
     await createReversalTransaction(originalTxn, userId, 'Commission payment deleted');
   }
 
-  const bill = await CommissionBill.findOne({ id: payment.billId }).lean();
-  if (bill) {
-    const newPaid = Math.max(0, (bill.paidAmount || 0) - (payment.amount || 0));
-    const status = newPaid <= 0 ? 'Pending' : (newPaid >= (bill.amount || 0) ? 'Paid' : 'Partial');
-    await CommissionBill.updateOne({ id: payment.billId }, { $set: { paidAmount: newPaid, status } });
+  const updated = await CommissionBill.findOneAndUpdate(
+    { id: payment.billId },
+    { $inc: { paidAmount: -(payment.amount || 0) } },
+    { new: true },
+  ).lean();
+  if (updated) {
+    const billAmount = updated.amount ?? updated.commissionAmount ?? 0;
+    const newPaid = Math.max(0, updated.paidAmount || 0);
+    const status = newPaid <= 0
+      ? 'Pending'
+      : (gteMoney(newPaid, billAmount) ? 'Paid' : 'Partial');
+    await CommissionBill.updateOne(
+      { id: payment.billId },
+      { $set: { status, paidAmount: newPaid } },
+    );
   }
 
   await CommissionPayment.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });

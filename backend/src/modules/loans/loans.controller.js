@@ -15,8 +15,7 @@ const createParty = asyncHandler(async (req, res) => {
 });
 
 const removeParty = asyncHandler(async (req, res) => {
-  await service.removeParty(req.params.id);
-  res.json({ message: 'Party deleted' });
+  sendOrError(res, await service.removeParty(req.params.id) || { message: 'Party deleted' });
 });
 
 const partyLedger = asyncHandler(async (req, res) => {

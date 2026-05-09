@@ -30,4 +30,8 @@ const deletePayment = asyncHandler(async (req, res) => {
   sendOrError(res, await service.deletePayment(req.params.id, req.user.userId));
 });
 
-module.exports = { listForSociety, create, remove, listPayments, addPayment, deletePayment };
+const updatePayment = asyncHandler(async (req, res) => {
+  sendOrError(res, await service.updatePayment(req.params.id, req.body, req.user.userId));
+});
+
+module.exports = { listForSociety, create, remove, listPayments, addPayment, deletePayment, updatePayment };

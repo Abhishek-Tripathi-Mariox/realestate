@@ -7,12 +7,21 @@
 // records for one sourceType. The transaction's sourceId points at the
 // FIRST link in the chain. A transaction is "alive" only if every doc
 // along the chain is still alive (no isDeleted=true anywhere).
+//
+// Reversal transactions (`<TYPE>_REVERSAL`) carry `sourceId = originalTxn.id`
+// — not the original parent's id — so we resolve them by hopping to the
+// original transaction first and then walking its parent chain. That keeps
+// the daybook consistent in views that display reversals (e.g. txnStatus
+// = "all"): if a parent is killed, both the original AND its reversal get
+// dropped instead of leaving the reversal alone, which would otherwise
+// flip the visible balance.
 
 const {
   Sale, SalePaymentEntry, Purchase, PurchasePaymentEntry,
   ExpenseBill, ExpensePayment, CommissionBill, CommissionPayment,
   CustomerPayment, ResaleDeal, ResaleBuyerPayment, ResaleSellerPayout,
   Partner, PartnerLedgerEntry, Loan, LoanRepayment,
+  Transaction,
 } = require('../models');
 
 // Each chain step: { model, link } where `link` is the field on this doc
@@ -40,28 +49,30 @@ const PARENT_CHAINS = {
 
 // Return the set of sourceIds (for one sourceType) whose full parent chain
 // is still alive — every doc at every layer must have isDeleted != true.
-const aliveSourceIdsFor = async (sourceType, sourceIds) => {
+// `cache` is an optional Map shared across calls within one request to
+// avoid re-issuing identical (model, ids) lookups; pass {} to disable.
+const aliveSourceIdsFor = async (sourceType, sourceIds, cache) => {
   const chain = PARENT_CHAINS[sourceType];
   if (!chain || sourceIds.length === 0) return new Set(sourceIds);
 
-  // Layer 0: load the immediate parents and keep only the alive ones.
-  const layer0Docs = await chain[0].model.find({
-    id: { $in: sourceIds },
-    isDeleted: { $ne: true },
-  }).lean();
-  let surviving = layer0Docs;
+  const fetchAlive = async (model, ids) => {
+    const cacheKey = cache ? `${model.modelName}|${[...ids].sort().join(',')}` : null;
+    if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
+    const docs = await model.find({
+      id: { $in: ids },
+      isDeleted: { $ne: true },
+    }).lean();
+    if (cache) cache.set(cacheKey, docs);
+    return docs;
+  };
 
-  // Walk the rest of the chain; at each step, look up the next-layer doc
-  // by following the previous step's `link` field.
+  let surviving = await fetchAlive(chain[0].model, sourceIds);
   for (let i = 1; i < chain.length; i += 1) {
     const prevLink = chain[i - 1].link;
     if (!prevLink) break;
     const nextIds = [...new Set(surviving.map((d) => d[prevLink]).filter(Boolean))];
     if (nextIds.length === 0) { surviving = []; break; }
-    const nextDocs = await chain[i].model.find({
-      id: { $in: nextIds },
-      isDeleted: { $ne: true },
-    }).lean();
+    const nextDocs = await fetchAlive(chain[i].model, nextIds);
     const aliveNextIds = new Set(nextDocs.map((d) => d.id));
     surviving = surviving.filter((d) => aliveNextIds.has(d[prevLink]));
   }
@@ -72,22 +83,51 @@ const aliveSourceIdsFor = async (sourceType, sourceIds) => {
 // Given a list of already-loaded transactions, return only the ones whose
 // parent chain is still alive. Transactions with no parent reference, or
 // with a sourceType we don't know how to validate, are kept as-is.
-const filterAliveTransactions = async (transactions) => {
+//
+// Reversal rows have `sourceType: '<X>_REVERSAL'` and point at the original
+// transaction id; we resolve those to the original's parent chain first
+// so a reversal disappears alongside its original when the parent dies.
+const filterAliveTransactions = async (transactions, cache = new Map()) => {
+  // Step 1: bucket each txn by the sourceType we'll actually validate
+  // against. For reversal rows, look up the original txn and use its
+  // sourceType + sourceId in place.
+  const reversalRows = transactions.filter(
+    (t) => t.sourceType && t.sourceType.endsWith('_REVERSAL') && t.originalTxnId,
+  );
+  const originalById = {};
+  if (reversalRows.length) {
+    const originalIds = reversalRows.map((t) => t.originalTxnId).filter(Boolean);
+    const originals = await Transaction.find({ id: { $in: originalIds } }).lean();
+    originals.forEach((o) => { originalById[o.id] = o; });
+  }
+  // For each transaction, decide which (sourceType, sourceId) drives its
+  // alive check. Default = the row's own; for reversals = the original's.
+  const probeFor = (t) => {
+    if (t.sourceType && t.sourceType.endsWith('_REVERSAL') && t.originalTxnId) {
+      const orig = originalById[t.originalTxnId];
+      if (orig) return { sourceType: orig.sourceType, sourceId: orig.sourceId };
+    }
+    return { sourceType: t.sourceType, sourceId: t.sourceId };
+  };
+
+  // Step 2: collect distinct (sourceType, sourceId) probes.
   const bySourceType = {};
   for (const t of transactions) {
-    if (!t.sourceType || !PARENT_CHAINS[t.sourceType] || !t.sourceId) continue;
-    if (!bySourceType[t.sourceType]) bySourceType[t.sourceType] = new Set();
-    bySourceType[t.sourceType].add(t.sourceId);
+    const { sourceType, sourceId } = probeFor(t);
+    if (!sourceType || !PARENT_CHAINS[sourceType] || !sourceId) continue;
+    if (!bySourceType[sourceType]) bySourceType[sourceType] = new Set();
+    bySourceType[sourceType].add(sourceId);
   }
 
   const aliveBySourceType = {};
   for (const [sourceType, idSet] of Object.entries(bySourceType)) {
-    aliveBySourceType[sourceType] = await aliveSourceIdsFor(sourceType, [...idSet]);
+    aliveBySourceType[sourceType] = await aliveSourceIdsFor(sourceType, [...idSet], cache);
   }
 
   return transactions.filter((t) => {
-    if (!t.sourceType || !PARENT_CHAINS[t.sourceType] || !t.sourceId) return true;
-    return aliveBySourceType[t.sourceType]?.has(t.sourceId);
+    const { sourceType, sourceId } = probeFor(t);
+    if (!sourceType || !PARENT_CHAINS[sourceType] || !sourceId) return true;
+    return aliveBySourceType[sourceType]?.has(sourceId);
   });
 };
 

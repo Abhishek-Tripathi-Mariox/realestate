@@ -83,11 +83,35 @@ const summary = async (query) => {
     filter.txnDate.$lte = query.endDate;
   }
 
-  const rawTxns = await Transaction.find(filter).lean();
+  // Group on the DB side first so we don't pull every transaction in the
+  // date range into memory. Each group becomes one synthetic doc carrying
+  // (sourceType, sourceId, direction) + the summed amount; aliveTxns
+  // works the same way on those grouped rows since it only inspects the
+  // sourceType/sourceId fields. This keeps the summary path bounded by
+  // the number of distinct parents touched, not by raw txn count.
+  const grouped = await Transaction.aggregate([
+    { $match: filter },
+    {
+      $group: {
+        _id: {
+          sourceType: '$sourceType',
+          sourceId: '$sourceId',
+          direction: '$direction',
+        },
+        amount: { $sum: '$amount' },
+      },
+    },
+  ]);
+  const groupedAsTxns = grouped.map((g) => ({
+    sourceType: g._id.sourceType,
+    sourceId: g._id.sourceId,
+    direction: g._id.direction,
+    amount: g.amount,
+  }));
   // Drop orphans (parent sale / bill / payment soft-deleted) so the daybook
   // totals match reality — without this, deleting a sale leaves its IN
   // payment hanging in the summary forever.
-  const transactions = await filterAliveTransactions(rawTxns);
+  const transactions = await filterAliveTransactions(groupedAsTxns);
 
   let totalIn = 0, totalOut = 0;
   transactions.forEach(txn => {

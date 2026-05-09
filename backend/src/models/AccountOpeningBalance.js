@@ -9,4 +9,8 @@ const schema = buildSchema({
   updatedAt: Date,
 });
 
+// One opening balance per account — the upsert in updateOpeningBalance
+// would otherwise race and create duplicates.
+schema.index({ accountId: 1 }, { unique: true });
+
 module.exports = mongoose.model('AccountOpeningBalance', schema, 'account_opening_balances');

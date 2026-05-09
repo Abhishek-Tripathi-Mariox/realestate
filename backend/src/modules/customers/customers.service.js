@@ -1,8 +1,13 @@
 const { v4: uuidv4 } = require('uuid');
 const { notDeleted } = require('../../utils/notDeleted');
+const { pick } = require('../../utils/pick');
 const {
   Customer, Sale, CustomerPayment, PaymentAllocation, Inventory, SalePaymentEntry,
 } = require('../../models');
+
+// Fields a client may set on update — explicit allowlist guards against
+// mass-assignment via PUT body (id, isDeleted, denormalized totals, etc.).
+const CUSTOMER_UPDATABLE = ['name', 'phone', 'email', 'address', 'notes'];
 
 const stripId = ({ _id, ...rest }) => rest;
 
@@ -109,14 +114,57 @@ const create = async (body, userId) => {
 };
 
 const update = async (id, body) => {
-  await Customer.updateOne({ id }, { $set: { ...body, updatedAt: new Date() } });
+  const patch = { ...pick(body, CUSTOMER_UPDATABLE), updatedAt: new Date() };
+  await Customer.updateOne({ id }, { $set: patch });
   const updated = await Customer.findOne({ id }).lean();
   if (!updated) return null;
   return stripId(updated);
 };
 
 const remove = async (id) => {
-  await Customer.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
+  // Cascade soft-delete: customer's sales, payments, sale-payment entries
+  // and allocations all need to disappear together. Otherwise the customer
+  // is gone from the master list but their sales (and the underlying daybook
+  // IN transactions) still inflate every total. The aliveTransactions filter
+  // handles the daybook side once parents are flagged deleted.
+  const stamp = { isDeleted: true, deletedAt: new Date(), deletedReason: 'Customer deleted' };
+
+  const sales = await Sale.find(notDeleted({ customerId: id }), { id: 1, inventoryId: 1, status: 1 }).lean();
+  const saleIds = sales.map(s => s.id);
+  const payments = await CustomerPayment.find(notDeleted({ customerId: id }), { id: 1 }).lean();
+  const paymentIds = payments.map(p => p.id);
+
+  if (saleIds.length) {
+    await SalePaymentEntry.updateMany(
+      { saleId: { $in: saleIds }, isDeleted: { $ne: true } },
+      { $set: stamp },
+    );
+    await Sale.updateMany({ id: { $in: saleIds } }, { $set: stamp });
+
+    // Free the inventory units for any non-TRANSFERRED sales — same logic
+    // as sales.remove for a single sale.
+    const inventoryIds = [...new Set(
+      sales.filter(s => s.status !== 'TRANSFERRED' && s.inventoryId).map(s => s.inventoryId),
+    )];
+    if (inventoryIds.length) {
+      await Inventory.updateMany(
+        { id: { $in: inventoryIds } },
+        { $set: { status: 'Available', soldDate: null } },
+      );
+    }
+  }
+
+  if (paymentIds.length) {
+    // Drop allocations entirely (mirrors customerPayments.remove behaviour).
+    await PaymentAllocation.deleteMany({ paymentId: { $in: paymentIds } });
+    await CustomerPayment.updateMany(
+      { id: { $in: paymentIds } },
+      { $set: stamp },
+    );
+  }
+
+  await Customer.updateOne({ id }, { $set: stamp });
+  return { message: `Customer deleted (${saleIds.length} sale(s) and ${paymentIds.length} payment(s) cascaded)` };
 };
 
 const listSales = async (customerId) => {

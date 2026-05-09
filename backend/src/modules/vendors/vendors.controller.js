@@ -16,8 +16,9 @@ const update = asyncHandler(async (req, res) => {
 });
 
 const remove = asyncHandler(async (req, res) => {
-  await service.remove(req.params.id);
-  res.json({ message: 'Vendor deleted' });
+  const result = await service.remove(req.params.id);
+  if (result?.error) return res.status(result.status || 500).json({ error: result.error });
+  res.json(result || { message: 'Vendor deleted' });
 });
 
 const ledger = asyncHandler(async (req, res) => {
