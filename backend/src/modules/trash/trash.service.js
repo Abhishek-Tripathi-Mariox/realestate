@@ -48,6 +48,62 @@ const BUCKETS_BY_KEY = TRASH_BUCKETS.reduce((acc, b) => {
   return acc;
 }, {});
 
+// For each bucket, the parent record(s) that must be alive before the row
+// can be restored. Without this guard a Sale could be restored after its
+// Society was permanently purged, leaving the Sale referencing a missing
+// parent (broken listings, orphan daybook entries, etc.). Each entry:
+//   field  — the foreign-key field on this bucket's row
+//   parent — the slug of the parent bucket (used to resolve the model)
+//   label  — friendly name shown in the error message
+const PARENT_REFS = {
+  societyPhases:        [{ field: 'societyId', parent: 'societies',       label: 'Society' }],
+  sales:                [{ field: 'societyId', parent: 'societies',       label: 'Society' }],
+  inventory:            [{ field: 'societyId', parent: 'societies',       label: 'Society' }],
+  purchases:            [{ field: 'societyId', parent: 'societies',       label: 'Society' }],
+  partners:             [{ field: 'societyId', parent: 'societies',       label: 'Society' }],
+  vendors:              [{ field: 'societyId', parent: 'societies',       label: 'Society' }],
+  customers:            [{ field: 'societyId', parent: 'societies',       label: 'Society' }],
+
+  salePayments:         [{ field: 'saleId',       parent: 'sales',           label: 'Sale' }],
+  purchasePayments:     [{ field: 'purchaseId',   parent: 'purchases',       label: 'Purchase' }],
+  expensePayments:      [{ field: 'billId',       parent: 'expenseBills',    label: 'Expense Bill' }],
+  commissionPayments:   [{ field: 'billId',       parent: 'commissionBills', label: 'Commission Bill' }],
+  customerPayments:     [{ field: 'customerId',   parent: 'customers',       label: 'Customer' }],
+  partnerLedgerEntries: [{ field: 'partnerId',    parent: 'partners',        label: 'Partner' }],
+  loans:                [{ field: 'partyId',      parent: 'parties',         label: 'Party' }],
+  loanRepayments:       [{ field: 'loanId',       parent: 'loans',           label: 'Loan' }],
+  resaleBuyerPayments:  [{ field: 'dealId',       parent: 'resaleDeals',     label: 'Resale Deal' }],
+  resaleSellerPayouts:  [{ field: 'dealId',       parent: 'resaleDeals',     label: 'Resale Deal' }],
+  expenseBills:         [{ field: 'vendorId',     parent: 'vendors',         label: 'Vendor' }],
+  commissionBills:      [{ field: 'brokerVendorId', parent: 'vendors',       label: 'Broker Vendor' }],
+};
+
+// Verify every required parent for a record is still alive (not in trash).
+// Returns null when all parents are alive (or when no parent ref applies),
+// or { error, status } when one is missing — the restore caller forwards
+// that to the controller as a 409.
+const checkParentsAlive = async (slug, doc) => {
+  const refs = PARENT_REFS[slug];
+  if (!refs || !doc) return null;
+  for (const ref of refs) {
+    const fkValue = doc[ref.field];
+    if (!fkValue) continue; // optional FK, nothing to check
+    const parentBucket = BUCKETS_BY_KEY[ref.parent];
+    if (!parentBucket) continue;
+    const parentAlive = await parentBucket.model.findOne({
+      id: fkValue,
+      isDeleted: { $ne: true },
+    }).lean();
+    if (!parentAlive) {
+      return {
+        error: `Cannot restore: parent ${ref.label} is in trash or permanently deleted. Restore the ${ref.label} first.`,
+        status: 409,
+      };
+    }
+  }
+  return null;
+};
+
 const stripId = ({ _id, ...rest }) => rest;
 
 // List every soft-deleted record across all buckets, newest first. Pass
@@ -134,6 +190,17 @@ const cascadeRestoreSocietyChildren = async (societyId) => {
 const restore = async (typeKey, id) => {
   const bucket = BUCKETS_BY_KEY[typeKey];
   if (!bucket) return { error: 'Unknown trash type', status: 400 };
+
+  // Pre-flight: load the trashed doc and verify every required parent is
+  // still alive. Without this guard a Sale could be restored after its
+  // Society was permanently purged, leaving an orphan referencing a
+  // missing parent. Skip for societies (top of the chain — no parents).
+  const trashedDoc = await bucket.model.findOne({ id }).lean();
+  if (!trashedDoc) return { error: 'Record not found', status: 404 };
+  if (bucket.slug !== 'societies') {
+    const parentErr = await checkParentsAlive(bucket.slug, trashedDoc);
+    if (parentErr) return parentErr;
+  }
 
   const result = await bucket.model.updateOne({ id }, RESTORE_UPDATE);
   if (result.matchedCount === 0) return { error: 'Record not found', status: 404 };
