@@ -22,6 +22,7 @@ flatRouter.delete('/:id', verifyToken, ctrl.remove);
 
 // Standalone: /api/sale-payments/:id (delete a sale ledger entry)
 const salePaymentsRouter = express.Router();
+salePaymentsRouter.put('/:id', verifyToken, ctrl.updateSalePayment);
 salePaymentsRouter.delete('/:id', verifyToken, ctrl.deleteSalePayment);
 
 module.exports = { societyScopedRouter, flatRouter, salePaymentsRouter };

@@ -47,6 +47,59 @@ const create = async (societyId, body) => {
   return purchase;
 };
 
+// Allow rename / re-date / re-deal-amount / notes — but never `id`,
+// `societyId`, or denormalized totals (amountPaid, status). dealAmount
+// can't be set below the already-paid total or downstream balance math
+// would go negative.
+const update = async (id, body) => {
+  const current = await Purchase.findOne({ id }).lean();
+  if (!current) return null;
+
+  const partyName = body.partyName !== undefined
+    ? body.partyName
+    : (body.vendorName !== undefined ? body.vendorName : current.partyName);
+
+  const incomingDeal = body.dealAmount !== undefined ? body.dealAmount : body.totalCost;
+  const dealAmount = incomingDeal !== undefined ? Number(incomingDeal) : (current.dealAmount ?? current.totalCost ?? 0);
+
+  if (!(dealAmount > 0)) {
+    return { error: 'Deal amount must be greater than zero', status: 400 };
+  }
+  const paid = current.amountPaid || 0;
+  if (dealAmount < paid) {
+    return {
+      error: `Deal amount (${dealAmount}) cannot be less than already-paid (${paid}). Reverse some payments first.`,
+      status: 400,
+    };
+  }
+
+  const purchaseDate = body.agreementDate || body.purchaseDate || current.purchaseDate || current.agreementDate;
+  const notes = body.notes !== undefined ? body.notes : current.notes;
+
+  const status = paid <= 0
+    ? 'Pending'
+    : (gteMoney(paid, dealAmount) ? 'Paid' : 'Partial');
+
+  await Purchase.updateOne(
+    { id },
+    {
+      $set: {
+        partyName,
+        vendorName: partyName,
+        dealAmount,
+        totalCost: dealAmount,
+        purchaseDate,
+        agreementDate: purchaseDate,
+        notes,
+        status,
+        updatedAt: new Date(),
+      },
+    },
+  );
+  const updated = await Purchase.findOne({ id }).lean();
+  return stripId(updated);
+};
+
 const remove = async (id, userId) => {
   const purchase = await Purchase.findOne({ id }).lean();
   if (!purchase) return { error: 'Purchase not found', status: 404 };
@@ -305,4 +358,4 @@ const updatePayment = async (id, body, userId) => {
   return { message: 'Purchase payment updated', entry: fresh };
 };
 
-module.exports = { listForSociety, create, remove, listPayments, addPayment, deletePayment, updatePayment };
+module.exports = { listForSociety, create, update, remove, listPayments, addPayment, deletePayment, updatePayment };

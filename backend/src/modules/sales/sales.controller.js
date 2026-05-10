@@ -51,6 +51,10 @@ const deleteSalePayment = asyncHandler(async (req, res) => {
   sendOrError(res, await service.deleteSalePayment(req.params.id, req.user.userId));
 });
 
+const updateSalePayment = asyncHandler(async (req, res) => {
+  sendOrError(res, await service.updateSalePayment(req.params.id, req.body, req.user.userId));
+});
+
 const listUnassigned = asyncHandler(async (req, res) => {
   res.json(await service.listUnassigned(req.query.societyId));
 });
@@ -62,6 +66,6 @@ const assignCustomer = asyncHandler(async (req, res) => {
 module.exports = {
   listForSociety, create, getById, update, remove,
   listPayments, addPayment,
-  listLedger, addLedgerEntry, deleteSalePayment,
+  listLedger, addLedgerEntry, deleteSalePayment, updateSalePayment,
   listUnassigned, assignCustomer,
 };

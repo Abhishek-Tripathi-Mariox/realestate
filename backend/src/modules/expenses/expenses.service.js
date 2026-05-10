@@ -70,6 +70,73 @@ const createBill = async (body, userId) => {
   return bill;
 };
 
+// Update an existing expense bill. Allow vendor / category / amount /
+// date / description edits. Amount can't go below already-paid (otherwise
+// the balance math would go negative). No daybook reversal needed because
+// the bill itself doesn't write a transaction — only its payments do.
+const updateBill = async (id, body) => {
+  const current = await ExpenseBill.findOne({ id }).lean();
+  if (!current) return null;
+  if (current.isDeleted) return { error: 'Bill is deleted', status: 400 };
+
+  let vendorName = body.vendorName !== undefined ? body.vendorName : current.vendorName;
+  if (body.vendorId && body.vendorId !== current.vendorId && !body.vendorName) {
+    const vendor = await Vendor.findOne({ id: body.vendorId }).lean();
+    if (vendor) vendorName = vendor.name;
+  }
+
+  let category = body.category !== undefined ? body.category : current.category;
+  if (body.categoryId && body.categoryId !== current.categoryId && !body.category) {
+    const cat = await ExpenseCategory.findOne({ id: body.categoryId }).lean();
+    if (cat) category = cat.name;
+  }
+
+  const incomingAmount = body.billAmount ?? body.amount;
+  const amount = incomingAmount !== undefined
+    ? Number(incomingAmount)
+    : (current.amount ?? current.billAmount ?? 0);
+  if (!(amount > 0)) {
+    return { error: 'Bill amount must be greater than zero', status: 400 };
+  }
+  const paid = current.paidAmount || 0;
+  if (amount < paid) {
+    return {
+      error: `Bill amount (${amount}) cannot be less than already paid (${paid}). Reverse some payments first.`,
+      status: 400,
+    };
+  }
+
+  const billDate = body.billDate || body.expenseDate || current.billDate;
+  const description = body.description !== undefined
+    ? body.description
+    : (body.remark !== undefined ? body.remark : current.description);
+
+  // Recompute status against the new amount in case the cap moved.
+  const status = paid <= 0
+    ? 'Pending'
+    : (gteMoney(paid, amount) ? 'Paid' : 'Partial');
+
+  await ExpenseBill.updateOne(
+    { id },
+    {
+      $set: {
+        vendorId: body.vendorId !== undefined ? body.vendorId : current.vendorId,
+        vendorName,
+        categoryId: body.categoryId !== undefined ? body.categoryId : current.categoryId,
+        category,
+        amount,
+        billAmount: amount,
+        billDate,
+        description,
+        status,
+        updatedAt: new Date(),
+      },
+    },
+  );
+  const updated = await ExpenseBill.findOne({ id }).lean();
+  return stripId(updated);
+};
+
 const deleteBill = async (id, userId) => {
   const bill = await ExpenseBill.findOne({ id }).lean();
   if (!bill) return { error: 'Bill not found', status: 404 };
@@ -483,8 +550,125 @@ const deleteBillPayment = async (id, userId) => {
   return { message: 'Expense payment deleted with reversal' };
 };
 
+// Edit an existing expense bill payment. For totals-affecting changes
+// (amount / mode / account / date) we reverse the original daybook txn
+// and write a fresh one so cash balances and the aliveTransactions filter
+// stay correct. Pure remark edits update in place.
+const updateBillPayment = async (id, body, userId) => {
+  const payment = await ExpensePayment.findOne({ id }).lean();
+  if (!payment) return { error: 'Payment not found', status: 404 };
+  if (payment.isDeleted) return { error: 'Payment is deleted', status: 400 };
+
+  const bill = await ExpenseBill.findOne({ id: payment.billId }).lean();
+  if (!bill) return { error: 'Parent bill not found', status: 404 };
+
+  const incomingAmount = body.amount !== undefined ? parseFloat(body.amount) : payment.amount;
+  if (!(incomingAmount > 0)) {
+    return { error: 'Payment amount must be greater than zero', status: 400 };
+  }
+  const newAmount = Number(incomingAmount);
+  const newPaymentDate = body.paymentDate || body.entryDate || payment.paymentDate;
+  const newPaymentMode = body.paymentMode || payment.paymentMode;
+  const newAccountId = body.accountId || payment.accountId;
+  const newReferenceNo = body.referenceNo !== undefined ? body.referenceNo : (payment.referenceNo || '');
+  const newRemark = body.remark !== undefined ? body.remark : (payment.remark || '');
+
+  const totalsAffectingChange =
+    !eqMoney(newAmount, payment.amount || 0)
+    || newPaymentMode !== payment.paymentMode
+    || newAccountId !== payment.accountId
+    || newPaymentDate !== payment.paymentDate;
+
+  // Re-validate over-payment when amount changes. Subtract this payment's
+  // OWN current contribution before checking the cap.
+  if (!eqMoney(newAmount, payment.amount || 0)) {
+    const billAmount = bill.amount ?? bill.billAmount ?? 0;
+    const otherPaid = (bill.paidAmount || 0) - (payment.amount || 0);
+    if (!gteMoney(billAmount, otherPaid + newAmount)) {
+      return {
+        error: `Updated amount exceeds bill balance (bill ${billAmount}, other payments ${otherPaid}, attempted ${newAmount})`,
+        status: 400,
+      };
+    }
+  }
+
+  if (totalsAffectingChange) {
+    const originalTxn = await Transaction.findOne({
+      sourceType: 'EXPENSE_PAYMENT',
+      sourceId: id,
+      isReversed: { $ne: true },
+      isReversal: { $ne: true },
+    }).lean();
+    if (originalTxn) {
+      await createReversalTransaction(originalTxn, userId, 'Expense payment edited');
+    }
+
+    const delta = newAmount - (payment.amount || 0);
+    const updatedBill = await ExpenseBill.findOneAndUpdate(
+      { id: payment.billId },
+      { $inc: { paidAmount: delta } },
+      { new: true },
+    ).lean();
+
+    await ExpensePayment.updateOne(
+      { id },
+      {
+        $set: {
+          amount: newAmount,
+          paymentDate: newPaymentDate,
+          paymentMode: newPaymentMode,
+          accountId: newAccountId,
+          referenceNo: newReferenceNo,
+          remark: newRemark,
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (updatedBill) {
+      const billAmount = updatedBill.amount ?? updatedBill.billAmount ?? 0;
+      const newPaid = Math.max(0, updatedBill.paidAmount || 0);
+      const status = newPaid <= 0
+        ? 'Pending'
+        : (gteMoney(newPaid, billAmount) ? 'Paid' : 'Partial');
+      await ExpenseBill.updateOne(
+        { id: payment.billId },
+        { $set: { status } },
+      );
+
+      await createTransaction({
+        txnDate: newPaymentDate,
+        societyId: updatedBill.societyId,
+        accountId: newAccountId,
+        direction: 'OUT',
+        amount: newAmount,
+        paymentMode: newPaymentMode,
+        partyType: 'Vendor',
+        partyName: updatedBill.vendorName,
+        sourceType: 'EXPENSE_PAYMENT',
+        sourceId: id,
+        remark: newRemark || `${updatedBill.category} - ${updatedBill.vendorName}`,
+      }, userId);
+    }
+  } else {
+    await ExpensePayment.updateOne(
+      { id },
+      {
+        $set: {
+          referenceNo: newReferenceNo,
+          remark: newRemark,
+          updatedAt: new Date(),
+        },
+      },
+    );
+  }
+
+  const fresh = await ExpensePayment.findOne({ id }).lean();
+  return { message: 'Expense payment updated', payment: fresh };
+};
+
 module.exports = {
-  listBills, createBill, deleteBill,
+  listBills, createBill, updateBill, deleteBill,
   listExpenses, deleteExpense, quickExpense,
-  listBillPayments, addBillPayment, deleteBillPayment,
+  listBillPayments, addBillPayment, updateBillPayment, deleteBillPayment,
 };

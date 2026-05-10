@@ -14,6 +14,13 @@ const create = asyncHandler(async (req, res) => {
   res.json(await service.create(req.params.societyId, req.body));
 });
 
+const update = asyncHandler(async (req, res) => {
+  const updated = await service.update(req.params.id, req.body);
+  if (!updated) return res.status(404).json({ error: 'Purchase not found' });
+  if (updated.error) return res.status(updated.status || 500).json({ error: updated.error });
+  res.json(updated);
+});
+
 const remove = asyncHandler(async (req, res) => {
   sendOrError(res, await service.remove(req.params.id, req.user.userId));
 });
@@ -34,4 +41,4 @@ const updatePayment = asyncHandler(async (req, res) => {
   sendOrError(res, await service.updatePayment(req.params.id, req.body, req.user.userId));
 });
 
-module.exports = { listForSociety, create, remove, listPayments, addPayment, deletePayment, updatePayment };
+module.exports = { listForSociety, create, update, remove, listPayments, addPayment, deletePayment, updatePayment };

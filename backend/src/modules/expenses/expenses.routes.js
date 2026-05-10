@@ -6,6 +6,7 @@ const ctrl = require('./expenses.controller');
 const expenseBillsRouter = express.Router();
 expenseBillsRouter.get('/', verifyToken, ctrl.listBills);
 expenseBillsRouter.post('/', verifyToken, ctrl.createBill);
+expenseBillsRouter.put('/:id', verifyToken, ctrl.updateBill);
 expenseBillsRouter.delete('/:id', verifyToken, ctrl.deleteBill);
 expenseBillsRouter.get('/:billId/payments', verifyToken, ctrl.listBillPayments);
 expenseBillsRouter.post('/:billId/payments', verifyToken, ctrl.addBillPayment);
@@ -18,6 +19,7 @@ expensesRouter.delete('/:id', verifyToken, ctrl.deleteExpense);
 
 // /api/expense-payments/:id
 const expensePaymentsRouter = express.Router();
+expensePaymentsRouter.put('/:id', verifyToken, ctrl.updateBillPayment);
 expensePaymentsRouter.delete('/:id', verifyToken, ctrl.deleteBillPayment);
 
 module.exports = { expenseBillsRouter, expensesRouter, expensePaymentsRouter };

@@ -84,6 +84,68 @@ const createBill = async (body) => {
   return bill;
 };
 
+// Edit a commission bill. Allow broker / sale / amount / date /
+// description changes. Amount can't drop below already-paid (would make
+// balance negative). No daybook reversal — bills don't write txns, only
+// their payments do.
+const updateBill = async (id, body) => {
+  const current = await CommissionBill.findOne({ id }).lean();
+  if (!current) return null;
+  if (current.isDeleted) return { error: 'Bill is deleted', status: 400 };
+
+  let brokerName = body.brokerName !== undefined ? body.brokerName : current.brokerName;
+  if (body.brokerVendorId && body.brokerVendorId !== current.brokerVendorId && !body.brokerName) {
+    const broker = await Vendor.findOne({ id: body.brokerVendorId }).lean();
+    if (broker) brokerName = broker.name;
+  }
+
+  const incomingAmount = body.commissionAmount ?? body.amount;
+  const amount = incomingAmount !== undefined
+    ? Number(incomingAmount)
+    : (current.amount ?? current.commissionAmount ?? 0);
+  if (!(amount > 0)) {
+    return { error: 'Commission amount must be greater than zero', status: 400 };
+  }
+  const paid = current.paidAmount || 0;
+  if (amount < paid) {
+    return {
+      error: `Commission amount (${amount}) cannot be less than already paid (${paid}). Reverse some payments first.`,
+      status: 400,
+    };
+  }
+
+  const billDate = body.commissionDate || body.billDate || current.billDate;
+  const description = body.remark !== undefined
+    ? body.remark
+    : (body.description !== undefined ? body.description : current.description);
+  const saleId = body.saleId !== undefined ? body.saleId : current.saleId;
+
+  const status = paid <= 0
+    ? 'Pending'
+    : (gteMoney(paid, amount) ? 'Paid' : 'Partial');
+
+  await CommissionBill.updateOne(
+    { id },
+    {
+      $set: {
+        brokerVendorId: body.brokerVendorId !== undefined ? body.brokerVendorId : current.brokerVendorId,
+        brokerName,
+        saleId,
+        amount,
+        commissionAmount: amount,
+        billDate,
+        commissionDate: billDate,
+        description,
+        remark: description,
+        status,
+        updatedAt: new Date(),
+      },
+    },
+  );
+  const updated = await CommissionBill.findOne({ id }).lean();
+  return stripId(updated);
+};
+
 const deleteBill = async (id, userId) => {
   const bill = await CommissionBill.findOne({ id }).lean();
   if (!bill) return { error: 'Bill not found', status: 404 };
@@ -215,4 +277,118 @@ const deleteBillPayment = async (id, userId) => {
   return { message: 'Commission payment deleted with reversal' };
 };
 
-module.exports = { listBills, createBill, deleteBill, listBillPayments, addBillPayment, deleteBillPayment };
+// Edit a commission bill payment. Mirror of expenses.updateBillPayment —
+// totals-affecting edits (amount/mode/account/date) reverse the original
+// daybook txn and write a fresh one; pure remark edits update in place.
+const updateBillPayment = async (id, body, userId) => {
+  const payment = await CommissionPayment.findOne({ id }).lean();
+  if (!payment) return { error: 'Payment not found', status: 404 };
+  if (payment.isDeleted) return { error: 'Payment is deleted', status: 400 };
+
+  const bill = await CommissionBill.findOne({ id: payment.billId }).lean();
+  if (!bill) return { error: 'Parent bill not found', status: 404 };
+
+  const incomingAmount = body.amount !== undefined ? parseFloat(body.amount) : payment.amount;
+  if (!(incomingAmount > 0)) {
+    return { error: 'Payment amount must be greater than zero', status: 400 };
+  }
+  const newAmount = Number(incomingAmount);
+  const newPaymentDate = body.paymentDate || body.entryDate || payment.paymentDate;
+  const newPaymentMode = body.paymentMode || payment.paymentMode;
+  const newAccountId = body.accountId || payment.accountId;
+  const newReferenceNo = body.referenceNo !== undefined ? body.referenceNo : (payment.referenceNo || '');
+  const newRemark = body.remark !== undefined ? body.remark : (payment.remark || '');
+
+  const totalsAffectingChange =
+    !eqMoney(newAmount, payment.amount || 0)
+    || newPaymentMode !== payment.paymentMode
+    || newAccountId !== payment.accountId
+    || newPaymentDate !== payment.paymentDate;
+
+  if (!eqMoney(newAmount, payment.amount || 0)) {
+    const billAmount = bill.amount ?? bill.commissionAmount ?? 0;
+    const otherPaid = (bill.paidAmount || 0) - (payment.amount || 0);
+    if (!gteMoney(billAmount, otherPaid + newAmount)) {
+      return {
+        error: `Updated amount exceeds commission balance (bill ${billAmount}, other payments ${otherPaid}, attempted ${newAmount})`,
+        status: 400,
+      };
+    }
+  }
+
+  if (totalsAffectingChange) {
+    const originalTxn = await Transaction.findOne({
+      sourceType: 'COMMISSION_PAYMENT',
+      sourceId: id,
+      isReversed: { $ne: true },
+      isReversal: { $ne: true },
+    }).lean();
+    if (originalTxn) {
+      await createReversalTransaction(originalTxn, userId, 'Commission payment edited');
+    }
+
+    const delta = newAmount - (payment.amount || 0);
+    const updatedBill = await CommissionBill.findOneAndUpdate(
+      { id: payment.billId },
+      { $inc: { paidAmount: delta } },
+      { new: true },
+    ).lean();
+
+    await CommissionPayment.updateOne(
+      { id },
+      {
+        $set: {
+          amount: newAmount,
+          paymentDate: newPaymentDate,
+          paymentMode: newPaymentMode,
+          accountId: newAccountId,
+          referenceNo: newReferenceNo,
+          remark: newRemark,
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (updatedBill) {
+      const billAmount = updatedBill.amount ?? updatedBill.commissionAmount ?? 0;
+      const newPaid = Math.max(0, updatedBill.paidAmount || 0);
+      const status = newPaid <= 0
+        ? 'Pending'
+        : (gteMoney(newPaid, billAmount) ? 'Paid' : 'Partial');
+      await CommissionBill.updateOne(
+        { id: payment.billId },
+        { $set: { status } },
+      );
+
+      await createTransaction({
+        txnDate: newPaymentDate,
+        societyId: updatedBill.societyId,
+        accountId: newAccountId,
+        direction: 'OUT',
+        amount: newAmount,
+        paymentMode: newPaymentMode,
+        partyType: 'Vendor',
+        partyName: updatedBill.brokerName,
+        sourceType: 'COMMISSION_PAYMENT',
+        sourceId: id,
+        remark: newRemark || `Commission - ${updatedBill.brokerName}`,
+      }, userId);
+    }
+  } else {
+    await CommissionPayment.updateOne(
+      { id },
+      {
+        $set: {
+          referenceNo: newReferenceNo,
+          remark: newRemark,
+          updatedAt: new Date(),
+        },
+      },
+    );
+  }
+
+  const fresh = await CommissionPayment.findOne({ id }).lean();
+  return { message: 'Commission payment updated', payment: fresh };
+};
+
+module.exports = { listBills, createBill, updateBill, deleteBill, listBillPayments, addBillPayment, deleteBillPayment, updateBillPayment };

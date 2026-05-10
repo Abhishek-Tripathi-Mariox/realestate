@@ -121,6 +121,9 @@ const App = () => {
   const [viewSaleData, setViewSaleData] = useState(null)
   const [editingSale, setEditingSale] = useState(null)
   const [editingInventory, setEditingInventory] = useState(null)
+  const [editingPurchase, setEditingPurchase] = useState(null)
+  const [editingExpenseBill, setEditingExpenseBill] = useState(null)
+  const [editingCommissionBill, setEditingCommissionBill] = useState(null)
   
   // Partner edit state
   const [editingPartner, setEditingPartner] = useState(null)
@@ -735,7 +738,20 @@ const App = () => {
 
   const handleUpdateLedgerEntry = async (formData) => {
     try {
-      await apiCall(`/ledger-entries/${editingLedgerEntry.id}`, 'PUT', formData)
+      // Each ledger type has its own PUT endpoint — the per-resource service
+      // is what knows how to reverse the original transaction and rewrite
+      // the parent's denormalized totals correctly.
+      let endpoint = null
+      if (ledgerType === 'partner') {
+        endpoint = `/ledger-entries/${editingLedgerEntry.id}`
+      } else if (ledgerType === 'purchase') {
+        endpoint = `/purchase-payments/${editingLedgerEntry.id}`
+      } else if (ledgerType === 'sale') {
+        endpoint = `/sale-payments/${editingLedgerEntry.id}`
+      } else {
+        throw new Error(`Edit not supported for ledger type: ${ledgerType}`)
+      }
+      await apiCall(endpoint, 'PUT', formData)
       await openLedger(ledgerType, ledgerItem)
       await loadSocietyData()
       setEditingLedgerEntry(null)
@@ -811,13 +827,31 @@ const App = () => {
       } else if (paymentBillType === 'commission') {
         await apiCall(`/commission-payments/${paymentId}`, 'DELETE')
       }
-      
+
       await openBillPayments(paymentBillType, paymentBill)
       await loadSocietyData()
-      
+
       toast({ title: 'Success', description: 'Payment deleted successfully' })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  const handleUpdateBillPayment = async (paymentId, formData) => {
+    try {
+      if (paymentBillType === 'expense') {
+        await apiCall(`/expense-payments/${paymentId}`, 'PUT', formData)
+      } else if (paymentBillType === 'commission') {
+        await apiCall(`/commission-payments/${paymentId}`, 'PUT', formData)
+      }
+
+      await openBillPayments(paymentBillType, paymentBill)
+      await loadSocietyData()
+
+      toast({ title: 'Success', description: 'Payment updated successfully' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+      throw error
     }
   }
 
@@ -1143,6 +1177,18 @@ const App = () => {
     }
   }
 
+  const handleUpdatePurchase = async (formData) => {
+    if (!editingPurchase?.id) return
+    try {
+      await apiCall(`/purchases/${editingPurchase.id}`, 'PUT', formData)
+      await loadSocietyData()
+      setEditingPurchase(null)
+      toast({ title: 'Success', description: 'Purchase updated successfully' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
   const handleCreateSale = async (formData) => {
     try {
       await apiCall(`/societies/${selectedSociety}/sales`, 'POST', formData)
@@ -1327,6 +1373,18 @@ const App = () => {
     }
   }
 
+  const handleUpdateExpenseBill = async (formData) => {
+    if (!editingExpenseBill?.id) return
+    try {
+      await apiCall(`/expense-bills/${editingExpenseBill.id}`, 'PUT', formData)
+      await loadSocietyData()
+      setEditingExpenseBill(null)
+      toast({ title: 'Success', description: 'Expense bill updated successfully' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
   const handleDeleteExpenseBill = async (billId) => {
     try {
       await apiCall(`/expense-bills/${billId}`, 'DELETE')
@@ -1354,6 +1412,18 @@ const App = () => {
       await apiCall(`/commission-bills/${billId}`, 'DELETE')
       await loadSocietyData()
       toast({ title: 'Success', description: 'Commission bill deleted successfully' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  const handleUpdateCommissionBill = async (formData) => {
+    if (!editingCommissionBill?.id) return
+    try {
+      await apiCall(`/commission-bills/${editingCommissionBill.id}`, 'PUT', formData)
+      await loadSocietyData()
+      setEditingCommissionBill(null)
+      toast({ title: 'Success', description: 'Commission bill updated successfully' })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
     }
@@ -2381,6 +2451,14 @@ const App = () => {
                                   <Button variant="outline" size="sm" onClick={() => openLedger('purchase', purchase)}>
                                     <Receipt className="w-4 h-4 mr-1" /> Payments
                                   </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setEditingPurchase(purchase)}
+                                    title="Edit purchase"
+                                  >
+                                    <Pencil className="w-4 h-4" />
+                                  </Button>
                                   <AlertDialog>
                                     <AlertDialogTrigger asChild>
                                       <Button variant="destructive" size="sm">
@@ -3395,6 +3473,14 @@ const App = () => {
                                     <Button variant="outline" size="sm" onClick={() => openBillPayments('expense', bill)}>
                                       <CreditCard className="w-4 h-4 mr-1" /> Payments
                                     </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => setEditingExpenseBill(bill)}
+                                      title="Edit bill"
+                                    >
+                                      <Pencil className="w-4 h-4" />
+                                    </Button>
                                     <AlertDialog>
                                       <AlertDialogTrigger asChild>
                                         <Button variant="destructive" size="sm">
@@ -3561,8 +3647,8 @@ const App = () => {
                               <TableHead>Date</TableHead>
                               <TableHead>Broker</TableHead>
                               <TableHead>Sale (Customer)</TableHead>
-                              <TableHead>Description</TableHead>
                               <TableHead>Inventory</TableHead>
+                              <TableHead>Description</TableHead>
                               <TableHead>Commission</TableHead>
                               <TableHead>Paid</TableHead>
                               <TableHead>Balance</TableHead>
@@ -3590,6 +3676,14 @@ const App = () => {
                                   <div className="flex items-center gap-2">
                                     <Button variant="outline" size="sm" onClick={() => openBillPayments('commission', bill)}>
                                       <CreditCard className="w-4 h-4 mr-1" /> Payments
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => setEditingCommissionBill(bill)}
+                                      title="Edit bill"
+                                    >
+                                      <Pencil className="w-4 h-4" />
                                     </Button>
                                     <AlertDialog>
                                       <AlertDialogTrigger asChild>
@@ -3660,6 +3754,69 @@ const App = () => {
         </DialogContent>
       </Dialog>
 
+      {/* Edit Purchase Dialog */}
+      <Dialog open={!!editingPurchase} onOpenChange={(open) => !open && setEditingPurchase(null)}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Purchase</DialogTitle>
+            <DialogDescription>
+              Update purchase details. Deal amount can&apos;t be set below the already-paid total.
+            </DialogDescription>
+          </DialogHeader>
+          {editingPurchase && (
+            <PurchaseForm
+              initialData={editingPurchase}
+              onSubmit={handleUpdatePurchase}
+              onCancel={() => setEditingPurchase(null)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Expense Bill Dialog */}
+      <Dialog open={!!editingExpenseBill} onOpenChange={(open) => !open && setEditingExpenseBill(null)}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Expense Bill</DialogTitle>
+            <DialogDescription>
+              Update bill details. Bill amount can&apos;t be reduced below already paid.
+            </DialogDescription>
+          </DialogHeader>
+          {editingExpenseBill && (
+            <ExpenseBillForm
+              vendors={vendors}
+              categories={expenseCategories}
+              initialData={editingExpenseBill}
+              onSubmit={handleUpdateExpenseBill}
+              onCancel={() => setEditingExpenseBill(null)}
+              onAddNewCategory={loadMasterData}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Commission Bill Dialog */}
+      <Dialog open={!!editingCommissionBill} onOpenChange={(open) => !open && setEditingCommissionBill(null)}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Commission Bill</DialogTitle>
+            <DialogDescription>
+              Update commission details. Commission amount can&apos;t be reduced below already paid.
+            </DialogDescription>
+          </DialogHeader>
+          {editingCommissionBill && (
+            <CommissionBillForm
+              brokers={vendors.filter(v => v.type === 'Broker')}
+              sales={sales}
+              inventory={inventory}
+              initialData={editingCommissionBill}
+              onSubmit={handleUpdateCommissionBill}
+              onCancel={() => setEditingCommissionBill(null)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
       {/* Edit Ledger Entry Dialog */}
       <Dialog open={!!editingLedgerEntry} onOpenChange={(open) => !open && setEditingLedgerEntry(null)}>
         <DialogContent className="sm:max-w-[500px]">
@@ -3668,8 +3825,9 @@ const App = () => {
             <DialogDescription>Update the ledger entry. A reversal will be created for the original transaction.</DialogDescription>
           </DialogHeader>
           {editingLedgerEntry && (
-            <EditLedgerEntryForm 
+            <EditLedgerEntryForm
               entry={editingLedgerEntry}
+              ledgerType={ledgerType}
               accounts={accounts}
               onSubmit={handleUpdateLedgerEntry}
               onCancel={() => setEditingLedgerEntry(null)}
@@ -3679,7 +3837,7 @@ const App = () => {
       </Dialog>
 
       {/* Bill Payment Drawer */}
-      <BillPaymentDrawer 
+      <BillPaymentDrawer
         isOpen={isPaymentDrawerOpen}
         onClose={() => setIsPaymentDrawerOpen(false)}
         billType={paymentBillType}
@@ -3688,6 +3846,7 @@ const App = () => {
         accounts={accounts}
         onAddPayment={handleAddBillPayment}
         onDeletePayment={handleDeleteBillPayment}
+        onUpdatePayment={handleUpdateBillPayment}
       />
 
       {/* Vendor Ledger Drawer */}
@@ -4304,7 +4463,7 @@ const App = () => {
 }
 
 // Bill Payment Drawer Component
-const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts, onAddPayment, onDeletePayment }) => {
+const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts, onAddPayment, onDeletePayment, onUpdatePayment }) => {
   const [formData, setFormData] = useState({
     amount: '',
     paymentDate: '',
@@ -4312,6 +4471,47 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
     accountId: '',
     remark: ''
   })
+  // Per-row inline edit state — only one row is editable at a time. Holds
+  // the in-progress field values; null means the row is in read-only mode.
+  const [editingPaymentId, setEditingPaymentId] = useState(null)
+  const [editForm, setEditForm] = useState(null)
+  const [savingEdit, setSavingEdit] = useState(false)
+
+  const startEdit = (payment) => {
+    setEditingPaymentId(payment.id)
+    setEditForm({
+      amount: (payment.amount ?? '').toString(),
+      paymentDate: (payment.paymentDate || '').toString().split('T')[0],
+      paymentMode: payment.paymentMode || 'Cash',
+      accountId: payment.accountId || '',
+      remark: payment.remark || '',
+    })
+  }
+  const cancelEdit = () => {
+    setEditingPaymentId(null)
+    setEditForm(null)
+  }
+  const saveEdit = async () => {
+    if (!onUpdatePayment || !editingPaymentId || !editForm) return
+    const amount = parseFloat(editForm.amount)
+    if (!(amount > 0)) return
+    setSavingEdit(true)
+    try {
+      await onUpdatePayment(editingPaymentId, {
+        amount,
+        paymentDate: editForm.paymentDate,
+        paymentMode: editForm.paymentMode,
+        accountId: editForm.accountId,
+        remark: editForm.remark,
+      })
+      cancelEdit()
+    } catch (err) {
+      // toast already shown by parent handler; keep the edit row open so
+      // the user can adjust and retry.
+    } finally {
+      setSavingEdit(false)
+    }
+  }
 
   // Set default account on mount, matching the selected payment mode
   useEffect(() => {
@@ -4473,35 +4673,123 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {payments.map(payment => (
-                      <TableRow key={payment.id}>
-                        <TableCell>{new Date(payment.paymentDate).toLocaleDateString()}</TableCell>
-                        <TableCell className="text-green-600 font-medium">₹{fmt(payment.amount)}</TableCell>
-                        <TableCell><Badge variant="outline">{payment.paymentMode}</Badge></TableCell>
-                        <TableCell>{payment.remark || '-'}</TableCell>
-                        <TableCell>
-                          <AlertDialog>
-                            <AlertDialogTrigger asChild>
-                              <Button variant="destructive" size="sm">
-                                <Trash2 className="w-4 h-4" />
-                              </Button>
-                            </AlertDialogTrigger>
-                            <AlertDialogContent>
-                              <AlertDialogHeader>
-                                <AlertDialogTitle>Delete Payment?</AlertDialogTitle>
-                                <AlertDialogDescription>
-                                  This action cannot be undone.
-                                </AlertDialogDescription>
-                              </AlertDialogHeader>
-                              <AlertDialogFooter>
-                                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                <AlertDialogAction onClick={() => onDeletePayment(payment.id)}>Delete</AlertDialogAction>
-                              </AlertDialogFooter>
-                            </AlertDialogContent>
-                          </AlertDialog>
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                    {payments.map(payment => {
+                      const isEditing = editingPaymentId === payment.id && editForm
+                      if (isEditing) {
+                        const eligibleAccounts = (accounts || []).filter(acc =>
+                          editForm.paymentMode === 'Cash' ? acc.type === 'CASH' : acc.type === 'BANK'
+                        )
+                        return (
+                          <TableRow key={payment.id} className="bg-amber-50/40">
+                            <TableCell>
+                              <Input
+                                type="date"
+                                value={editForm.paymentDate}
+                                onChange={e => setEditForm({ ...editForm, paymentDate: e.target.value })}
+                                className="h-8"
+                              />
+                            </TableCell>
+                            <TableCell>
+                              <Input
+                                type="number"
+                                value={editForm.amount}
+                                onChange={e => setEditForm({ ...editForm, amount: e.target.value })}
+                                className="h-8 w-28"
+                              />
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex flex-col gap-1">
+                                <Select
+                                  value={editForm.paymentMode}
+                                  onValueChange={v => setEditForm({ ...editForm, paymentMode: v, accountId: '' })}
+                                >
+                                  <SelectTrigger className="h-8 w-32">
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {PAYMENT_MODES.map(m => (
+                                      <SelectItem key={m} value={m}>{m}</SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                                <Select
+                                  value={editForm.accountId}
+                                  onValueChange={v => setEditForm({ ...editForm, accountId: v })}
+                                >
+                                  <SelectTrigger className="h-8 w-32">
+                                    <SelectValue placeholder="Account" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {eligibleAccounts.map(acc => (
+                                      <SelectItem key={acc.id} value={acc.id}>{acc.name}</SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <Input
+                                value={editForm.remark}
+                                onChange={e => setEditForm({ ...editForm, remark: e.target.value })}
+                                className="h-8"
+                                placeholder="Optional note"
+                              />
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-1">
+                                <Button size="sm" onClick={saveEdit} disabled={savingEdit}>
+                                  {savingEdit ? 'Saving...' : 'Save'}
+                                </Button>
+                                <Button size="sm" variant="outline" onClick={cancelEdit} disabled={savingEdit}>
+                                  Cancel
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        )
+                      }
+                      return (
+                        <TableRow key={payment.id}>
+                          <TableCell>{new Date(payment.paymentDate).toLocaleDateString()}</TableCell>
+                          <TableCell className="text-green-600 font-medium">₹{fmt(payment.amount)}</TableCell>
+                          <TableCell><Badge variant="outline">{payment.paymentMode}</Badge></TableCell>
+                          <TableCell>{payment.remark || '-'}</TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-1">
+                              {onUpdatePayment && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => startEdit(payment)}
+                                  title="Edit payment"
+                                >
+                                  <Pencil className="w-4 h-4" />
+                                </Button>
+                              )}
+                              <AlertDialog>
+                                <AlertDialogTrigger asChild>
+                                  <Button variant="destructive" size="sm">
+                                    <Trash2 className="w-4 h-4" />
+                                  </Button>
+                                </AlertDialogTrigger>
+                                <AlertDialogContent>
+                                  <AlertDialogHeader>
+                                    <AlertDialogTitle>Delete Payment?</AlertDialogTitle>
+                                    <AlertDialogDescription>
+                                      This action cannot be undone.
+                                    </AlertDialogDescription>
+                                  </AlertDialogHeader>
+                                  <AlertDialogFooter>
+                                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                    <AlertDialogAction onClick={() => onDeletePayment(payment.id)}>Delete</AlertDialogAction>
+                                  </AlertDialogFooter>
+                                </AlertDialogContent>
+                              </AlertDialog>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
                   </TableBody>
                 </Table>
               )}
@@ -5071,8 +5359,10 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                         <TableCell>{entry.remark || '-'}</TableCell>
                         <TableCell>
                           <div className="flex items-center gap-1">
-                            {ledgerType === 'partner' && onEditEntry && (
-                              <Button variant="outline" size="sm" onClick={() => onEditEntry(entry)}>
+                            {(ledgerType === 'partner' || ledgerType === 'purchase' || ledgerType === 'sale')
+                              && onEditEntry
+                              && entry.source !== 'CUSTOMER_PAYMENT_ALLOCATION' && (
+                              <Button variant="outline" size="sm" onClick={() => onEditEntry(entry)} title="Edit entry">
                                 <Pencil className="w-4 h-4" />
                               </Button>
                             )}
@@ -5546,20 +5836,37 @@ const EditPartnerForm = ({ partner, existingPartners, onSubmit, onCancel }) => {
 }
 
 // Edit Ledger Entry Form Component
-const EditLedgerEntryForm = ({ entry, accounts, onSubmit, onCancel }) => {
+// Drives PUT for partner / purchase / sale ledger entries. The "type"
+// dropdown is hidden for purchases (always a payment) and shows the right
+// options for partner vs. sale.
+const EditLedgerEntryForm = ({ entry, ledgerType = 'partner', accounts, onSubmit, onCancel }) => {
+  // Default type by ledger context. Partner entries use `entry.type`;
+  // sale ledger entries use `entry.entryType` (legacy rows have neither
+  // and should default to SALE_PAYMENT).
+  const defaultType = ledgerType === 'partner'
+    ? (entry?.type || 'INVESTMENT')
+    : ledgerType === 'sale'
+    ? (entry?.entryType || 'SALE_PAYMENT')
+    : 'PAYMENT'; // purchase — fixed, never sent
+
+  const initialDate = (entry?.entryDate || entry?.paymentDate || '').split('T')[0];
+
   const [formData, setFormData] = useState({
-    type: entry?.type || 'INVESTMENT',
+    type: defaultType,
     amount: entry?.amount?.toString() || '',
-    entryDate: entry?.entryDate?.split('T')[0] || '',
+    entryDate: initialDate,
     paymentMode: entry?.paymentMode || 'Cash',
     accountId: entry?.accountId || '',
+    referenceNo: entry?.referenceNo || '',
     remark: entry?.remark || ''
   })
   const [error, setError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
-  
+
+  const showTypeField = ledgerType === 'partner' || ledgerType === 'sale';
+
   // Generate idempotency key once when form opens
-  const [editGroupId] = useState(() => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`)
+  const [editGroupId] = useState(() => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`)
 
   // Set default account if not set
   useEffect(() => {
@@ -5572,39 +5879,46 @@ const EditLedgerEntryForm = ({ entry, accounts, onSubmit, onCancel }) => {
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
-    
+
     // Prevent double submission
     if (isSubmitting) return
-    
+
     const amount = parseFloat(formData.amount)
-    
+
     if (amount <= 0) {
       setError('Amount must be greater than 0')
       return
     }
-    
+
     if (!formData.entryDate) {
       setError('Date is required')
       return
     }
-    
+
     if (!formData.accountId) {
       setError('Account is required')
       return
     }
-    
+
     setIsSubmitting(true)
-    
+
     try {
-      await onSubmit({
-        type: formData.type,
-        amount: amount,
+      // Send both `entryDate` and `paymentDate` so backend services that
+      // expect either one work without further branching here.
+      const payload = {
+        amount,
         entryDate: formData.entryDate,
+        paymentDate: formData.entryDate,
         paymentMode: formData.paymentMode,
         accountId: formData.accountId,
         remark: formData.remark,
-        editGroupId: editGroupId // Include idempotency key
-      })
+        editGroupId,
+      }
+      if (showTypeField) {
+        payload.type = formData.type
+        payload.entryType = formData.type
+      }
+      await onSubmit(payload)
     } catch (err) {
       setError(err.message || 'Failed to update entry')
       setIsSubmitting(false)
@@ -5618,29 +5932,38 @@ const EditLedgerEntryForm = ({ entry, accounts, onSubmit, onCancel }) => {
           {error}
         </div>
       )}
-      
       <div className="bg-yellow-50 border border-yellow-200 p-3 rounded-md text-sm text-yellow-800">
-        <strong>Note:</strong> 
+        <strong>Note:</strong>
         <ul className="list-disc ml-4 mt-1">
           <li><strong>Remark-only changes:</strong> Will update in place (no reversal)</li>
           <li><strong>Amount/Type/Account/Date changes:</strong> Will create reversal + replacement entry for audit trail</li>
         </ul>
       </div>
-      
-      <div>
-        <Label>Type *</Label>
-        <Select value={formData.type} onValueChange={v => setFormData({...formData, type: v})} disabled={isSubmitting}>
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="INVESTMENT">Investment (Capital IN)</SelectItem>
-            <SelectItem value="WITHDRAWAL">Withdrawal (Capital OUT)</SelectItem>
-            <SelectItem value="PROFIT_PAYOUT">Profit Payout</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-      
+      {showTypeField && (
+        <div>
+          <Label>Type *</Label>
+          <Select value={formData.type} onValueChange={v => setFormData({...formData, type: v})} disabled={isSubmitting}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {ledgerType === 'partner' ? (
+                <>
+                  <SelectItem value="INVESTMENT">Investment (Capital IN)</SelectItem>
+                  <SelectItem value="WITHDRAWAL">Withdrawal (Capital OUT)</SelectItem>
+                  <SelectItem value="PROFIT_PAYOUT">Profit Payout</SelectItem>
+                </>
+              ) : (
+                <>
+                  <SelectItem value="SALE_PAYMENT">Sale Payment (Credit)</SelectItem>
+                  <SelectItem value="WITHDRAWAL">Withdrawal (Debit)</SelectItem>
+                  <SelectItem value="PROFIT_PAYOUT">Profit Payout (Debit)</SelectItem>
+                </>
+              )}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
       <div>
         <Label>Amount (₹) *</Label>
         <Input 
@@ -5697,14 +6020,14 @@ const EditLedgerEntryForm = ({ entry, accounts, onSubmit, onCancel }) => {
       
       <div>
         <Label>Remark</Label>
-        <Textarea 
-          value={formData.remark} 
-          onChange={e => setFormData({...formData, remark: e.target.value})} 
+        <Textarea
+          value={formData.remark}
+          onChange={e => setFormData({...formData, remark: e.target.value})}
           placeholder="Optional notes about this entry"
           disabled={isSubmitting}
         />
       </div>
-      
+
       <div className="flex justify-end space-x-2">
         <Button type="button" variant="outline" onClick={onCancel} disabled={isSubmitting}>Cancel</Button>
         <Button type="submit" disabled={isSubmitting}>
@@ -5781,18 +6104,23 @@ const InventoryForm = ({ onSubmit, onCancel, initialData }) => {
   )
 }
 
-const PurchaseForm = ({ onSubmit, onCancel }) => {
+const PurchaseForm = ({ onSubmit, onCancel, initialData }) => {
+  const isEdit = Boolean(initialData?.id)
+  const initialDate = (initialData?.agreementDate || initialData?.purchaseDate || '').toString().split('T')[0]
   const [formData, setFormData] = useState({
-    partyName: '',
-    dealAmount: '',
-    agreementDate: '',
-    notes: ''
+    partyName: initialData?.partyName || initialData?.vendorName || '',
+    dealAmount: (initialData?.dealAmount ?? initialData?.totalCost ?? '').toString(),
+    agreementDate: initialDate,
+    notes: initialData?.notes || ''
   })
 
   const handleSubmit = (e) => {
     e.preventDefault()
     onSubmit({...formData, dealAmount: parseFloat(formData.dealAmount)})
   }
+
+  // When editing, deal amount can't be reduced below what's already paid.
+  const minDealAmount = isEdit ? (initialData?.totalPaid || 0) : undefined
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -5802,7 +6130,18 @@ const PurchaseForm = ({ onSubmit, onCancel }) => {
       </div>
       <div>
         <Label>Total Deal Amount *</Label>
-        <Input type="number" value={formData.dealAmount} onChange={e => setFormData({...formData, dealAmount: e.target.value})} required />
+        <Input
+          type="number"
+          min={minDealAmount}
+          value={formData.dealAmount}
+          onChange={e => setFormData({...formData, dealAmount: e.target.value})}
+          required
+        />
+        {isEdit && minDealAmount > 0 && (
+          <p className="text-xs text-slate-500 mt-1">
+            Cannot be less than already paid: ₹{(minDealAmount).toLocaleString('en-IN')}
+          </p>
+        )}
       </div>
       <div>
         <Label>Agreement Date *</Label>
@@ -5812,12 +6151,14 @@ const PurchaseForm = ({ onSubmit, onCancel }) => {
         <Label>Notes</Label>
         <Textarea value={formData.notes} onChange={e => setFormData({...formData, notes: e.target.value})} />
       </div>
-      <p className="text-sm text-gray-500 bg-blue-50 p-3 rounded">
-        Note: Payments can be added after creating the purchase record.
-      </p>
+      {!isEdit && (
+        <p className="text-sm text-gray-500 bg-blue-50 p-3 rounded">
+          Note: Payments can be added after creating the purchase record.
+        </p>
+      )}
       <div className="flex justify-end space-x-2">
         <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button type="submit">Add Purchase</Button>
+        <Button type="submit">{isEdit ? 'Update Purchase' : 'Add Purchase'}</Button>
       </div>
     </form>
   )
@@ -6276,8 +6617,9 @@ const VendorForm = ({ vendor, onSubmit, onCancel, vendorTypes = [], onAddNewType
 }
 
 // Expense Bill Form Component
-const ExpenseBillForm = ({ vendors, categories = [], onSubmit, onCancel, onAddNewCategory }) => {
+const ExpenseBillForm = ({ vendors, categories = [], onSubmit, onCancel, onAddNewCategory, initialData }) => {
   const { toast } = useToast()
+  const isEdit = Boolean(initialData?.id)
   // Use dynamic categories if available, fallback to hardcoded
   const categoryOptions = categories.length > 0 ? categories : [
     { id: 'Civil', name: 'Civil' },
@@ -6292,12 +6634,23 @@ const ExpenseBillForm = ({ vendors, categories = [], onSubmit, onCancel, onAddNe
     { id: 'Other', name: 'Other' }
   ]
 
+  // For edit, prefer the bill's stored categoryId; fall back to category-name
+  // lookup for legacy rows that only saved the human label.
+  const initialCategoryId = initialData
+    ? (initialData.categoryId
+        || categoryOptions.find(c => c.name === initialData.category)?.id
+        || categoryOptions[0]?.id
+        || '')
+    : (categoryOptions[0]?.id || '')
+
+  const initialDate = (initialData?.billDate || '').toString().split('T')[0]
+
   const [formData, setFormData] = useState({
-    vendorId: '',
-    categoryId: categoryOptions[0]?.id || '',
-    billAmount: '',
-    billDate: '',
-    description: ''
+    vendorId: initialData?.vendorId || '',
+    categoryId: initialCategoryId,
+    billAmount: (initialData?.billAmount ?? initialData?.amount ?? '').toString(),
+    billDate: initialDate,
+    description: initialData?.description || ''
   })
   const [showAddCategory, setShowAddCategory] = useState(false)
   const [newCategoryName, setNewCategoryName] = useState('')
@@ -6411,25 +6764,34 @@ const ExpenseBillForm = ({ vendors, categories = [], onSubmit, onCancel, onAddNe
         <Label>Description</Label>
         <Textarea value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} />
       </div>
-      <p className="text-sm text-gray-500 bg-blue-50 p-3 rounded">
-        Note: This creates a bill (amount due). You can add payments separately after creating the bill.
-      </p>
+      {!isEdit && (
+        <p className="text-sm text-gray-500 bg-blue-50 p-3 rounded">
+          Note: This creates a bill (amount due). You can add payments separately after creating the bill.
+        </p>
+      )}
+      {isEdit && (initialData?.totalPaid ?? initialData?.paidAmount ?? 0) > 0 && (
+        <p className="text-sm text-orange-700 bg-orange-50 p-3 rounded">
+          ₹{((initialData.totalPaid ?? initialData.paidAmount) || 0).toLocaleString('en-IN')} already paid against this bill — bill amount can&apos;t be reduced below that.
+        </p>
+      )}
       <div className="flex justify-end space-x-2">
         <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button type="submit" disabled={vendors.length === 0}>Create Bill</Button>
+        <Button type="submit" disabled={vendors.length === 0}>{isEdit ? 'Update Bill' : 'Create Bill'}</Button>
       </div>
     </form>
   )
 }
 
 // Commission Bill Form Component
-const CommissionBillForm = ({ brokers, sales, inventory, onSubmit, onCancel }) => {
+const CommissionBillForm = ({ brokers, sales, inventory, onSubmit, onCancel, initialData }) => {
+  const isEdit = Boolean(initialData?.id)
+  const initialDate = (initialData?.commissionDate || initialData?.billDate || '').toString().split('T')[0]
   const [formData, setFormData] = useState({
-    brokerVendorId: '',
-    saleId: '',
-    commissionAmount: '',
-    commissionDate: '',
-    remark: ''
+    brokerVendorId: initialData?.brokerVendorId || '',
+    saleId: initialData?.saleId || '',
+    commissionAmount: (initialData?.commissionAmount ?? initialData?.amount ?? '').toString(),
+    commissionDate: initialDate,
+    remark: initialData?.remark || initialData?.description || ''
   })
 
   const selectedSale = sales.find(s => s.id === formData.saleId)
@@ -6528,12 +6890,19 @@ const CommissionBillForm = ({ brokers, sales, inventory, onSubmit, onCancel }) =
         <Label>Remark</Label>
         <Textarea value={formData.remark} onChange={e => setFormData({...formData, remark: e.target.value})} />
       </div>
-      <p className="text-sm text-gray-500 bg-blue-50 p-3 rounded">
-        Note: This creates a commission bill for the broker. Payments can be added separately.
-      </p>
+      {!isEdit && (
+        <p className="text-sm text-gray-500 bg-blue-50 p-3 rounded">
+          Note: This creates a commission bill for the broker. Payments can be added separately.
+        </p>
+      )}
+      {isEdit && (initialData?.totalPaid ?? initialData?.paidAmount ?? 0) > 0 && (
+        <p className="text-sm text-orange-700 bg-orange-50 p-3 rounded">
+          ₹{((initialData.totalPaid ?? initialData.paidAmount) || 0).toLocaleString('en-IN')} already paid against this commission — amount can&apos;t be reduced below that.
+        </p>
+      )}
       <div className="flex justify-end space-x-2">
         <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button type="submit" disabled={brokers.length === 0 || sales.length === 0}>Create Commission Bill</Button>
+        <Button type="submit" disabled={brokers.length === 0 || sales.length === 0}>{isEdit ? 'Update Commission Bill' : 'Create Commission Bill'}</Button>
       </div>
     </form>
   )

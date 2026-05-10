@@ -522,6 +522,143 @@ const deleteSalePayment = async (id, userId) => {
   return { message: 'Sale ledger entry deleted' };
 };
 
+// Edit a sale-payment / withdrawal / profit-payout ledger entry. For
+// totals-affecting changes (amount / type / mode / account / date) we
+// reverse the original daybook txn and write a fresh one so the audit
+// trail and account balances stay correct. Pure remark / referenceNo
+// changes update in place.
+const updateSalePayment = async (id, body, userId) => {
+  const entry = await SalePaymentEntry.findOne({ id }).lean();
+  if (!entry) return { error: 'Entry not found', status: 404 };
+  if (entry.isDeleted) return { error: 'Entry is deleted', status: 400 };
+
+  const sale = await Sale.findOne({ id: entry.saleId }).lean();
+  if (!sale) return { error: 'Parent sale not found', status: 404 };
+
+  const incomingAmount = body.amount !== undefined ? parseFloat(body.amount) : entry.amount;
+  if (!(incomingAmount > 0)) {
+    return { error: 'Amount must be greater than zero', status: 400 };
+  }
+  const newAmount = Number(incomingAmount);
+  const newEntryType = body.entryType || body.type || entry.entryType || 'SALE_PAYMENT';
+  const newPaymentDate = body.paymentDate || body.entryDate || entry.paymentDate;
+  const newPaymentMode = body.paymentMode || entry.paymentMode;
+  const newAccountId = body.accountId || entry.accountId;
+  const newReferenceNo = body.referenceNo !== undefined ? body.referenceNo : (entry.referenceNo || '');
+  const newRemark = body.remark !== undefined ? body.remark : (entry.remark || '');
+
+  const oldType = entry.entryType || 'SALE_PAYMENT';
+  const totalsAffectingChange =
+    !eqMoney(newAmount, entry.amount || 0)
+    || newEntryType !== oldType
+    || newPaymentMode !== entry.paymentMode
+    || newAccountId !== entry.accountId
+    || newPaymentDate !== entry.paymentDate;
+
+  // Re-validate the per-sale cap when the new entry is a SALE_PAYMENT
+  // credit. Skip the check for pure remark edits because the net is
+  // unchanged. Subtract the entry's OWN current contribution before
+  // checking — otherwise editing-without-changing-amount would falsely
+  // double-count itself.
+  if (totalsAffectingChange && newEntryType === 'SALE_PAYMENT') {
+    const otherEntries = await SalePaymentEntry
+      .find(notDeleted({ saleId: entry.saleId, id: { $ne: id } }))
+      .lean();
+    const allocations = await PaymentAllocation.find({ saleId: entry.saleId }).lean();
+    const otherNet = otherEntries.reduce((sum, e) => {
+      const t = e.entryType || 'SALE_PAYMENT';
+      return sum + (t === 'SALE_PAYMENT' ? (e.amount || 0) : -(e.amount || 0));
+    }, 0) + allocations.reduce((sum, a) => sum + (a.amount || 0), 0);
+    const remaining = (sale.finalAmount || 0) - otherNet;
+    if (remaining <= 0) {
+      return { error: 'Sale is already fully paid by other entries.', status: 400 };
+    }
+    if (newAmount > remaining + 0.01) {
+      const fmt = (n) => `₹${(n || 0).toLocaleString('en-IN')}`;
+      return {
+        error: `Amount ${fmt(newAmount)} exceeds remaining Sale Due of ${fmt(remaining)}.`,
+        status: 400,
+      };
+    }
+  }
+
+  if (totalsAffectingChange) {
+    const originalTxn = await Transaction.findOne({
+      sourceType: 'SALE_PAYMENT',
+      sourceId: id,
+      isReversed: { $ne: true },
+      isReversal: { $ne: true },
+    }).lean();
+    if (originalTxn) {
+      await createReversalTransaction(originalTxn, userId, 'Sale ledger entry edited');
+    }
+
+    // Net delta on Sale.amountPaid: (new contribution) - (old contribution)
+    const oldDelta = oldType === 'SALE_PAYMENT' ? (entry.amount || 0) : -(entry.amount || 0);
+    const newDelta = newEntryType === 'SALE_PAYMENT' ? newAmount : -newAmount;
+    const netDelta = newDelta - oldDelta;
+    const updatedSale = await Sale.findOneAndUpdate(
+      { id: entry.saleId },
+      { $inc: { amountPaid: netDelta } },
+      { new: true },
+    ).lean();
+
+    await SalePaymentEntry.updateOne(
+      { id },
+      {
+        $set: {
+          amount: newAmount,
+          entryType: newEntryType,
+          paymentDate: newPaymentDate,
+          paymentMode: newPaymentMode,
+          accountId: newAccountId,
+          referenceNo: newReferenceNo,
+          remark: newRemark,
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (updatedSale) {
+      const newAmountPaid = updatedSale.amountPaid || 0;
+      const paymentStatus = newAmountPaid <= 0
+        ? 'Pending'
+        : (gteMoney(newAmountPaid, updatedSale.finalAmount || 0) ? 'Paid' : 'Partial');
+      await Sale.updateOne({ id: entry.saleId }, { $set: { paymentStatus } });
+
+      const direction = newEntryType === 'SALE_PAYMENT' ? 'IN' : 'OUT';
+      await createTransaction({
+        txnDate: newPaymentDate,
+        societyId: updatedSale.societyId,
+        accountId: newAccountId,
+        direction,
+        amount: newAmount,
+        paymentMode: newPaymentMode,
+        partyType: 'Customer',
+        partyName: updatedSale.buyerName,
+        sourceType: 'SALE_PAYMENT',
+        sourceId: id,
+        referenceNo: newReferenceNo,
+        remark: newRemark || `${newEntryType} - ${updatedSale.buyerName}`,
+      }, userId);
+    }
+  } else {
+    await SalePaymentEntry.updateOne(
+      { id },
+      {
+        $set: {
+          referenceNo: newReferenceNo,
+          remark: newRemark,
+          updatedAt: new Date(),
+        },
+      },
+    );
+  }
+
+  const fresh = await SalePaymentEntry.findOne({ id }).lean();
+  return { message: 'Sale ledger entry updated', entry: fresh };
+};
+
 const listUnassigned = async (societyId) => {
   const filter = notDeleted({ $or: [{ customerId: null }, { customerId: '' }, { customerId: { $exists: false } }] });
   if (societyId) filter.societyId = societyId;
@@ -555,6 +692,6 @@ const assignCustomer = async (saleId, customerId) => {
 module.exports = {
   listForSociety, create, getById, update, remove,
   listPayments, addPayment,
-  listLedger, addLedgerEntry, deleteSalePayment,
+  listLedger, addLedgerEntry, deleteSalePayment, updateSalePayment,
   listUnassigned, assignCustomer,
 };

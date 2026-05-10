@@ -18,6 +18,13 @@ const deleteBill = asyncHandler(async (req, res) => {
   sendOrError(res, await service.deleteBill(req.params.id, req.user.userId));
 });
 
+const updateBill = asyncHandler(async (req, res) => {
+  const updated = await service.updateBill(req.params.id, req.body);
+  if (!updated) return res.status(404).json({ error: 'Bill not found' });
+  if (updated.error) return res.status(updated.status || 500).json({ error: updated.error });
+  res.json(updated);
+});
+
 const listExpenses = asyncHandler(async (req, res) => {
   res.json(await service.listExpenses(req.query));
 });
@@ -42,8 +49,12 @@ const deleteBillPayment = asyncHandler(async (req, res) => {
   sendOrError(res, await service.deleteBillPayment(req.params.id, req.user.userId));
 });
 
+const updateBillPayment = asyncHandler(async (req, res) => {
+  sendOrError(res, await service.updateBillPayment(req.params.id, req.body, req.user.userId));
+});
+
 module.exports = {
-  listBills, createBill, deleteBill,
+  listBills, createBill, updateBill, deleteBill,
   listExpenses, deleteExpense, quickExpense,
-  listBillPayments, addBillPayment, deleteBillPayment,
+  listBillPayments, addBillPayment, updateBillPayment, deleteBillPayment,
 };
