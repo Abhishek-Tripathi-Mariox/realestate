@@ -15,6 +15,7 @@ import {
   Layers,
   Trash2,
   KeyRound,
+  HardHat,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -51,6 +52,7 @@ export function Sidebar({ user, onLogout, onChangePassword, mobileOpen = false, 
     { label: 'Societies', href: '/societies', icon: Layers },
     { label: 'Daybook', href: '/daybook', icon: BookOpen },
     { label: 'Expenses', href: '/expenses', icon: Receipt },
+    { label: 'Vendor Ledger', href: '/vendor-ledger', icon: HardHat },
     { label: 'Loans', href: '/borrow', icon: CreditCard },
   ]
 

@@ -80,7 +80,7 @@ const fmt = (value) => {
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-const App = () => {
+export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => {
   const router = useRouter()
   const { toast } = useToast()
   const [isAuthenticated, setIsAuthenticated] = useState(false)
@@ -96,7 +96,7 @@ const App = () => {
   const [password, setPassword] = useState('')
   
   // App state
-  const [activeTab, setActiveTab] = useState('partners')
+  const [activeTab, setActiveTab] = useState(initialTab)
   const [societies, setSocieties] = useState([])
   const [selectedSociety, setSelectedSociety] = useState(null)
   const [partners, setPartners] = useState([])
@@ -123,6 +123,13 @@ const App = () => {
   const [editingInventory, setEditingInventory] = useState(null)
   const [editingPurchase, setEditingPurchase] = useState(null)
   const [editingExpenseBill, setEditingExpenseBill] = useState(null)
+  // Vendor-ledger payment edit dialog state. Lives at app level so it can
+  // overlay the VendorLedgerDrawer without coupling to BillPaymentDrawer's
+  // shared paymentBillType state.
+  const [editingVendorPayment, setEditingVendorPayment] = useState(null)
+  // Vendor-level "Add Payment" — opens a dialog that splits the entered
+  // amount FIFO across the vendor's unpaid bills (oldest first).
+  const [addingVendorPayment, setAddingVendorPayment] = useState(null)
   const [editingCommissionBill, setEditingCommissionBill] = useState(null)
   
   // Partner edit state
@@ -237,6 +244,13 @@ const App = () => {
     startDate: '',
     endDate: ''
   })
+  // Vendor Ledger (Daily Khata style) filters + per-vendor action target
+  const [vendorLedgerFilters, setVendorLedgerFilters] = useState({
+    search: '',
+    category: 'all',
+    status: 'all'
+  })
+  const [addWorkVendor, setAddWorkVendor] = useState(null)
   const [commissionFilters, setCommissionFilters] = useState({
     status: 'all',
     brokerId: 'all',
@@ -245,16 +259,23 @@ const App = () => {
   })
 
   useEffect(() => {
-    const storedToken = localStorage.getItem('token')
-    const storedUser = localStorage.getItem('user')
+    try {
+      const storedToken = localStorage.getItem('token')
+      const storedUser = localStorage.getItem('user')
 
-    if (storedToken && storedUser) {
-      setToken(storedToken)
-      setUser(JSON.parse(storedUser))
-      setIsAuthenticated(true)
+      if (storedToken && storedUser) {
+        setToken(storedToken)
+        setUser(JSON.parse(storedUser))
+        setIsAuthenticated(true)
+      }
+    } catch (err) {
+      // Corrupt localStorage shouldn't strand the user on the loading screen.
+      console.error('Auth restore failed:', err)
+      try { localStorage.removeItem('user') } catch {}
+      try { localStorage.removeItem('token') } catch {}
+    } finally {
+      setLoading(false)
     }
-
-    setLoading(false)
   }, [])
 
   // Tracks which dashboard tabs have already pulled their data for the
@@ -856,19 +877,185 @@ const App = () => {
   }
 
   // Vendor Ledger functions
+  // Builds a unified Daily-Khata-style timeline by merging the vendor's
+  // expense bills (Work entries) with payments returned by the legacy
+  // /ledger endpoint. Balance is computed chronologically (older → newer)
+  // then displayed reverse-chronological so the latest activity sits on top.
   const openVendorLedger = async (vendor) => {
     setVendorLedgerItem(vendor)
     setIsVendorLedgerOpen(true)
-    
+
     try {
-      const entries = await apiCall(`/vendors/${vendor.id}/ledger`)
-      setVendorLedgerEntries(entries)
+      // Always fetch fresh. Use bill-level payments endpoint (only "alive"
+      // payments) instead of /vendors/:id/ledger, which leaves stale txns
+      // behind when a payment is edited and double-counts the totals.
+      const allBills = await apiCall(`/expense-bills?societyId=${selectedSociety}`)
+      const billsForVendor = (allBills || []).filter(b => b.vendorId === vendor.id)
+
+      const paymentBundles = await Promise.all(
+        billsForVendor.map(b =>
+          (b.totalPaid > 0)
+            ? apiCall(`/expense-bills/${b.id}/payments`).then(ps => ({ billId: b.id, payments: ps || [] }))
+            : Promise.resolve({ billId: b.id, payments: [] })
+        )
+      )
+
+      const workEntries = billsForVendor.map(b => {
+        const isLabour = /labour/i.test(b.categoryName || '')
+        return {
+          id: `work-${b.id}`,
+          sourceId: b.id,
+          raw: b,                      // full bill for edit dialog
+          date: b.billDate || b.createdAt,
+          createdAt: b.createdAt || b.billDate,
+          type: 'WORK',
+          subType: isLabour ? 'LABOUR' : 'WORK',
+          description: b.description || b.categoryName || (isLabour ? 'Labour' : 'Work'),
+          categoryName: b.categoryName || '',
+          workValue: b.billAmount || 0,
+          paymentAmount: 0,
+          reference: '',
+        }
+      })
+      const paymentEntries = paymentBundles.flatMap(({ billId, payments }) =>
+        payments.map(p => ({
+          id: p.id,
+          sourceId: p.id,            // ExpensePayment.id — correct for DELETE
+          raw: { ...p, billId },     // full payment for edit dialog
+          billId,
+          date: p.paymentDate || p.createdAt,
+          createdAt: p.createdAt || p.paymentDate,
+          type: 'PAYMENT',
+          subType: 'PAYMENT',
+          description: p.remark || 'Payment made',
+          categoryName: '',
+          workValue: 0,
+          paymentAmount: p.amount || 0,
+          paymentMode: p.paymentMode || 'Cash',
+          reference: p.referenceNo || '',
+        }))
+      )
+
+      // Chronological order: primary sort by user-facing date, secondary by
+      // createdAt timestamp so same-day rows respect actual creation order.
+      // Display is reverse-chronological (newest first) after balance calc.
+      const merged = [...workEntries, ...paymentEntries].sort((a, b) => {
+        const da = new Date(a.date).getTime() || 0
+        const db = new Date(b.date).getTime() || 0
+        if (da !== db) return da - db
+        const ca = new Date(a.createdAt).getTime() || 0
+        const cb = new Date(b.createdAt).getTime() || 0
+        return ca - cb
+      })
+      let running = 0
+      const withBalance = merged.map(e => {
+        running += (e.workValue || 0) - (e.paymentAmount || 0)
+        // For legacy fields the drawer's CSV/PDF exports still expect:
+        return { ...e, amount: e.paymentAmount, balance: running }
+      })
+      setVendorLedgerEntries(withBalance.reverse())
     } catch (error) {
       toast({
         title: 'Error',
         description: error.message,
         variant: 'destructive'
       })
+    }
+  }
+
+  // Vendor Ledger Drawer actions — wired from the drawer back into the
+  // page-level dialog state so the existing Add Work / Add Payment flows
+  // are reused (no duplicate forms).
+  const handleVendorDetailAddWork = (vendor, opts = {}) => {
+    setAddWorkVendor(vendor)
+    setCurrentItem(null)
+    if (opts.preselectLabour) {
+      // The Add-Labour shortcut: keep vendor pre-filled but also hint that
+      // a Labour-category bill is being added. ExpenseBillForm picks up
+      // initialData.category to find the matching id.
+      // (Falls back to first category if "Labour" doesn't exist.)
+      setAddWorkVendor({ ...vendor, _preselectLabour: true })
+    }
+    setDialogMode('createExpenseBill')
+    setIsDialogOpen(true)
+  }
+  const handleVendorDetailAddPayment = async (vendor) => {
+    const unpaid = expenseBills
+      .filter(b => b.vendorId === vendor.id && b.status !== 'PAID')
+      .sort((a, b) => new Date(a.billDate) - new Date(b.billDate))
+    if (unpaid.length === 0) {
+      toast({
+        title: 'No outstanding bills',
+        description: `Add a work entry for ${vendor.name} first before recording a payment.`,
+        variant: 'destructive'
+      })
+      return
+    }
+    // Open vendor-level FIFO dialog. Max payable = sum of bill balances.
+    const totalPending = unpaid.reduce((s, b) => s + (b.balance || 0), 0)
+    setAddingVendorPayment({ vendor, unpaidBills: unpaid, totalPending })
+  }
+
+  // FIFO allocate the entered amount across unpaid bills (oldest first).
+  // Each chunk hits POST /expense-bills/:id/payments so existing balance
+  // math, status flip, and daybook txns kick in per bill.
+  const handleSubmitVendorAddPayment = async (formData) => {
+    const ctx = addingVendorPayment
+    if (!ctx) return
+    const amount = parseFloat(formData.amount)
+    if (!(amount > 0)) return
+    try {
+      let remaining = amount
+      const allocations = []
+      for (const bill of ctx.unpaidBills) {
+        if (remaining <= 0) break
+        const billRemaining = Math.max(0, bill.balance || 0)
+        if (billRemaining <= 0) continue
+        const portion = Math.min(remaining, billRemaining)
+        await apiCall(`/expense-bills/${bill.id}/payments`, 'POST', {
+          amount: portion,
+          paymentDate: formData.paymentDate,
+          paymentMode: formData.paymentMode,
+          accountId: formData.accountId,
+          referenceNo: formData.referenceNo,
+          remark: formData.remark,
+        })
+        allocations.push({ billId: bill.id, amount: portion })
+        remaining -= portion
+      }
+      setAddingVendorPayment(null)
+      if (vendorLedgerItem) await openVendorLedger(vendorLedgerItem)
+      await loadSocietyData()
+      toast({
+        title: 'Payment recorded',
+        description: `₹${fmt(amount - remaining)} allocated across ${allocations.length} bill${allocations.length > 1 ? 's' : ''}${remaining > 0 ? ` (₹${fmt(remaining)} not allocated)` : ''}`,
+      })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  // Deletes a single entry from the vendor ledger timeline. Routes to the
+  // correct backend endpoint based on entry type, then re-fetches the
+  // ledger so the running balance and stats update in place.
+  const handleVendorLedgerDelete = async (entry) => {
+    if (!entry || !entry.sourceId || !vendorLedgerItem) return
+    try {
+      if (entry.type === 'WORK') {
+        await apiCall(`/expense-bills/${entry.sourceId}`, 'DELETE')
+      } else if (entry.type === 'PAYMENT') {
+        await apiCall(`/expense-payments/${entry.sourceId}`, 'DELETE')
+      } else {
+        return
+      }
+      toast({
+        title: 'Deleted',
+        description: entry.type === 'WORK' ? 'Work entry deleted' : 'Payment deleted',
+      })
+      await openVendorLedger(vendorLedgerItem)
+      await loadSocietyData()
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
     }
   }
 
@@ -1379,7 +1566,35 @@ const App = () => {
       await apiCall(`/expense-bills/${editingExpenseBill.id}`, 'PUT', formData)
       await loadSocietyData()
       setEditingExpenseBill(null)
+      // If the vendor ledger drawer is open, refresh its timeline so the
+      // edited work entry's new value/category/date is reflected.
+      if (vendorLedgerItem) await openVendorLedger(vendorLedgerItem)
       toast({ title: 'Success', description: 'Expense bill updated successfully' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  // Vendor-ledger edit dispatch — routes the click to the right edit
+  // surface (existing ExpenseBillForm dialog for Work, new dialog for
+  // Payment). Drawer stays open behind the overlay.
+  const handleVendorLedgerEdit = (entry) => {
+    if (!entry || !entry.raw) return
+    if (entry.type === 'WORK') {
+      setEditingExpenseBill(entry.raw)
+    } else if (entry.type === 'PAYMENT') {
+      setEditingVendorPayment(entry.raw)
+    }
+  }
+
+  const handleSubmitVendorPaymentEdit = async (formData) => {
+    if (!editingVendorPayment?.id) return
+    try {
+      await apiCall(`/expense-payments/${editingVendorPayment.id}`, 'PUT', formData)
+      setEditingVendorPayment(null)
+      if (vendorLedgerItem) await openVendorLedger(vendorLedgerItem)
+      await loadSocietyData()
+      toast({ title: 'Success', description: 'Payment updated' })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
     }
@@ -1628,6 +1843,77 @@ const App = () => {
     totalBill: filteredExpenseBills.reduce((sum, b) => sum + b.billAmount, 0),
     totalPaid: filteredExpenseBills.reduce((sum, b) => sum + (b.totalPaid || 0), 0),
     totalBalance: filteredExpenseBills.reduce((sum, b) => sum + (b.balance || 0), 0)
+  }
+
+  // Per-vendor ledger summary (Daily Khata view). Joins vendors with their
+  // expense bills + payments so each row is a vendor card, not a bill.
+  // Brokers belong to the Commissions module — exclude them from the
+  // Daily-Khata vendor view so Work/Payment math doesn't include broker
+  // payouts (which live in commission-bills, not expense-bills).
+  const vendorLedgerRows = vendors.filter(v => v.type !== 'Broker').map(v => {
+    const bills = expenseBills.filter(b => b.vendorId === v.id)
+    const workValue = bills.reduce((s, b) => s + (b.billAmount || 0), 0)
+    const amountPaid = bills.reduce((s, b) => s + (b.totalPaid || 0), 0)
+    const labourValue = bills
+      .filter(b => /labour/i.test(b.categoryName || ''))
+      .reduce((s, b) => s + (b.billAmount || 0), 0)
+    const pending = Math.max(0, workValue - amountPaid)
+    const advance = Math.max(0, amountPaid - workValue)
+    // Latest bill date is the best signal we have for "last activity" without
+    // an extra round-trip for the payment dates.
+    const lastActivity = bills.length
+      ? bills.map(b => b.billDate).filter(Boolean).sort().pop()
+      : null
+    return {
+      ...v,
+      workValue,
+      amountPaid,
+      labourValue,
+      pending,
+      advance,
+      lastActivity,
+      // Vendor's own type/trade — independent of which work-category was
+      // booked last. Avoids the row badge flipping every time a bill is added.
+      displayCategory: v.type || 'Other',
+      ledgerStatus: pending > 0 ? 'pending' : (advance > 0 ? 'advance' : 'cleared')
+    }
+  })
+
+  const filteredVendorLedger = vendorLedgerRows.filter(r => {
+    if (vendorLedgerFilters.search) {
+      const q = vendorLedgerFilters.search.toLowerCase()
+      if (!(r.name || '').toLowerCase().includes(q) &&
+          !(r.phone || '').toLowerCase().includes(q)) return false
+    }
+    if (vendorLedgerFilters.category !== 'all' && r.displayCategory !== vendorLedgerFilters.category) return false
+    if (vendorLedgerFilters.status !== 'all' && r.ledgerStatus !== vendorLedgerFilters.status) return false
+    return true
+  })
+
+  const vendorLedgerTotals = {
+    totalVendors: filteredVendorLedger.length,
+    totalWorkValue: filteredVendorLedger.reduce((s, r) => s + r.workValue, 0),
+    totalPaid: filteredVendorLedger.reduce((s, r) => s + r.amountPaid, 0),
+    totalPending: filteredVendorLedger.reduce((s, r) => s + r.pending, 0),
+    labourCost: filteredVendorLedger.reduce((s, r) => s + (r.labourValue || 0), 0),
+  }
+  vendorLedgerTotals.materialCost = vendorLedgerTotals.totalWorkValue - vendorLedgerTotals.labourCost
+
+  const vendorLedgerCategories = Array.from(
+    new Set(vendorLedgerRows.map(r => r.displayCategory).filter(Boolean))
+  ).sort()
+
+  const openAddWorkForVendor = (vendor) => {
+    setAddWorkVendor(vendor)
+    setCurrentItem(null)
+    setDialogMode('createExpenseBill')
+    setIsDialogOpen(true)
+  }
+
+  const openPaymentForVendor = async (vendor) => {
+    // Same flow as the detail-drawer "+ Add Payment": vendor-level dialog
+    // that splits the entered amount FIFO across all unpaid bills.
+    await handleVendorDetailAddPayment(vendor)
   }
 
   // Calculate commission totals based on filtered data
@@ -2008,137 +2294,142 @@ const App = () => {
               </Select>
             </div>
 
-            <div className="sm:ml-auto flex items-center gap-2 flex-wrap">
-              {/* Quick Add Expense Button */}
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setQuickExpenseData({
-                    scope: 'SOCIETY',
-                    societyId: selectedSociety || '',
-                    accountId: '',
-                    amount: '',
-                    category: '',
-                    vendorName: '',
-                    paymentMode: 'Cash',
-                    expenseDate: new Date().toISOString().split('T')[0],
-                    remark: ''
-                  })
-                  setShowQuickExpense(true)
-                }}
-                className="h-9 px-3 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100"
-              >
-                <Plus className="w-3.5 h-3.5 mr-1" />
-                Add Expense
-              </Button>
+            {!singleTabMode && (
+              <div className="sm:ml-auto flex items-center gap-2 flex-wrap">
+                {/* Quick Add Expense Button */}
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setQuickExpenseData({
+                      scope: 'SOCIETY',
+                      societyId: selectedSociety || '',
+                      accountId: '',
+                      amount: '',
+                      category: '',
+                      vendorName: '',
+                      paymentMode: 'Cash',
+                      expenseDate: new Date().toISOString().split('T')[0],
+                      remark: ''
+                    })
+                    setShowQuickExpense(true)
+                  }}
+                  className="h-9 px-3 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+                >
+                  <Plus className="w-3.5 h-3.5 mr-1" />
+                  Add Expense
+                </Button>
 
-            {/* Refresh button - all roles */}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                loadSocieties()
-                if (selectedSociety) loadSocietyData()
-              }}
-              className="h-9 px-3 text-xs font-medium border-slate-200 hover:bg-slate-50 hover:border-slate-300 text-slate-700"
-            >
-              <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Refresh
-            </Button>
+                {/* Refresh button - all roles */}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    loadSocieties()
+                    if (selectedSociety) loadSocietyData()
+                  }}
+                  className="h-9 px-3 text-xs font-medium border-slate-200 hover:bg-slate-50 hover:border-slate-300 text-slate-700"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Refresh
+                </Button>
 
-            {/* New Society - super admin only */}
-            {user?.role === 'super_admin' && (
-              <Dialog open={dialogMode === 'createSociety' && isDialogOpen} onOpenChange={(open) => { setIsDialogOpen(open); if (!open) setDialogMode('') }}>
-                <DialogTrigger asChild>
-                  <Button
-                    onClick={() => { setDialogMode('createSociety'); setCurrentItem(null); }}
-                    className="h-9 px-3.5 text-xs font-semibold gradient-bg text-white shadow-md hover:shadow-lg hover:opacity-95 transition-all"
-                  >
-                    <Plus className="w-3.5 h-3.5 mr-1.5" />
-                    New Society
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-                  <DialogHeader>
-                    <DialogTitle>Create New Society</DialogTitle>
-                  </DialogHeader>
-                  <SocietyForm onSubmit={handleCreateSociety} onCancel={() => setIsDialogOpen(false)} />
-                </DialogContent>
-              </Dialog>
+                {/* New Society - super admin only */}
+                {user?.role === 'super_admin' && (
+                  <Dialog open={dialogMode === 'createSociety' && isDialogOpen} onOpenChange={(open) => { setIsDialogOpen(open); if (!open) setDialogMode('') }}>
+                    <DialogTrigger asChild>
+                      <Button
+                        onClick={() => { setDialogMode('createSociety'); setCurrentItem(null); }}
+                        className="h-9 px-3.5 text-xs font-semibold gradient-bg text-white shadow-md hover:shadow-lg hover:opacity-95 transition-all"
+                      >
+                        <Plus className="w-3.5 h-3.5 mr-1.5" />
+                        New Society
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                      <DialogHeader>
+                        <DialogTitle>Create New Society</DialogTitle>
+                      </DialogHeader>
+                      <SocietyForm onSubmit={handleCreateSociety} onCancel={() => setIsDialogOpen(false)} />
+                    </DialogContent>
+                  </Dialog>
+                )}
+              </div>
             )}
-          </div>
           </div>
         </div>
 
         {selectedSociety && summary && (
           <>
             {/* Dashboard Summary Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-              <StatCard
-                label="Total Purchases"
-                value={`₹${fmt(summary.totalPurchaseAmount)}`}
-                sub={`${summary.purchaseCount} transactions`}
-                color="indigo"
-                Icon={ShoppingCart}
-                percent={Math.min(100, (summary.purchaseCount || 0) * 6)}
-              />
-              <StatCard
-                label="Total Sales"
-                value={`₹${fmt(summary.totalSalesAmount)}`}
-                sub={`${summary.salesCount} transactions`}
-                color="emerald"
-                Icon={TrendingUp}
-                percent={Math.min(100, (summary.salesCount || 0) * 6)}
-              />
-              <StatCard
-                label="Total Expenses"
-                value={`₹${fmt((summary.totalExpenses || 0) + (summary.totalCommissions || 0))}`}
-                sub={`${(summary.expenseBillCount || 0) + (summary.commissionBillCount || 0)} bills`}
-                color="orange"
-                Icon={TrendingDown}
-                percent={(() => {
-                  const combined = (summary.totalExpenses || 0) + (summary.totalCommissions || 0)
-                  const total = combined + (summary.totalSalesAmount || 0)
-                  return total > 0 ? Math.min(100, (combined / total) * 100) : 0
-                })()}
-              />
-              <StatCard
-                label="Total Payables"
-                value={`₹${fmt(summary.totalPayables)}`}
-                sub="Unpaid bills"
-                color="amber"
-                Icon={CreditCard}
-                percent={(() => {
-                  const total = (summary.totalExpenses || 0) + (summary.totalCommissions || 0)
-                  return total > 0 ? Math.min(100, ((summary.totalPayables || 0) / total) * 100) : 0
-                })()}
-              />
-              <StatCard
-                label="Net Profit / Loss"
-                value={`₹${fmt(summary.netProfitLoss)}`}
-                sub={summary.netProfitLoss >= 0 ? 'Profitable' : 'In loss'}
-                color={summary.netProfitLoss >= 0 ? 'emerald' : 'rose'}
-                Icon={IndianRupee}
-                percent={(() => {
-                  const total = summary.totalSalesAmount || 0
-                  if (total <= 0) return 0
-                  return Math.min(100, Math.max(0, ((summary.netProfitLoss || 0) / total) * 100))
-                })()}
-              />
-            </div>
+            {!singleTabMode && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+                <StatCard
+                  label="Total Purchases"
+                  value={`₹${fmt(summary.totalPurchaseAmount)}`}
+                  sub={`${summary.purchaseCount} transactions`}
+                  color="indigo"
+                  Icon={ShoppingCart}
+                  percent={Math.min(100, (summary.purchaseCount || 0) * 6)}
+                />
+                <StatCard
+                  label="Total Sales"
+                  value={`₹${fmt(summary.totalSalesAmount)}`}
+                  sub={`${summary.salesCount} transactions`}
+                  color="emerald"
+                  Icon={TrendingUp}
+                  percent={Math.min(100, (summary.salesCount || 0) * 6)}
+                />
+                <StatCard
+                  label="Total Expenses"
+                  value={`₹${fmt((summary.totalExpenses || 0) + (summary.totalCommissions || 0))}`}
+                  sub={`${(summary.expenseBillCount || 0) + (summary.commissionBillCount || 0)} bills`}
+                  color="orange"
+                  Icon={TrendingDown}
+                  percent={(() => {
+                    const combined = (summary.totalExpenses || 0) + (summary.totalCommissions || 0)
+                    const total = combined + (summary.totalSalesAmount || 0)
+                    return total > 0 ? Math.min(100, (combined / total) * 100) : 0
+                  })()}
+                />
+                <StatCard
+                  label="Total Payables"
+                  value={`₹${fmt(summary.totalPayables)}`}
+                  sub="Unpaid bills"
+                  color="amber"
+                  Icon={CreditCard}
+                  percent={(() => {
+                    const total = (summary.totalExpenses || 0) + (summary.totalCommissions || 0)
+                    return total > 0 ? Math.min(100, ((summary.totalPayables || 0) / total) * 100) : 0
+                  })()}
+                />
+                <StatCard
+                  label="Net Profit / Loss"
+                  value={`₹${fmt(summary.netProfitLoss)}`}
+                  sub={summary.netProfitLoss >= 0 ? 'Profitable' : 'In loss'}
+                  color={summary.netProfitLoss >= 0 ? 'emerald' : 'rose'}
+                  Icon={IndianRupee}
+                  percent={(() => {
+                    const total = summary.totalSalesAmount || 0
+                    if (total <= 0) return 0
+                    return Math.min(100, Math.max(0, ((summary.netProfitLoss || 0) / total) * 100))
+                  })()}
+                />
+              </div>
+            )}
 
             {/* Tabs for different modules */}
             <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-              <TabsList className="flex w-full overflow-x-auto whitespace-nowrap lg:grid lg:grid-cols-9 h-11 p-1 bg-slate-100/80 border border-slate-200/70 rounded-xl">
-                <TabsTrigger value="partners" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Partners</TabsTrigger>
-                <TabsTrigger value="inventory" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Inventory</TabsTrigger>
-                <TabsTrigger value="purchases" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Purchases</TabsTrigger>
-                <TabsTrigger value="customers" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Customers</TabsTrigger>
-                <TabsTrigger value="sales" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Sales</TabsTrigger>
-                <TabsTrigger value="resales" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Resale</TabsTrigger>
-                <TabsTrigger value="vendors" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Vendors</TabsTrigger>
-                <TabsTrigger value="expenses" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Expenses</TabsTrigger>
-                <TabsTrigger value="commissions" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Commissions</TabsTrigger>
-              </TabsList>
+              {!singleTabMode && (
+                <TabsList className="flex w-full overflow-x-auto whitespace-nowrap lg:grid lg:grid-cols-8 h-11 p-1 bg-slate-100/80 border border-slate-200/70 rounded-xl">
+                  <TabsTrigger value="partners" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Partners</TabsTrigger>
+                  <TabsTrigger value="inventory" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Inventory</TabsTrigger>
+                  <TabsTrigger value="purchases" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Purchases</TabsTrigger>
+                  <TabsTrigger value="customers" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Customers</TabsTrigger>
+                  <TabsTrigger value="sales" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Sales</TabsTrigger>
+                  <TabsTrigger value="resales" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Resale</TabsTrigger>
+                  <TabsTrigger value="vendors" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Vendors</TabsTrigger>
+                  <TabsTrigger value="commissions" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Commissions</TabsTrigger>
+                </TabsList>
+              )}
 
               {/* Partners Tab */}
               <TabsContent value="partners" className="space-y-4">
@@ -3305,211 +3596,254 @@ const App = () => {
                 </Card>
               </TabsContent>
 
-              {/* Expenses Tab */}
+              {/* Vendor Ledger Tab (Builder Daily Khata view) */}
               <TabsContent value="expenses" className="space-y-4">
+                {/* Header */}
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-xl bg-orange-100 flex items-center justify-center">
+                      <BookOpen className="w-5 h-5 text-orange-600" />
+                    </div>
+                    <div>
+                      <h2 className="text-xl font-bold text-slate-900">Vendor Ledger</h2>
+                      <p className="text-sm text-slate-500">Builder Daily Khata — Work, Material &amp; Payments</p>
+                    </div>
+                  </div>
+                  <Dialog
+                    open={dialogMode === 'createVendorLedgerVendor' && isDialogOpen}
+                    onOpenChange={(open) => { setIsDialogOpen(open); if (!open) setDialogMode('') }}
+                  >
+                    <DialogTrigger asChild>
+                      <Button onClick={() => { setDialogMode('createVendorLedgerVendor'); setCurrentItem(null); }}>
+                        <Plus className="w-4 h-4 mr-2" /> Add Vendor
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="max-w-lg">
+                      <DialogHeader>
+                        <DialogTitle>Add New Vendor</DialogTitle>
+                      </DialogHeader>
+                      <VendorForm
+                        onSubmit={handleCreateVendor}
+                        onCancel={() => setIsDialogOpen(false)}
+                        vendorTypes={(vendorTypes || []).filter(t => (t.name || t) !== 'Broker')}
+                        onAddNewType={loadMasterData}
+                      />
+                    </DialogContent>
+                  </Dialog>
+                </div>
+
+                {/* Add Work dialog (opened programmatically from a vendor row) */}
+                <Dialog
+                  open={dialogMode === 'createExpenseBill' && isDialogOpen}
+                  onOpenChange={(open) => {
+                    setIsDialogOpen(open)
+                    if (!open) { setDialogMode(''); setAddWorkVendor(null) }
+                  }}
+                >
+                  <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                    <DialogHeader>
+                      <DialogTitle>
+                        {addWorkVendor ? `Add Work — ${addWorkVendor.name}` : 'Add Work Entry'}
+                      </DialogTitle>
+                    </DialogHeader>
+                    <ExpenseBillForm
+                      vendors={vendors}
+                      categories={expenseCategories}
+                      initialData={addWorkVendor
+                        ? {
+                            vendorId: addWorkVendor.id,
+                            ...(addWorkVendor._preselectLabour ? { category: 'Labour' } : {}),
+                          }
+                        : undefined}
+                      onSubmit={handleCreateExpenseBill}
+                      onCancel={() => { setIsDialogOpen(false); setAddWorkVendor(null) }}
+                      onAddNewCategory={loadMasterData}
+                    />
+                  </DialogContent>
+                </Dialog>
+
+                {/* Summary cards */}
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                  <Card>
+                    <CardContent className="p-4 text-center">
+                      <p className="text-xs uppercase tracking-wide text-slate-500">Total Vendors</p>
+                      <p className="text-2xl font-bold text-slate-900 mt-1">{vendorLedgerTotals.totalVendors}</p>
+                    </CardContent>
+                  </Card>
+                  <Card className="bg-blue-50/60">
+                    <CardContent className="p-4 text-center">
+                      <p className="text-xs uppercase tracking-wide text-blue-700">Total Work Value</p>
+                      <p className="text-2xl font-bold text-blue-700 mt-1">₹{fmt(vendorLedgerTotals.totalWorkValue)}</p>
+                    </CardContent>
+                  </Card>
+                  <Card className="bg-green-50/60">
+                    <CardContent className="p-4 text-center">
+                      <p className="text-xs uppercase tracking-wide text-green-700">Total Paid</p>
+                      <p className="text-2xl font-bold text-green-700 mt-1">₹{fmt(vendorLedgerTotals.totalPaid)}</p>
+                    </CardContent>
+                  </Card>
+                  <Card className="bg-red-50/60">
+                    <CardContent className="p-4 text-center">
+                      <p className="text-xs uppercase tracking-wide text-red-700">Pending Payment</p>
+                      <p className="text-2xl font-bold text-red-700 mt-1">₹{fmt(vendorLedgerTotals.totalPending)}</p>
+                    </CardContent>
+                  </Card>
+                  <Card className="bg-purple-50/60">
+                    <CardContent className="p-4 text-center">
+                      <p className="text-xs uppercase tracking-wide text-purple-700">Labour Cost</p>
+                      <p className="text-2xl font-bold text-purple-700 mt-1">₹{fmt(vendorLedgerTotals.labourCost)}</p>
+                    </CardContent>
+                  </Card>
+                  <Card className="bg-amber-50/60">
+                    <CardContent className="p-4 text-center">
+                      <p className="text-xs uppercase tracking-wide text-amber-700">Material Cost</p>
+                      <p className="text-2xl font-bold text-amber-700 mt-1">₹{fmt(vendorLedgerTotals.materialCost)}</p>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {/* Filters */}
                 <Card>
-                  <CardHeader>
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="flex items-center gap-2">
-                        <TrendingDown className="w-5 h-5" />
-                        Expense Bills
-                      </CardTitle>
-                      <div className="flex items-center gap-2">
-                        <Button variant="outline" size="sm" onClick={exportExpensesToCSV}>
-                          <FileSpreadsheet className="w-4 h-4 mr-1" /> CSV
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={exportExpensesToPDF}>
-                          <FileText className="w-4 h-4 mr-1" /> PDF
-                        </Button>
-                        <Dialog open={dialogMode === 'createExpenseBill' && isDialogOpen} onOpenChange={(open) => { setIsDialogOpen(open); if (!open) setDialogMode('') }}>
-                          <DialogTrigger asChild>
-                            <Button onClick={() => { setDialogMode('createExpenseBill'); setCurrentItem(null); }}>
-                              <Plus className="w-4 h-4 mr-2" /> Add Expense Bill
-                            </Button>
-                          </DialogTrigger>
-                          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-                            <DialogHeader>
-                              <DialogTitle>Add Expense Bill</DialogTitle>
-                            </DialogHeader>
-                            <ExpenseBillForm vendors={vendors} categories={expenseCategories} onSubmit={handleCreateExpenseBill} onCancel={() => setIsDialogOpen(false)} onAddNewCategory={loadMasterData} />
-                          </DialogContent>
-                        </Dialog>
-                      </div>
+                  <CardContent className="p-4">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <Input
+                        placeholder="Search vendor name, phone…"
+                        value={vendorLedgerFilters.search}
+                        onChange={(e) => setVendorLedgerFilters(f => ({ ...f, search: e.target.value }))}
+                      />
+                      <Select
+                        value={vendorLedgerFilters.category}
+                        onValueChange={(v) => setVendorLedgerFilters(f => ({ ...f, category: v }))}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="All Categories" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All Categories</SelectItem>
+                          {vendorLedgerCategories.map(cat => (
+                            <SelectItem key={cat} value={cat}>{cat}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Select
+                        value={vendorLedgerFilters.status}
+                        onValueChange={(v) => setVendorLedgerFilters(f => ({ ...f, status: v }))}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="All Status" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All Status</SelectItem>
+                          <SelectItem value="pending">Pending</SelectItem>
+                          <SelectItem value="advance">Advance</SelectItem>
+                          <SelectItem value="cleared">Cleared</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
-                    {/* Filter Bar */}
-                    <div className="mt-4 p-4 bg-gray-50 rounded-lg border">
-                      <div className="flex items-center gap-2 mb-3">
-                        <Filter className="w-4 h-4 text-gray-500" />
-                        <span className="text-sm font-medium text-gray-700">Filters</span>
-                        <Button variant="ghost" size="sm" onClick={clearExpenseFilters} className="ml-auto">
-                          <X className="w-4 h-4 mr-1" /> Clear
-                        </Button>
+                  </CardContent>
+                </Card>
+
+                {/* Vendor table */}
+                <Card>
+                  <CardContent className="p-0">
+                    {vendorLedgerRows.length === 0 ? (
+                      <div className="text-center py-12">
+                        <UserCheck className="w-12 h-12 mx-auto text-gray-300 mb-2" />
+                        <p className="text-gray-500">No vendors yet</p>
+                        <p className="text-sm text-gray-400">Click “Add Vendor” to get started. (Brokers are tracked in Commissions.)</p>
                       </div>
-                      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                        <div>
-                          <Label className="text-xs text-gray-500">Status</Label>
-                          <Select value={expenseFilters.status} onValueChange={(v) => setExpenseFilters(f => ({ ...f, status: v }))}>
-                            <SelectTrigger className="h-9">
-                              <SelectValue placeholder="All Status" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="all">All Status</SelectItem>
-                              <SelectItem value="UNPAID">Unpaid</SelectItem>
-                              <SelectItem value="PARTIAL">Partial</SelectItem>
-                              <SelectItem value="PAID">Paid</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <div>
-                          <Label className="text-xs text-gray-500">Vendor</Label>
-                          <Select value={expenseFilters.vendorId} onValueChange={(v) => setExpenseFilters(f => ({ ...f, vendorId: v }))}>
-                            <SelectTrigger className="h-9">
-                              <SelectValue placeholder="All Vendors" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="all">All Vendors</SelectItem>
-                              {vendors.map(v => (
-                                <SelectItem key={v.id} value={v.id}>{v.name}</SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <div>
-                          <Label className="text-xs text-gray-500">Category</Label>
-                          <Select value={expenseFilters.categoryId} onValueChange={(v) => setExpenseFilters(f => ({ ...f, categoryId: v }))}>
-                            <SelectTrigger className="h-9">
-                              <SelectValue placeholder="All Categories" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="all">All Categories</SelectItem>
-                              {EXPENSE_CATEGORIES.map(cat => (
-                                <SelectItem key={cat} value={cat}>{cat}</SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <div>
-                          <Label className="text-xs text-gray-500">From Date</Label>
-                          <Input 
-                            type="date" 
-                            className="h-9"
-                            value={expenseFilters.startDate}
-                            onChange={(e) => setExpenseFilters(f => ({ ...f, startDate: e.target.value }))}
-                          />
-                        </div>
-                        <div>
-                          <Label className="text-xs text-gray-500">To Date</Label>
-                          <Input 
-                            type="date" 
-                            className="h-9"
-                            value={expenseFilters.endDate}
-                            onChange={(e) => setExpenseFilters(f => ({ ...f, endDate: e.target.value }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    {expenseBills.length === 0 ? (
-                      <div className="text-center py-8">
-                        <TrendingDown className="w-12 h-12 mx-auto text-gray-300 mb-2" />
-                        <p className="text-gray-500">No expense bills recorded yet</p>
-                        <p className="text-sm text-gray-400">Add vendors first, then create expense bills</p>
-                      </div>
-                    ) : filteredExpenseBills.length === 0 ? (
-                      <div className="text-center py-8">
+                    ) : filteredVendorLedger.length === 0 ? (
+                      <div className="text-center py-12">
                         <Filter className="w-12 h-12 mx-auto text-gray-300 mb-2" />
-                        <p className="text-gray-500">No bills match your filters</p>
-                        <Button variant="link" onClick={clearExpenseFilters}>Clear Filters</Button>
+                        <p className="text-gray-500">No vendors match your filters</p>
                       </div>
                     ) : (
-                      <>
-                        {/* Totals Summary */}
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 p-3 bg-blue-50 rounded-lg">
-                          <div className="text-center">
-                            <p className="text-xs text-gray-500">Total Bill</p>
-                            <p className="text-lg font-semibold">₹{fmt(expenseTotals.totalBill)}</p>
-                          </div>
-                          <div className="text-center">
-                            <p className="text-xs text-gray-500">Total Paid</p>
-                            <p className="text-lg font-semibold text-green-600">₹{fmt(expenseTotals.totalPaid)}</p>
-                          </div>
-                          <div className="text-center">
-                            <p className="text-xs text-gray-500">Total Balance</p>
-                            <p className="text-lg font-semibold text-orange-600">₹{fmt(expenseTotals.totalBalance)}</p>
-                          </div>
-                        </div>
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Date</TableHead>
-                              <TableHead>Vendor</TableHead>
-                              <TableHead>Category</TableHead>
-                              <TableHead>Description</TableHead>
-                              <TableHead>Bill Amount</TableHead>
-                              <TableHead>Paid</TableHead>
-                              <TableHead>Balance</TableHead>
-                              <TableHead>Status</TableHead>
-                              <TableHead>Actions</TableHead>
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Vendor</TableHead>
+                            <TableHead>Category</TableHead>
+                            <TableHead>Work Value</TableHead>
+                            <TableHead>Amount Paid</TableHead>
+                            <TableHead>Pending Payment</TableHead>
+                            <TableHead>Last Activity</TableHead>
+                            <TableHead>Actions</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {filteredVendorLedger.map(row => (
+                            <TableRow key={row.id}>
+                              <TableCell className="font-medium">{row.name}</TableCell>
+                              <TableCell>
+                                <Badge variant="secondary">{row.displayCategory}</Badge>
+                              </TableCell>
+                              <TableCell className="text-blue-700 font-medium">₹{fmt(row.workValue)}</TableCell>
+                              <TableCell className="text-green-700 font-medium">₹{fmt(row.amountPaid)}</TableCell>
+                              <TableCell>
+                                {row.pending > 0 ? (
+                                  <span className="text-red-700 font-medium">₹{fmt(row.pending)} pending</span>
+                                ) : row.advance > 0 ? (
+                                  <span className="text-orange-600 font-medium">₹{fmt(row.advance)} advance</span>
+                                ) : (
+                                  <span className="text-slate-500">Cleared</span>
+                                )}
+                              </TableCell>
+                              <TableCell className="text-slate-500">
+                                {row.lastActivity ? new Date(row.lastActivity).toLocaleDateString() : '-'}
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <Button variant="outline" size="sm" onClick={() => openVendorLedger(row)}>
+                                    <BookOpen className="w-4 h-4 mr-1" /> Ledger
+                                  </Button>
+                                  <Button size="sm" onClick={() => openAddWorkForVendor(row)}>
+                                    <Plus className="w-4 h-4 mr-1" /> Add Work
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="secondary"
+                                    onClick={() => openPaymentForVendor(row)}
+                                  >
+                                    <Wallet className="w-4 h-4 mr-1" /> Payment
+                                  </Button>
+                                  <Dialog open={dialogMode === `editVendorLedger-${row.id}` && isDialogOpen} onOpenChange={(open) => { setIsDialogOpen(open); if (!open) setDialogMode('') }}>
+                                    <DialogTrigger asChild>
+                                      <Button variant="ghost" size="sm" onClick={() => { setDialogMode(`editVendorLedger-${row.id}`); setCurrentItem(row); }} title="Edit vendor">
+                                        <Pencil className="w-4 h-4" />
+                                      </Button>
+                                    </DialogTrigger>
+                                    <DialogContent className="max-w-lg">
+                                      <DialogHeader>
+                                        <DialogTitle>Edit Vendor</DialogTitle>
+                                      </DialogHeader>
+                                      <VendorForm vendor={row} onSubmit={(data) => handleUpdateVendor(row.id, data)} onCancel={() => setIsDialogOpen(false)} vendorTypes={vendorTypes} onAddNewType={loadMasterData} />
+                                    </DialogContent>
+                                  </Dialog>
+                                  <AlertDialog>
+                                    <AlertDialogTrigger asChild>
+                                      <Button variant="ghost" size="sm" title="Delete vendor">
+                                        <Trash2 className="w-4 h-4 text-red-500" />
+                                      </Button>
+                                    </AlertDialogTrigger>
+                                    <AlertDialogContent>
+                                      <AlertDialogHeader>
+                                        <AlertDialogTitle>Delete Vendor?</AlertDialogTitle>
+                                        <AlertDialogDescription>
+                                          This vendor can only be deleted if they have no unpaid bills.
+                                        </AlertDialogDescription>
+                                      </AlertDialogHeader>
+                                      <AlertDialogFooter>
+                                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                        <AlertDialogAction onClick={() => handleDeleteVendor(row.id)}>Delete</AlertDialogAction>
+                                      </AlertDialogFooter>
+                                    </AlertDialogContent>
+                                  </AlertDialog>
+                                </div>
+                              </TableCell>
                             </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {filteredExpenseBills.map(bill => (
-                              <TableRow key={bill.id}>
-                                <TableCell>{new Date(bill.billDate).toLocaleDateString()}</TableCell>
-                                <TableCell className="font-medium">{bill.vendorName}</TableCell>
-                                <TableCell>{bill.categoryName || '-'}</TableCell>
-                                <TableCell>{bill.description || '-'}</TableCell>
-                                <TableCell>₹{fmt(bill.billAmount)}</TableCell>
-                                <TableCell className="text-green-600">₹{fmt(bill.totalPaid)}</TableCell>
-                                <TableCell className="text-orange-600">₹{fmt(bill.balance)}</TableCell>
-                                <TableCell>
-                                  <Badge variant={bill.status === 'PAID' ? 'default' : bill.status === 'PARTIAL' ? 'secondary' : 'destructive'}>
-                                    {bill.status}
-                                  </Badge>
-                                </TableCell>
-                                <TableCell>
-                                  <div className="flex items-center gap-2">
-                                    <Button variant="outline" size="sm" onClick={() => openBillPayments('expense', bill)}>
-                                      <CreditCard className="w-4 h-4 mr-1" /> Payments
-                                    </Button>
-                                    <Button
-                                      variant="ghost"
-                                      size="sm"
-                                      onClick={() => setEditingExpenseBill(bill)}
-                                      title="Edit bill"
-                                    >
-                                      <Pencil className="w-4 h-4" />
-                                    </Button>
-                                    <AlertDialog>
-                                      <AlertDialogTrigger asChild>
-                                        <Button variant="destructive" size="sm">
-                                          <Trash2 className="w-4 h-4" />
-                                        </Button>
-                                      </AlertDialogTrigger>
-                                      <AlertDialogContent>
-                                        <AlertDialogHeader>
-                                          <AlertDialogTitle>Delete Expense Bill?</AlertDialogTitle>
-                                          <AlertDialogDescription>
-                                            This will delete the bill and all associated payments. This action cannot be undone.
-                                          </AlertDialogDescription>
-                                        </AlertDialogHeader>
-                                        <AlertDialogFooter>
-                                          <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                          <AlertDialogAction onClick={() => handleDeleteExpenseBill(bill.id)}>Delete</AlertDialogAction>
-                                        </AlertDialogFooter>
-                                      </AlertDialogContent>
-                                    </AlertDialog>
-                                  </div>
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                          </TableBody>
-                        </Table>
-                        <div className="mt-2 text-sm text-gray-500 text-right">
-                          Showing {filteredExpenseBills.length} of {expenseBills.length} bills
-                        </div>
-                      </>
+                          ))}
+                        </TableBody>
+                      </Table>
                     )}
                   </CardContent>
                 </Card>
@@ -3850,13 +4184,34 @@ const App = () => {
       />
 
       {/* Vendor Ledger Drawer */}
-      <VendorLedgerDrawer 
+      <VendorLedgerDrawer
         isOpen={isVendorLedgerOpen}
         onClose={() => setIsVendorLedgerOpen(false)}
         vendor={vendorLedgerItem}
         entries={vendorLedgerEntries}
         onExportCSV={exportVendorLedgerToCSV}
         onExportPDF={exportVendorLedgerToPDF}
+        onAddWork={(v) => handleVendorDetailAddWork(v)}
+        onAddPayment={(v) => handleVendorDetailAddPayment(v)}
+        onAddLabour={(v) => handleVendorDetailAddWork(v, { preselectLabour: true })}
+        onDeleteEntry={handleVendorLedgerDelete}
+        onEditEntry={handleVendorLedgerEdit}
+      />
+
+      {/* Vendor Ledger — Edit Payment dialog (overlays VendorLedgerDrawer) */}
+      <VendorPaymentEditDialog
+        payment={editingVendorPayment}
+        accounts={accounts}
+        onClose={() => setEditingVendorPayment(null)}
+        onSubmit={handleSubmitVendorPaymentEdit}
+      />
+
+      {/* Vendor Ledger — Add Payment (vendor-level, FIFO across unpaid bills) */}
+      <VendorAddPaymentDialog
+        context={addingVendorPayment}
+        accounts={accounts}
+        onClose={() => setAddingVendorPayment(null)}
+        onSubmit={handleSubmitVendorAddPayment}
       />
 
       {/* Resale Payment Drawer */}
@@ -4806,19 +5161,330 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
 }
 
 // Vendor Ledger Drawer Component
-const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onExportPDF }) => {
-  const totalPaid = entries.reduce((sum, e) => sum + e.amount, 0)
+// Standalone payment-edit dialog for the vendor ledger drawer. Mirrors
+// the inline-edit fields in BillPaymentDrawer (amount/date/mode/account/
+// reference/remark) but as a modal so it can overlay the drawer.
+const VendorPaymentEditDialog = ({ payment, accounts, onClose, onSubmit }) => {
+  const [form, setForm] = useState({
+    amount: '',
+    paymentDate: '',
+    paymentMode: 'Cash',
+    accountId: '',
+    referenceNo: '',
+    remark: '',
+  })
+
+  useEffect(() => {
+    if (payment) {
+      setForm({
+        amount: (payment.amount ?? '').toString(),
+        paymentDate: (payment.paymentDate || '').toString().split('T')[0],
+        paymentMode: payment.paymentMode || 'Cash',
+        accountId: payment.accountId || '',
+        referenceNo: payment.referenceNo || '',
+        remark: payment.remark || '',
+      })
+    }
+  }, [payment])
+
+  const handleSave = (e) => {
+    e.preventDefault()
+    const amount = parseFloat(form.amount)
+    if (!(amount > 0)) return
+    onSubmit({
+      amount,
+      paymentDate: form.paymentDate,
+      paymentMode: form.paymentMode,
+      accountId: form.accountId,
+      referenceNo: form.referenceNo,
+      remark: form.remark,
+    })
+  }
+
+  const eligibleAccounts = (accounts || []).filter(a =>
+    form.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK'
+  )
+
+  return (
+    <Dialog open={!!payment} onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Edit Payment</DialogTitle>
+          <DialogDescription>Update payment details. Bill balance recalculates automatically.</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={handleSave} className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>Amount (₹) *</Label>
+              <Input type="number" step="0.01" required
+                value={form.amount}
+                onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
+              />
+            </div>
+            <div>
+              <Label>Date *</Label>
+              <Input type="date" required
+                value={form.paymentDate}
+                onChange={e => setForm(f => ({ ...f, paymentDate: e.target.value }))}
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>Payment Mode *</Label>
+              <Select value={form.paymentMode} onValueChange={v => setForm(f => ({ ...f, paymentMode: v, accountId: '' }))}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="Cash">Cash</SelectItem>
+                  <SelectItem value="Bank Transfer">Bank Transfer</SelectItem>
+                  <SelectItem value="UPI">UPI</SelectItem>
+                  <SelectItem value="Cheque">Cheque</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Account</Label>
+              <Select value={form.accountId} onValueChange={v => setForm(f => ({ ...f, accountId: v }))}>
+                <SelectTrigger><SelectValue placeholder="Default" /></SelectTrigger>
+                <SelectContent>
+                  {eligibleAccounts.map(a => (
+                    <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div>
+            <Label>Reference / Cheque No</Label>
+            <Input value={form.referenceNo} onChange={e => setForm(f => ({ ...f, referenceNo: e.target.value }))} placeholder="Optional" />
+          </div>
+          <div>
+            <Label>Remark</Label>
+            <Textarea value={form.remark} onChange={e => setForm(f => ({ ...f, remark: e.target.value }))} />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+            <Button type="submit">Save Payment</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// Vendor-level "Add Payment" dialog. User enters one amount; on save it
+// splits FIFO across the vendor's unpaid bills (oldest first). Shows a
+// live allocation preview so the breakdown is visible before submit.
+const VendorAddPaymentDialog = ({ context, accounts, onClose, onSubmit }) => {
+  const [form, setForm] = useState({
+    amount: '',
+    paymentDate: new Date().toISOString().split('T')[0],
+    paymentMode: 'Cash',
+    accountId: '',
+    referenceNo: '',
+    remark: '',
+  })
+
+  useEffect(() => {
+    if (context) {
+      setForm({
+        amount: '',
+        paymentDate: new Date().toISOString().split('T')[0],
+        paymentMode: 'Cash',
+        accountId: '',
+        referenceNo: '',
+        remark: '',
+      })
+    }
+  }, [context])
+
+  if (!context) return null
+  const { vendor, unpaidBills, totalPending } = context
+
+  const eligibleAccounts = (accounts || []).filter(a =>
+    form.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK'
+  )
+
+  // Live FIFO preview — same algorithm as the submit handler.
+  const amountNum = parseFloat(form.amount) || 0
+  const preview = []
+  let remaining = amountNum
+  for (const bill of unpaidBills) {
+    if (remaining <= 0) break
+    const billRem = Math.max(0, bill.balance || 0)
+    if (billRem <= 0) continue
+    const portion = Math.min(remaining, billRem)
+    preview.push({ bill, portion })
+    remaining -= portion
+  }
+  const exceedsPending = amountNum > totalPending
+
+  const handleSave = (e) => {
+    e.preventDefault()
+    if (!(amountNum > 0)) return
+    onSubmit({
+      amount: amountNum,
+      paymentDate: form.paymentDate,
+      paymentMode: form.paymentMode,
+      accountId: form.accountId,
+      referenceNo: form.referenceNo,
+      remark: form.remark,
+    })
+  }
+
+  return (
+    <Dialog open={!!context} onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Add Payment — {vendor?.name}</DialogTitle>
+          <DialogDescription>
+            Pending ₹{fmt(totalPending)} across {unpaidBills.length} bill{unpaidBills.length > 1 ? 's' : ''}. Payment will be split oldest-first.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={handleSave} className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>Amount (₹) *</Label>
+              <Input type="number" step="0.01" required
+                value={form.amount}
+                onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
+                placeholder={`Max ${fmt(totalPending)}`}
+              />
+            </div>
+            <div>
+              <Label>Date *</Label>
+              <Input type="date" required
+                value={form.paymentDate}
+                onChange={e => setForm(f => ({ ...f, paymentDate: e.target.value }))}
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>Payment Mode *</Label>
+              <Select value={form.paymentMode} onValueChange={v => setForm(f => ({ ...f, paymentMode: v, accountId: '' }))}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="Cash">Cash</SelectItem>
+                  <SelectItem value="Bank Transfer">Bank Transfer</SelectItem>
+                  <SelectItem value="UPI">UPI</SelectItem>
+                  <SelectItem value="Cheque">Cheque</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Account</Label>
+              <Select value={form.accountId} onValueChange={v => setForm(f => ({ ...f, accountId: v }))}>
+                <SelectTrigger><SelectValue placeholder="Default" /></SelectTrigger>
+                <SelectContent>
+                  {eligibleAccounts.map(a => (
+                    <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div>
+            <Label>Reference / Cheque No</Label>
+            <Input value={form.referenceNo} onChange={e => setForm(f => ({ ...f, referenceNo: e.target.value }))} placeholder="Optional" />
+          </div>
+          <div>
+            <Label>Remark</Label>
+            <Textarea rows={2} value={form.remark} onChange={e => setForm(f => ({ ...f, remark: e.target.value }))} />
+          </div>
+
+          {/* Allocation preview */}
+          {amountNum > 0 && (
+            <div className={`p-3 rounded-lg border text-sm ${exceedsPending ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'}`}>
+              <p className="font-medium mb-2">
+                {exceedsPending
+                  ? `Amount exceeds pending by ₹${fmt(amountNum - totalPending)}. Reduce to ₹${fmt(totalPending)}.`
+                  : 'Allocation preview:'}
+              </p>
+              {!exceedsPending && (
+                <ul className="space-y-1">
+                  {preview.map(({ bill, portion }) => (
+                    <li key={bill.id} className="flex justify-between text-xs">
+                      <span className="text-slate-600">
+                        {new Date(bill.billDate).toLocaleDateString()} · {bill.categoryName || 'Work'}
+                        {bill.description ? ` — ${bill.description}` : ''}
+                      </span>
+                      <span className="font-medium text-blue-700">₹{fmt(portion)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+            <Button type="submit" disabled={!(amountNum > 0) || exceedsPending}>Save Payment</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onExportPDF, onAddWork, onAddPayment, onAddLabour, onDeleteEntry, onEditEntry }) => {
+  const [filterType, setFilterType] = useState('all')
+  const [filterFrom, setFilterFrom] = useState('')
+  const [filterTo, setFilterTo] = useState('')
+  const [search, setSearch] = useState('')
+
+  // Aggregates derived from the merged work + payment timeline.
+  const workEntries = entries.filter(e => e.type === 'WORK')
+  const paymentEntries = entries.filter(e => e.type === 'PAYMENT')
+  const totalWork = workEntries.reduce((s, e) => s + (e.workValue || 0), 0)
+  const totalPaid = paymentEntries.reduce((s, e) => s + (e.paymentAmount || 0), 0)
+  const labourValue = workEntries
+    .filter(e => /labour/i.test(e.categoryName || ''))
+    .reduce((s, e) => s + (e.workValue || 0), 0)
+  // Latest payment / activity — entries are reverse-chronological so we
+  // can take the first match.
+  const lastPaymentEntry = paymentEntries[0] // already newest-first
+  const lastActivity = entries[0]
+  const owesUs = totalPaid - totalWork // positive = vendor owes us (advance)
+  const weOwe = totalWork - totalPaid  // positive = pending payment to vendor
+
+  const filteredEntries = entries.filter(e => {
+    if (filterType !== 'all') {
+      if (filterType === 'LABOUR') {
+        if (e.subType !== 'LABOUR') return false
+      } else if (filterType === 'WORK') {
+        // Plain Work excludes Labour to avoid double-listing.
+        if (e.type !== 'WORK' || e.subType === 'LABOUR') return false
+      } else if (e.type !== filterType) {
+        return false
+      }
+    }
+    if (filterFrom && new Date(e.date) < new Date(filterFrom)) return false
+    if (filterTo && new Date(e.date) > new Date(filterTo)) return false
+    if (search) {
+      const q = search.toLowerCase()
+      const hay = `${e.description || ''} ${e.categoryName || ''} ${e.reference || ''} ${e.paymentMode || ''}`.toLowerCase()
+      if (!hay.includes(q)) return false
+    }
+    return true
+  })
 
   return (
     <Drawer open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
-      <DrawerContent className="max-h-[90vh]">
-        <DrawerHeader>
+      <DrawerContent className="max-h-[95vh]">
+        <DrawerHeader className="pb-2">
           <div className="flex items-center justify-between">
-            <div>
-              <DrawerTitle>Vendor Ledger - {vendor?.name}</DrawerTitle>
-              <DrawerDescription>
-                All payments made to this vendor from Expenses and Commissions
-              </DrawerDescription>
+            <div className="flex items-center gap-3">
+              <Button variant="ghost" size="sm" onClick={onClose}>
+                <X className="w-4 h-4" />
+              </Button>
+              <div className="w-9 h-9 rounded-lg bg-orange-100 flex items-center justify-center">
+                <BookOpen className="w-4 h-4 text-orange-600" />
+              </div>
+              <div>
+                <DrawerTitle className="text-lg">{vendor?.name}</DrawerTitle>
+                <DrawerDescription>{vendor?.type || 'Vendor'}</DrawerDescription>
+              </div>
             </div>
             <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" onClick={onExportCSV} disabled={entries.length === 0}>
@@ -4830,57 +5496,212 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
             </div>
           </div>
         </DrawerHeader>
-        
-        <div className="px-4 overflow-y-auto max-h-[60vh]">
-          {/* Summary */}
-          <Card className="mb-4 bg-green-50">
-            <CardContent className="pt-6">
-              <div className="flex justify-between items-center">
-                <div>
-                  <p className="text-sm text-gray-600">Total Paid to Vendor</p>
-                  <p className="text-2xl font-bold text-green-600">₹{fmt(totalPaid)}</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-sm text-gray-600">Vendor Type</p>
-                  <Badge variant="secondary" className="text-lg">{vendor?.type}</Badge>
-                </div>
+
+        <div className="px-4 overflow-y-auto max-h-[80vh] space-y-4">
+          {/* Orange gradient vendor summary */}
+          <div className="rounded-xl p-5 text-white bg-gradient-to-r from-orange-500 to-amber-500 shadow">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-wider opacity-80 flex items-center gap-2">
+                  <UserCheck className="w-4 h-4" /> Vendor Summary
+                </p>
+                <p className="text-3xl font-bold mt-1">{vendor?.name}</p>
+                <p className="text-sm opacity-90">{vendor?.type || 'Vendor'}</p>
+              </div>
+              <div className="text-right">
+                {owesUs > 0 ? (
+                  <>
+                    <p className="text-xs uppercase tracking-wider opacity-80">Advance Paid</p>
+                    <p className="text-3xl font-bold mt-1">₹{fmt(owesUs)}</p>
+                    <p className="text-sm opacity-90">Vendor owes you</p>
+                  </>
+                ) : weOwe > 0 ? (
+                  <>
+                    <p className="text-xs uppercase tracking-wider opacity-80">Pending Payment</p>
+                    <p className="text-3xl font-bold mt-1">₹{fmt(weOwe)}</p>
+                    <p className="text-sm opacity-90">You owe vendor</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-xs uppercase tracking-wider opacity-80">Status</p>
+                    <p className="text-3xl font-bold mt-1">Cleared</p>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Stat strip */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-5 bg-white/95 rounded-lg p-3 text-slate-900">
+              <div>
+                <p className="text-xs text-blue-700 flex items-center gap-1"><TrendingUp className="w-3 h-3" /> Total Work Value</p>
+                <p className="text-lg font-bold text-blue-700">₹{fmt(totalWork)}</p>
+                <p className="text-[10px] text-slate-500">Material + Labour</p>
+              </div>
+              <div>
+                <p className="text-xs text-green-700 flex items-center gap-1"><TrendingDown className="w-3 h-3" /> Amount Paid</p>
+                <p className="text-lg font-bold text-green-700">₹{fmt(totalPaid)}</p>
+                <p className="text-[10px] text-slate-500">{paymentEntries.length} payments</p>
+              </div>
+              <div>
+                <p className="text-xs text-purple-700 flex items-center gap-1"><Wallet className="w-3 h-3" /> Labour Value</p>
+                <p className="text-lg font-bold text-purple-700">₹{fmt(labourValue)}</p>
+                <p className="text-[10px] text-slate-500">From work entries</p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-700 flex items-center gap-1"><CreditCard className="w-3 h-3" /> Last Payment</p>
+                <p className="text-lg font-bold text-slate-800">
+                  {lastPaymentEntry ? new Date(lastPaymentEntry.date).toLocaleDateString() : '-'}
+                </p>
+                <p className="text-[10px] text-slate-500">
+                  {lastPaymentEntry ? `₹${fmt(lastPaymentEntry.paymentAmount)}` : ''}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-700 flex items-center gap-1"><Filter className="w-3 h-3" /> Last Activity</p>
+                <p className="text-lg font-bold text-slate-800">
+                  {lastActivity ? new Date(lastActivity.date).toLocaleDateString() : '-'}
+                </p>
+                <p className="text-[10px] text-slate-500">{entries.length} total entries</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Action buttons */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <Button className="bg-blue-600 hover:bg-blue-700 text-white h-14 text-base" onClick={() => onAddWork && onAddWork(vendor)}>
+              <Plus className="w-5 h-5 mr-2" /> Add Work
+            </Button>
+            <Button className="bg-green-600 hover:bg-green-700 text-white h-14 text-base" onClick={() => onAddPayment && onAddPayment(vendor)}>
+              <Plus className="w-5 h-5 mr-2" /> Add Payment
+            </Button>
+            <Button className="bg-purple-600 hover:bg-purple-700 text-white h-14 text-base" onClick={() => onAddLabour && onAddLabour(vendor)}>
+              <Plus className="w-5 h-5 mr-2" /> Add Labour
+            </Button>
+          </div>
+
+          {/* Filters */}
+          <Card>
+            <CardContent className="p-3">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                <Select value={filterType} onValueChange={setFilterType}>
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="All Activities" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Activities</SelectItem>
+                    <SelectItem value="WORK">Work</SelectItem>
+                    <SelectItem value="LABOUR">Labour</SelectItem>
+                    <SelectItem value="PAYMENT">Payment</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input type="date" className="h-9" value={filterFrom} onChange={e => setFilterFrom(e.target.value)} />
+                <Input type="date" className="h-9" value={filterTo} onChange={e => setFilterTo(e.target.value)} />
+                <Input className="h-9" placeholder="Search description, ref, material…" value={search} onChange={e => setSearch(e.target.value)} />
               </div>
             </CardContent>
           </Card>
 
-          {/* Ledger Entries */}
+          {/* Timeline table */}
           <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Payment History</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {entries.length === 0 ? (
-                <p className="text-center text-gray-500 py-4">No payments to this vendor yet</p>
+            <CardContent className="p-0">
+              {filteredEntries.length === 0 ? (
+                <p className="text-center text-gray-500 py-8">No activity to show</p>
               ) : (
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Date</TableHead>
-                      <TableHead>Source</TableHead>
-                      <TableHead>Reference</TableHead>
-                      <TableHead>Amount</TableHead>
-                      <TableHead>Mode</TableHead>
-                      <TableHead>Remark</TableHead>
+                      <TableHead>Type</TableHead>
+                      <TableHead>Description</TableHead>
+                      <TableHead className="text-right">Work Value</TableHead>
+                      <TableHead className="text-right">Payment</TableHead>
+                      <TableHead className="text-right">Balance</TableHead>
+                      <TableHead className="w-20 text-right">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {entries.map(entry => (
+                    {filteredEntries.map(entry => (
                       <TableRow key={entry.id}>
-                        <TableCell>{new Date(entry.date).toLocaleDateString()}</TableCell>
+                        <TableCell className="whitespace-nowrap">{new Date(entry.date).toLocaleDateString()}</TableCell>
                         <TableCell>
-                          <Badge variant={entry.source === 'EXPENSE' ? 'secondary' : 'default'}>
-                            {entry.source}
-                          </Badge>
+                          {entry.subType === 'LABOUR' ? (
+                            <Badge className="bg-purple-100 text-purple-700 hover:bg-purple-100">Labour</Badge>
+                          ) : entry.type === 'WORK' ? (
+                            <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100">Work</Badge>
+                          ) : (
+                            <Badge className="bg-green-100 text-green-700 hover:bg-green-100">Payment</Badge>
+                          )}
                         </TableCell>
-                        <TableCell>{entry.reference}</TableCell>
-                        <TableCell className="text-green-600 font-medium">₹{fmt(entry.amount)}</TableCell>
-                        <TableCell><Badge variant="outline">{entry.paymentMode}</Badge></TableCell>
-                        <TableCell>{entry.remark || '-'}</TableCell>
+                        <TableCell>
+                          <div className="font-medium">{entry.description}</div>
+                          {entry.type === 'WORK' && entry.categoryName && (
+                            <div className="text-xs text-slate-500">{entry.categoryName}</div>
+                          )}
+                          {entry.type === 'PAYMENT' && entry.paymentMode && (
+                            <div className="text-xs text-slate-500">via {entry.paymentMode}</div>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {entry.workValue > 0 ? (
+                            <span className="text-blue-700 font-medium">₹{fmt(entry.workValue)}</span>
+                          ) : (
+                            <span className="text-slate-300">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {entry.paymentAmount > 0 ? (
+                            <span className="text-green-700 font-medium">₹{fmt(entry.paymentAmount)}</span>
+                          ) : (
+                            <span className="text-slate-300">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right whitespace-nowrap">
+                          {entry.balance > 0 ? (
+                            <span className="text-red-600 font-medium">₹{fmt(entry.balance)}</span>
+                          ) : entry.balance < 0 ? (
+                            <span className="text-orange-600 font-medium">₹{fmt(Math.abs(entry.balance))} adv</span>
+                          ) : (
+                            <span className="text-slate-500">₹0</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-slate-500 hover:text-blue-700 hover:bg-blue-50"
+                              title="Edit entry"
+                              onClick={() => onEditEntry && onEditEntry(entry)}
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </Button>
+                            <AlertDialog>
+                              <AlertDialogTrigger asChild>
+                                <Button variant="ghost" size="sm" className="text-red-500 hover:text-red-700 hover:bg-red-50" title="Delete entry">
+                                  <Trash2 className="w-4 h-4" />
+                                </Button>
+                              </AlertDialogTrigger>
+                              <AlertDialogContent>
+                                <AlertDialogHeader>
+                                  <AlertDialogTitle>
+                                    Delete {entry.type === 'WORK' ? 'Work Entry' : 'Payment'}?
+                                  </AlertDialogTitle>
+                                  <AlertDialogDescription>
+                                    {entry.type === 'WORK'
+                                      ? 'This will delete the work entry and all associated payments. This action cannot be undone.'
+                                      : 'This will delete this payment. The vendor balance will be recalculated.'}
+                                  </AlertDialogDescription>
+                                </AlertDialogHeader>
+                                <AlertDialogFooter>
+                                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                  <AlertDialogAction onClick={() => onDeleteEntry && onDeleteEntry(entry)}>
+                                    Delete
+                                  </AlertDialogAction>
+                                </AlertDialogFooter>
+                              </AlertDialogContent>
+                            </AlertDialog>
+                          </div>
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

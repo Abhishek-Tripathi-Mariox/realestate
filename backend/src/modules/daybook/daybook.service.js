@@ -5,8 +5,11 @@ const { Transaction, Account, Society } = require('../../models');
 const list = async (query) => {
   const filter = {};
 
+  // Company Daybook = roll-up across every society + any company-only
+  // transactions. Don't restrict by societyId; pick up everything.
+  // Society Daybook still filters down to the specific societyId.
   if (query.scope === 'COMPANY') {
-    filter.societyId = null;
+    // no societyId restriction — return all transactions
   } else if (query.societyId && query.societyId !== 'all') {
     filter.societyId = query.societyId;
   }
@@ -70,8 +73,10 @@ const list = async (query) => {
 const summary = async (query) => {
   const filter = { isVoided: { $ne: true }, isReversed: { $ne: true }, isReversal: { $ne: true } };
 
+  // Same scope semantics as list() — Company Daybook rolls up every
+  // society's IN/OUT plus any company-only entries.
   if (query.scope === 'COMPANY') {
-    filter.societyId = null;
+    // no societyId restriction — aggregate across all societies
   } else if (query.societyId && query.societyId !== 'all') {
     filter.societyId = query.societyId;
   }

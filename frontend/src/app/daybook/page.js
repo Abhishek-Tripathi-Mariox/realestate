@@ -187,11 +187,12 @@ export default function DaybookPage() {
 
   const loadAccounts = async () => {
     try {
-      // Filter accounts by current scope so society-specific accounts don't
-      // leak across societies or into the company daybook.
+      // Company Daybook is a roll-up across all societies + company-only,
+      // so it needs every account visible (txn rows can touch any account).
+      // Society Daybook stays scoped to that society's accounts.
       const params = new URLSearchParams()
       if (scope === 'COMPANY') {
-        params.append('scope', 'COMPANY')
+        // no scope/society filter — return all accounts
       } else {
         const societyId = filters.societyId && filters.societyId !== 'all' ? filters.societyId : selectedSociety
         if (societyId) params.append('societyId', societyId)
