@@ -134,9 +134,12 @@ const remove = async (id, userId) => {
 };
 
 const listPayments = async (purchaseId) => {
+  // Tie-break same-date rows by createdAt so the latest entry on a given
+  // day appears first (e.g. a refund that follows a payment on the same
+  // date shows up above the payment instead of in insertion-undefined order).
   const entries = await PurchasePaymentEntry
     .find(notDeleted({ purchaseId }))
-    .sort({ paymentDate: -1 })
+    .sort({ paymentDate: -1, createdAt: -1 })
     .lean();
   return entries.map(stripId);
 };
@@ -155,13 +158,27 @@ const addPayment = async (purchaseId, body, userId) => {
   if (!(amount > 0)) {
     return { error: 'Payment amount must be greater than zero', status: 400 };
   }
+  const entryType = body.entryType === 'REFUND' ? 'REFUND' : 'PURCHASE_PAYMENT';
+  const isRefund = entryType === 'REFUND';
   const dealAmount = purchase.dealAmount ?? purchase.totalAmount ?? purchase.totalCost ?? 0;
-  const proposedPaid = addMoney(purchase.amountPaid || 0, amount);
-  if (!gteMoney(dealAmount, proposedPaid)) {
-    return {
-      error: `Payment exceeds purchase balance (deal ${dealAmount}, already paid ${purchase.amountPaid || 0}, attempted ${amount})`,
-      status: 400,
-    };
+  const currentPaid = purchase.amountPaid || 0;
+
+  if (isRefund) {
+    // Refund can't exceed what has already been paid net.
+    if (!gteMoney(currentPaid, amount)) {
+      return {
+        error: `Refund exceeds amount already paid (paid ${currentPaid}, attempted refund ${amount})`,
+        status: 400,
+      };
+    }
+  } else {
+    const proposedPaid = addMoney(currentPaid, amount);
+    if (!gteMoney(dealAmount, proposedPaid)) {
+      return {
+        error: `Payment exceeds purchase balance (deal ${dealAmount}, already paid ${currentPaid}, attempted ${amount})`,
+        status: 400,
+      };
+    }
   }
 
   const entry = {
@@ -170,6 +187,7 @@ const addPayment = async (purchaseId, body, userId) => {
     societyId: purchase.societyId,
     accountId,
     amount,
+    entryType,
     paymentDate: body.paymentDate || body.entryDate,
     paymentMode: body.paymentMode || 'Cash',
     referenceNo: body.referenceNo || '',
@@ -180,28 +198,30 @@ const addPayment = async (purchaseId, body, userId) => {
 
   await PurchasePaymentEntry.create(entry);
 
+  const delta = isRefund ? -amount : amount;
   const updated = await Purchase.findOneAndUpdate(
     { id: purchaseId },
-    { $inc: { amountPaid: amount } },
+    { $inc: { amountPaid: delta } },
     { new: true },
   ).lean();
-  const status = eqMoney(updated.amountPaid || 0, dealAmount) || gteMoney(updated.amountPaid || 0, dealAmount)
-    ? 'Paid'
-    : 'Partial';
+  const newPaid = Math.max(0, updated.amountPaid || 0);
+  const status = newPaid <= 0
+    ? 'Pending'
+    : (gteMoney(newPaid, dealAmount) ? 'Paid' : 'Partial');
   await Purchase.updateOne({ id: purchaseId }, { $set: { paymentStatus: status } });
 
   await createTransaction({
     txnDate: entry.paymentDate,
     societyId: purchase.societyId,
     accountId,
-    direction: 'OUT',
+    direction: isRefund ? 'IN' : 'OUT',
     amount,
     paymentMode: entry.paymentMode,
     partyType: 'Vendor',
     partyName: purchase.partyName || purchase.sellerName || 'Seller',
     sourceType: 'PURCHASE_PAYMENT',
     sourceId: entry.id,
-    remark: entry.remark || `Purchase payment - ${purchase.partyName || ''}`,
+    remark: entry.remark || `${isRefund ? 'Purchase refund' : 'Purchase payment'} - ${purchase.partyName || ''}`,
   }, userId);
 
   return entry;
@@ -216,9 +236,11 @@ const deletePayment = async (id, userId) => {
     await createReversalTransaction(originalTxn, userId, 'Purchase payment deleted');
   }
 
+  const isRefund = entry.entryType === 'REFUND';
+  const reversalDelta = isRefund ? (entry.amount || 0) : -(entry.amount || 0);
   const updated = await Purchase.findOneAndUpdate(
     { id: entry.purchaseId },
-    { $inc: { amountPaid: -(entry.amount || 0) } },
+    { $inc: { amountPaid: reversalDelta } },
     { new: true },
   ).lean();
   if (updated) {
@@ -234,7 +256,7 @@ const deletePayment = async (id, userId) => {
   }
 
   await PurchasePaymentEntry.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
-  return { message: 'Purchase payment deleted with reversal' };
+  return { message: `${isRefund ? 'Purchase refund' : 'Purchase payment'} deleted with reversal` };
 };
 
 // Update an existing payment entry. For non-trivial edits (amount / mode /
@@ -257,20 +279,37 @@ const updatePayment = async (id, body, userId) => {
   const newAccountId = body.accountId || entry.accountId;
   const newReferenceNo = body.referenceNo !== undefined ? body.referenceNo : (entry.referenceNo || '');
   const newRemark = body.remark !== undefined ? body.remark : (entry.remark || '');
+  const oldEntryType = entry.entryType === 'REFUND' ? 'REFUND' : 'PURCHASE_PAYMENT';
+  const newEntryType = body.entryType === 'REFUND' || body.entryType === 'PURCHASE_PAYMENT'
+    ? body.entryType
+    : oldEntryType;
+  const wasRefund = oldEntryType === 'REFUND';
+  const isRefund = newEntryType === 'REFUND';
 
   const totalsAffectingChange =
     !eqMoney(newAmount, entry.amount || 0)
     || newPaymentMode !== entry.paymentMode
     || newAccountId !== entry.accountId
-    || newPaymentDate !== entry.paymentDate;
+    || newPaymentDate !== entry.paymentDate
+    || newEntryType !== oldEntryType;
 
-  // Re-validate the parent's cap on amount changes only.
-  if (!eqMoney(newAmount, entry.amount || 0)) {
+  // Re-validate the parent's cap when amount or entryType changes affect the
+  // signed contribution to amountPaid.
+  if (!eqMoney(newAmount, entry.amount || 0) || newEntryType !== oldEntryType) {
     const purchase = await Purchase.findOne({ id: entry.purchaseId }).lean();
     if (!purchase) return { error: 'Parent purchase not found', status: 404 };
     const dealAmount = purchase.dealAmount ?? purchase.totalAmount ?? purchase.totalCost ?? 0;
-    const otherPaid = (purchase.amountPaid || 0) - (entry.amount || 0);
-    if (!gteMoney(dealAmount, otherPaid + newAmount)) {
+    const oldDelta = wasRefund ? -(entry.amount || 0) : (entry.amount || 0);
+    const newDelta = isRefund ? -newAmount : newAmount;
+    const otherPaid = (purchase.amountPaid || 0) - oldDelta;
+    const projectedPaid = otherPaid + newDelta;
+    if (projectedPaid < 0) {
+      return {
+        error: `Refund exceeds amount already paid (other entries net ${otherPaid}, attempted refund ${newAmount})`,
+        status: 400,
+      };
+    }
+    if (!gteMoney(dealAmount, projectedPaid)) {
       return {
         error: `Updated amount exceeds purchase balance (deal ${dealAmount}, other payments ${otherPaid}, attempted ${newAmount})`,
         status: 400,
@@ -291,8 +330,12 @@ const updatePayment = async (id, body, userId) => {
       await createReversalTransaction(originalTxn, userId, 'Purchase payment edited');
     }
 
-    // Atomic adjustment of parent's amountPaid by the delta.
-    const delta = newAmount - (entry.amount || 0);
+    // Atomic adjustment of parent's amountPaid by the signed delta. Refunds
+    // contribute a negative amount so swapping between PAYMENT/REFUND flips
+    // the sign cleanly.
+    const oldDelta = wasRefund ? -(entry.amount || 0) : (entry.amount || 0);
+    const newDelta = isRefund ? -newAmount : newAmount;
+    const delta = newDelta - oldDelta;
     const updatedPurchase = await Purchase.findOneAndUpdate(
       { id: entry.purchaseId },
       { $inc: { amountPaid: delta } },
@@ -304,6 +347,7 @@ const updatePayment = async (id, body, userId) => {
       {
         $set: {
           amount: newAmount,
+          entryType: newEntryType,
           paymentDate: newPaymentDate,
           paymentMode: newPaymentMode,
           accountId: newAccountId,
@@ -329,7 +373,7 @@ const updatePayment = async (id, body, userId) => {
         txnDate: newPaymentDate,
         societyId: updatedPurchase.societyId,
         accountId: newAccountId,
-        direction: 'OUT',
+        direction: isRefund ? 'IN' : 'OUT',
         amount: newAmount,
         paymentMode: newPaymentMode,
         partyType: 'Vendor',
@@ -337,7 +381,7 @@ const updatePayment = async (id, body, userId) => {
         sourceType: 'PURCHASE_PAYMENT',
         sourceId: id,
         referenceNo: newReferenceNo,
-        remark: newRemark || `Purchase payment - ${updatedPurchase.partyName || ''}`,
+        remark: newRemark || `${isRefund ? 'Purchase refund' : 'Purchase payment'} - ${updatedPurchase.partyName || ''}`,
       }, userId);
     }
   } else {

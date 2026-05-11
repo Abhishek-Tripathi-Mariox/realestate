@@ -5721,9 +5721,14 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
 
 // Ledger Drawer Component (for Partners/Purchases/Sales)
 const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accounts, onAddEntry, onDeleteEntry, onEditEntry }) => {
-  // For sale ledger, default to SALE_PAYMENT; for partner, default to INVESTMENT
-  const defaultEntryType = ledgerType === 'sale' ? 'SALE_PAYMENT' : 'INVESTMENT'
-  
+  // Default entry type by ledger context: partner → INVESTMENT, sale →
+  // SALE_PAYMENT, purchase → PURCHASE_PAYMENT (vs REFUND).
+  const defaultEntryType = ledgerType === 'sale'
+    ? 'SALE_PAYMENT'
+    : ledgerType === 'purchase'
+    ? 'PURCHASE_PAYMENT'
+    : 'INVESTMENT'
+
   const [formData, setFormData] = useState({
     type: defaultEntryType,
     amount: '',
@@ -5746,7 +5751,11 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
   
   // Reset entry type when ledgerType changes
   useEffect(() => {
-    const newDefault = ledgerType === 'sale' ? 'SALE_PAYMENT' : 'INVESTMENT'
+    const newDefault = ledgerType === 'sale'
+      ? 'SALE_PAYMENT'
+      : ledgerType === 'purchase'
+      ? 'PURCHASE_PAYMENT'
+      : 'INVESTMENT'
     setFormData(prev => ({ ...prev, type: newDefault }))
   }, [ledgerType])
 
@@ -5774,14 +5783,20 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
       payload.entryType = formData.type  // Sale ledger uses entryType
       payload.paymentDate = formData.entryDate
     } else {
+      payload.entryType = formData.type  // Purchase: PURCHASE_PAYMENT | REFUND
       payload.paymentDate = formData.entryDate
     }
 
     const ok = await onAddEntry(payload)
     if (ok) {
+      const resetType = ledgerType === 'sale'
+        ? 'SALE_PAYMENT'
+        : ledgerType === 'purchase'
+        ? 'PURCHASE_PAYMENT'
+        : 'INVESTMENT'
       setFormData({
         ...formData,
-        type: ledgerType === 'sale' ? 'SALE_PAYMENT' : 'INVESTMENT',
+        type: resetType,
         amount: '',
         entryDate: '',
         remark: ''
@@ -5811,7 +5826,12 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
       
       return { totalCredits, totalWithdrawals, totalProfitPaid, runningBalance, saleDue }
     } else {
-      const totalAmount = safeEntries.reduce((sum, entry) => sum + entry.amount, 0)
+      // Purchase ledger: PURCHASE_PAYMENT (and legacy entries with no type)
+      // increase totalPaid; REFUND reduces it.
+      const totalAmount = safeEntries.reduce((sum, entry) => {
+        const sign = entry.entryType === 'REFUND' ? -1 : 1
+        return sum + sign * (entry.amount || 0)
+      }, 0)
       const balance = ledgerItem ? ((ledgerItem.dealAmount || ledgerItem.finalAmount) - totalAmount) : 0
       return { totalAmount, balance }
     }
@@ -5824,23 +5844,26 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
       'INVESTMENT': 'Investment',
       'WITHDRAWAL': 'Withdrawal',
       'PROFIT_PAYOUT': 'Profit Payout',
-      'SALE_PAYMENT': 'Sale Payment'
+      'SALE_PAYMENT': 'Sale Payment',
+      'PURCHASE_PAYMENT': 'Payment',
+      'REFUND': 'Refund'
     }
     return labels[type] || type
   }
 
   const getEntryTypeBadgeVariant = (type) => {
-    if (type === 'INVESTMENT' || type === 'SALE_PAYMENT') return 'default'
-    if (type === 'WITHDRAWAL') return 'secondary'
+    if (type === 'INVESTMENT' || type === 'SALE_PAYMENT' || type === 'PURCHASE_PAYMENT') return 'default'
+    if (type === 'WITHDRAWAL' || type === 'REFUND') return 'secondary'
     if (type === 'PROFIT_PAYOUT') return 'outline'
     return 'default'
   }
-  
-  // Check if entry is a credit (money IN)
+
+  // Check if entry is a credit (money IN to the parent's running paid total)
   const isCredit = (entry) => {
     if (ledgerType === 'partner') return entry.type === 'INVESTMENT'
     if (ledgerType === 'sale') return (entry.entryType || 'SALE_PAYMENT') === 'SALE_PAYMENT'
-    return true  // Purchases are always money out, so entries are credits to the vendor
+    if (ledgerType === 'purchase') return (entry.entryType || 'PURCHASE_PAYMENT') === 'PURCHASE_PAYMENT'
+    return true
   }
 
   return (
@@ -6066,6 +6089,20 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                     </Select>
                   </div>
                 )}
+                {ledgerType === 'purchase' && (
+                  <div>
+                    <Label>Entry Type *</Label>
+                    <Select value={formData.type} onValueChange={v => setFormData({...formData, type: v})}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="PURCHASE_PAYMENT">Payment (Debit)</SelectItem>
+                        <SelectItem value="REFUND">Refund (Credit)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <Label>Amount *</Label>
@@ -6140,7 +6177,7 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                   <TableHeader>
                     <TableRow>
                       <TableHead>Date</TableHead>
-                      {(ledgerType === 'partner' || ledgerType === 'sale') && <TableHead>Type</TableHead>}
+                      {(ledgerType === 'partner' || ledgerType === 'sale' || ledgerType === 'purchase') && <TableHead>Type</TableHead>}
                       <TableHead>Amount</TableHead>
                       <TableHead>Mode</TableHead>
                       <TableHead>Remark</TableHead>
@@ -6165,15 +6202,25 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                             </Badge>
                           </TableCell>
                         )}
+                        {ledgerType === 'purchase' && (
+                          <TableCell>
+                            <Badge variant={getEntryTypeBadgeVariant(entry.entryType || 'PURCHASE_PAYMENT')}>
+                              {getEntryTypeLabel(entry.entryType || 'PURCHASE_PAYMENT')}
+                            </Badge>
+                          </TableCell>
+                        )}
                         <TableCell className={`font-medium ${
                           ledgerType === 'partner'
                             ? entry.type === 'INVESTMENT' ? 'text-green-600' : 'text-red-600'
                             : ledgerType === 'sale'
                             ? isCredit(entry) ? 'text-green-600' : 'text-red-600'
+                            : ledgerType === 'purchase'
+                            ? isCredit(entry) ? 'text-green-600' : 'text-red-600'
                             : 'text-green-600'
                         }`}>
                           {ledgerType === 'partner' && entry.type !== 'INVESTMENT' && '-'}
                           {ledgerType === 'sale' && !isCredit(entry) && '-'}
+                          {ledgerType === 'purchase' && !isCredit(entry) && '-'}
                           ₹{fmt(entry.amount)}
                         </TableCell>
                         <TableCell><Badge variant="outline">{entry.paymentMode}</Badge></TableCell>
@@ -6668,7 +6715,9 @@ const EditLedgerEntryForm = ({ entry, ledgerType = 'partner', accounts, onSubmit
     ? (entry?.type || 'INVESTMENT')
     : ledgerType === 'sale'
     ? (entry?.entryType || 'SALE_PAYMENT')
-    : 'PAYMENT'; // purchase — fixed, never sent
+    : ledgerType === 'purchase'
+    ? (entry?.entryType || 'PURCHASE_PAYMENT')
+    : 'PAYMENT';
 
   const initialDate = (entry?.entryDate || entry?.paymentDate || '').split('T')[0];
 
@@ -6684,7 +6733,7 @@ const EditLedgerEntryForm = ({ entry, ledgerType = 'partner', accounts, onSubmit
   const [error, setError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
 
-  const showTypeField = ledgerType === 'partner' || ledgerType === 'sale';
+  const showTypeField = ledgerType === 'partner' || ledgerType === 'sale' || ledgerType === 'purchase';
 
   // Generate idempotency key once when form opens
   const [editGroupId] = useState(() => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`)
@@ -6774,11 +6823,16 @@ const EditLedgerEntryForm = ({ entry, ledgerType = 'partner', accounts, onSubmit
                   <SelectItem value="WITHDRAWAL">Withdrawal (Capital OUT)</SelectItem>
                   <SelectItem value="PROFIT_PAYOUT">Profit Payout</SelectItem>
                 </>
-              ) : (
+              ) : ledgerType === 'sale' ? (
                 <>
                   <SelectItem value="SALE_PAYMENT">Sale Payment (Credit)</SelectItem>
                   <SelectItem value="WITHDRAWAL">Withdrawal (Debit)</SelectItem>
                   <SelectItem value="PROFIT_PAYOUT">Profit Payout (Debit)</SelectItem>
+                </>
+              ) : (
+                <>
+                  <SelectItem value="PURCHASE_PAYMENT">Payment (Debit)</SelectItem>
+                  <SelectItem value="REFUND">Refund (Credit)</SelectItem>
                 </>
               )}
             </SelectContent>

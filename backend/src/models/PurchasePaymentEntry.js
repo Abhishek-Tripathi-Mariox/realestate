@@ -8,6 +8,7 @@ const schema = buildSchema({
   amount: Number,
   paymentDate: String,
   paymentMode: String,
+  entryType: { type: String, default: 'PURCHASE_PAYMENT' },
   referenceNo: String,
   remark: String,
   createdBy: String,
