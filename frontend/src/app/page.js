@@ -1551,10 +1551,37 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
   // Expense Bill Management
   const handleCreateExpenseBill = async (formData) => {
     try {
-      await apiCall('/expense-bills', 'POST', { ...formData, societyId: selectedSociety })
+      // `initialPayment` lives on the form payload only — the bill endpoint
+      // doesn't accept it, so strip it before POSTing and replay it as a
+      // separate POST to /payments once we have the new bill id.
+      const { initialPayment, ...billBody } = formData
+      const bill = await apiCall('/expense-bills', 'POST', { ...billBody, societyId: selectedSociety })
+
+      if (initialPayment && bill?.id && initialPayment.amount > 0) {
+        try {
+          await apiCall(`/expense-bills/${bill.id}/payments`, 'POST', initialPayment)
+        } catch (payErr) {
+          // Bill saved but payment failed — surface it so the user can retry
+          // the payment manually instead of losing the work entry.
+          toast({
+            title: 'Work saved, payment failed',
+            description: payErr.message || 'Add the payment from the bill drawer.',
+            variant: 'destructive',
+          })
+          await loadSocietyData()
+          if (vendorLedgerItem) await openVendorLedger(vendorLedgerItem)
+          setIsDialogOpen(false)
+          return
+        }
+      }
+
       await loadSocietyData()
+      if (vendorLedgerItem) await openVendorLedger(vendorLedgerItem)
       setIsDialogOpen(false)
-      toast({ title: 'Success', description: 'Expense bill created successfully' })
+      toast({
+        title: 'Success',
+        description: initialPayment ? 'Work entry saved with payment' : 'Expense bill created successfully',
+      })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
     }
@@ -3649,6 +3676,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                     <ExpenseBillForm
                       vendors={vendors}
                       categories={expenseCategories}
+                      accounts={accounts}
                       initialData={addWorkVendor
                         ? {
                             vendorId: addWorkVendor.id,
@@ -7492,7 +7520,7 @@ const VendorForm = ({ vendor, onSubmit, onCancel, vendorTypes = [], onAddNewType
 }
 
 // Expense Bill Form Component
-const ExpenseBillForm = ({ vendors, categories = [], onSubmit, onCancel, onAddNewCategory, initialData }) => {
+const ExpenseBillForm = ({ vendors, categories = [], accounts = [], onSubmit, onCancel, onAddNewCategory, initialData }) => {
   const { toast } = useToast()
   const isEdit = Boolean(initialData?.id)
   // Use dynamic categories if available, fallback to hardcoded
@@ -7531,12 +7559,57 @@ const ExpenseBillForm = ({ vendors, categories = [], onSubmit, onCancel, onAddNe
   const [newCategoryName, setNewCategoryName] = useState('')
   const [isAddingCategory, setIsAddingCategory] = useState(false)
 
+  // Inline first-payment capture (only for new bills). Lets the user record
+  // an advance/partial payment in the same submit instead of opening the
+  // payment drawer after creating the bill.
+  const [paymentMadeNow, setPaymentMadeNow] = useState(false)
+  const [paymentData, setPaymentData] = useState({
+    paidAmount: '',
+    paymentMode: 'Cash',
+    accountId: '',
+    referenceNo: '',
+    paymentRemark: '',
+  })
+
+  // Default the account to the first one matching the chosen mode whenever
+  // mode flips or accounts list arrives.
+  useEffect(() => {
+    if (!paymentMadeNow) return
+    const wantType = paymentData.paymentMode === 'Cash' ? 'CASH' : 'BANK'
+    const eligible = (accounts || []).filter(a => a.type === wantType)
+    if (!eligible.length) return
+    const stillValid = eligible.find(a => a.id === paymentData.accountId)
+    if (stillValid) return
+    const def = eligible.find(a => a.isDefault) || eligible[0]
+    setPaymentData(prev => ({ ...prev, accountId: def.id }))
+  }, [paymentMadeNow, paymentData.paymentMode, accounts])
+
+  const workValue = parseFloat(formData.billAmount) || 0
+  const paidNow = paymentMadeNow ? (parseFloat(paymentData.paidAmount) || 0) : 0
+  const pendingAfterSave = Math.max(0, workValue - paidNow)
+  const paymentExceeds = paymentMadeNow && paidNow > workValue
+
   const handleSubmit = (e) => {
     e.preventDefault()
-    onSubmit({
+    if (paymentExceeds) {
+      toast({ title: 'Invalid payment', description: 'Paid amount cannot exceed work value', variant: 'destructive' })
+      return
+    }
+    const payload = {
       ...formData,
-      billAmount: parseFloat(formData.billAmount)
-    })
+      billAmount: workValue,
+    }
+    if (!isEdit && paymentMadeNow && paidNow > 0) {
+      payload.initialPayment = {
+        amount: paidNow,
+        paymentDate: formData.billDate,
+        paymentMode: paymentData.paymentMode,
+        accountId: paymentData.accountId,
+        referenceNo: paymentData.referenceNo,
+        remark: paymentData.paymentRemark,
+      }
+    }
+    onSubmit(payload)
   }
 
   const handleAddNewCategory = async () => {
@@ -7640,9 +7713,101 @@ const ExpenseBillForm = ({ vendors, categories = [], onSubmit, onCancel, onAddNe
         <Textarea value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} />
       </div>
       {!isEdit && (
-        <p className="text-sm text-gray-500 bg-blue-50 p-3 rounded">
-          Note: This creates a bill (amount due). You can add payments separately after creating the bill.
-        </p>
+        <div className={`rounded-md border ${paymentMadeNow ? 'border-emerald-300 bg-emerald-50/50' : 'border-slate-200'} p-3 space-y-3`}>
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="h-4 w-4 accent-emerald-600"
+              checked={paymentMadeNow}
+              onChange={(e) => setPaymentMadeNow(e.target.checked)}
+            />
+            <span className="font-medium">Payment Made Now</span>
+            <span className="text-sm text-slate-500">— record advance/full payment along with this work</span>
+          </label>
+          {paymentMadeNow && (
+            <div className="space-y-3 pt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <Label>Paid Amount (₹) *</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={paymentData.paidAmount}
+                    onChange={(e) => setPaymentData({ ...paymentData, paidAmount: e.target.value })}
+                    required
+                  />
+                  {paymentExceeds && (
+                    <p className="text-xs text-red-600 mt-1">Paid amount cannot exceed work value</p>
+                  )}
+                </div>
+                <div>
+                  <Label>Payment Mode *</Label>
+                  <Select
+                    value={paymentData.paymentMode}
+                    onValueChange={(v) => setPaymentData({ ...paymentData, paymentMode: v, accountId: '' })}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {PAYMENT_MODES.map(m => (
+                        <SelectItem key={m} value={m}>{m}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <Label>From Account</Label>
+                  <Select
+                    value={paymentData.accountId}
+                    onValueChange={(v) => setPaymentData({ ...paymentData, accountId: v })}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
+                    <SelectContent>
+                      {(accounts || [])
+                        .filter(a => paymentData.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK')
+                        .map(a => (
+                          <SelectItem key={a.id} value={a.id}>{a.name} ({a.type})</SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label>Reference / Cheque No <span className="text-xs text-slate-500">recommended</span></Label>
+                  <Input
+                    placeholder="Txn / Ref"
+                    value={paymentData.referenceNo}
+                    onChange={(e) => setPaymentData({ ...paymentData, referenceNo: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div>
+                <Label>Payment Remark</Label>
+                <Input
+                  value={paymentData.paymentRemark}
+                  onChange={(e) => setPaymentData({ ...paymentData, paymentRemark: e.target.value })}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {!isEdit && (
+        <div className="grid grid-cols-3 gap-3 rounded-md border bg-slate-50 p-3 text-center">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-slate-500">Work Value</p>
+            <p className="text-lg font-bold text-blue-700">₹{fmt(workValue)}</p>
+          </div>
+          <div>
+            <p className="text-xs uppercase tracking-wide text-slate-500">Paid Now</p>
+            <p className="text-lg font-bold text-emerald-700">₹{fmt(paidNow)}</p>
+          </div>
+          <div>
+            <p className="text-xs uppercase tracking-wide text-slate-500">Pending After Save</p>
+            <p className={`text-lg font-bold ${pendingAfterSave > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{fmt(pendingAfterSave)}</p>
+          </div>
+        </div>
       )}
       {isEdit && (initialData?.totalPaid ?? initialData?.paidAmount ?? 0) > 0 && (
         <p className="text-sm text-orange-700 bg-orange-50 p-3 rounded">
@@ -7651,7 +7816,9 @@ const ExpenseBillForm = ({ vendors, categories = [], onSubmit, onCancel, onAddNe
       )}
       <div className="flex justify-end space-x-2">
         <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button type="submit" disabled={vendors.length === 0}>{isEdit ? 'Update Bill' : 'Create Bill'}</Button>
+        <Button type="submit" disabled={vendors.length === 0 || paymentExceeds}>
+          {isEdit ? 'Update Bill' : (paymentMadeNow && paidNow > 0 ? 'Save Work + Payment' : 'Add Work Entry')}
+        </Button>
       </div>
     </form>
   )
