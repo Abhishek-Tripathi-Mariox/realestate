@@ -757,6 +757,34 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     }
   }
 
+  const handleTransferBetweenSales = async (payload) => {
+    if (!ledgerItem?.id) return false
+    try {
+      await apiCall(`/sales/${ledgerItem.id}/transfer`, 'POST', payload)
+      await openLedger('sale', ledgerItem)
+      await loadSocietyData()
+      toast({ title: 'Success', description: 'Amount transferred between sales' })
+      return true
+    } catch (error) {
+      toast({ title: 'Transfer failed', description: error.message, variant: 'destructive' })
+      return false
+    }
+  }
+
+  const handleUpdateTransfer = async (transferGroupId, payload) => {
+    if (!transferGroupId) return false
+    try {
+      await apiCall(`/sale-transfers/${transferGroupId}`, 'PUT', payload)
+      if (ledgerItem) await openLedger('sale', ledgerItem)
+      await loadSocietyData()
+      toast({ title: 'Success', description: 'Transfer updated' })
+      return true
+    } catch (error) {
+      toast({ title: 'Update failed', description: error.message, variant: 'destructive' })
+      return false
+    }
+  }
+
   const handleUpdateLedgerEntry = async (formData) => {
     try {
       // Each ledger type has its own PUT endpoint — the per-resource service
@@ -4086,14 +4114,17 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
       </div>
 
       {/* Partner/Purchase/Sale Ledger Drawer */}
-      <LedgerDrawer 
+      <LedgerDrawer
         isOpen={isLedgerDrawerOpen}
         onClose={() => setIsLedgerDrawerOpen(false)}
         ledgerType={ledgerType}
         ledgerItem={ledgerItem}
         entries={ledgerEntries}
         accounts={accounts}
+        sales={sales}
         onAddEntry={handleAddLedgerEntry}
+        onTransfer={handleTransferBetweenSales}
+        onUpdateTransfer={handleUpdateTransfer}
         onDeleteEntry={handleDeleteLedgerEntry}
         onEditEntry={(entry) => setEditingLedgerEntry(entry)}
       />
@@ -5748,7 +5779,7 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
 }
 
 // Ledger Drawer Component (for Partners/Purchases/Sales)
-const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accounts, onAddEntry, onDeleteEntry, onEditEntry }) => {
+const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accounts, sales = [], onAddEntry, onTransfer, onUpdateTransfer, onDeleteEntry, onEditEntry }) => {
   // Default entry type by ledger context: partner → INVESTMENT, sale →
   // SALE_PAYMENT, purchase → PURCHASE_PAYMENT (vs REFUND).
   const defaultEntryType = ledgerType === 'sale'
@@ -5766,6 +5797,38 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
     remark: ''
   })
   const [showAddForm, setShowAddForm] = useState(false)
+  const [showTransferDialog, setShowTransferDialog] = useState(false)
+  const [transferForm, setTransferForm] = useState({
+    destinationSaleId: '',
+    amount: '',
+    transferDate: '',
+    remark: '',
+  })
+  const [transferBusy, setTransferBusy] = useState(false)
+  const [editingTransfer, setEditingTransfer] = useState(null)
+  const [editTransferForm, setEditTransferForm] = useState({ amount: '', transferDate: '', remark: '' })
+  const [editTransferBusy, setEditTransferBusy] = useState(false)
+
+  useEffect(() => {
+    if (editingTransfer) {
+      setEditTransferForm({
+        amount: (editingTransfer.amount ?? '').toString(),
+        transferDate: (editingTransfer.paymentDate || '').toString().split('T')[0],
+        remark: editingTransfer.remark || '',
+      })
+    }
+  }, [editingTransfer])
+
+  // Sales of the same customer (excluding this one and any TRANSFERRED ones)
+  // — destination options for an internal transfer.
+  const sameCustomerSales = (ledgerType === 'sale' && ledgerItem?.customerId)
+    ? (sales || []).filter(s =>
+        s.id !== ledgerItem.id
+        && s.customerId === ledgerItem.customerId
+        && s.status !== 'TRANSFERRED'
+        && !s.isDeleted
+      )
+    : []
 
   // Set default account on mount, matching the selected payment mode
   useEffect(() => {
@@ -5845,14 +5908,19 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
       
       return { totalInvestment, totalWithdrawal, totalProfitPaid, runningBalance }
     } else if (ledgerType === 'sale') {
-      // Sale Ledger: Credits - (Withdrawals + Profit Payouts) = Running Balance
-      const totalCredits = safeEntries.filter(e => (e.entryType || 'SALE_PAYMENT') === 'SALE_PAYMENT').reduce((sum, e) => sum + e.amount, 0)
+      // Sale Ledger: Credits (SALE_PAYMENT + TRANSFER_IN) minus debits
+      // (WITHDRAWAL + PROFIT_PAYOUT + TRANSFER_OUT) = Running Balance.
+      const isSaleCredit = (t) => t === 'SALE_PAYMENT' || t === 'TRANSFER_IN'
+      const totalCredits = safeEntries
+        .filter(e => isSaleCredit(e.entryType || 'SALE_PAYMENT'))
+        .reduce((sum, e) => sum + e.amount, 0)
       const totalWithdrawals = safeEntries.filter(e => e.entryType === 'WITHDRAWAL').reduce((sum, e) => sum + e.amount, 0)
       const totalProfitPaid = safeEntries.filter(e => e.entryType === 'PROFIT_PAYOUT').reduce((sum, e) => sum + e.amount, 0)
-      const runningBalance = totalCredits - totalWithdrawals - totalProfitPaid
+      const totalTransfersOut = safeEntries.filter(e => e.entryType === 'TRANSFER_OUT').reduce((sum, e) => sum + e.amount, 0)
+      const runningBalance = totalCredits - totalWithdrawals - totalProfitPaid - totalTransfersOut
       const saleDue = ledgerItem ? (ledgerItem.finalAmount || 0) - runningBalance : 0
-      
-      return { totalCredits, totalWithdrawals, totalProfitPaid, runningBalance, saleDue }
+
+      return { totalCredits, totalWithdrawals, totalProfitPaid, totalTransfersOut, runningBalance, saleDue }
     } else {
       // Purchase ledger: PURCHASE_PAYMENT (and legacy entries with no type)
       // increase totalPaid; REFUND reduces it.
@@ -5874,27 +5942,34 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
       'PROFIT_PAYOUT': 'Profit Payout',
       'SALE_PAYMENT': 'Sale Payment',
       'PURCHASE_PAYMENT': 'Payment',
-      'REFUND': 'Refund'
+      'REFUND': 'Refund',
+      'TRANSFER_IN': 'Transfer In',
+      'TRANSFER_OUT': 'Transfer Out',
     }
     return labels[type] || type
   }
 
   const getEntryTypeBadgeVariant = (type) => {
     if (type === 'INVESTMENT' || type === 'SALE_PAYMENT' || type === 'PURCHASE_PAYMENT') return 'default'
-    if (type === 'WITHDRAWAL' || type === 'REFUND') return 'secondary'
+    if (type === 'WITHDRAWAL' || type === 'REFUND' || type === 'TRANSFER_OUT') return 'secondary'
     if (type === 'PROFIT_PAYOUT') return 'outline'
+    if (type === 'TRANSFER_IN') return 'default'
     return 'default'
   }
 
   // Check if entry is a credit (money IN to the parent's running paid total)
   const isCredit = (entry) => {
     if (ledgerType === 'partner') return entry.type === 'INVESTMENT'
-    if (ledgerType === 'sale') return (entry.entryType || 'SALE_PAYMENT') === 'SALE_PAYMENT'
+    if (ledgerType === 'sale') {
+      const t = entry.entryType || 'SALE_PAYMENT'
+      return t === 'SALE_PAYMENT' || t === 'TRANSFER_IN'
+    }
     if (ledgerType === 'purchase') return (entry.entryType || 'PURCHASE_PAYMENT') === 'PURCHASE_PAYMENT'
     return true
   }
 
   return (
+    <>
     <Drawer open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
       <DrawerContent className="max-h-[90vh]">
         <DrawerHeader>
@@ -5903,7 +5978,7 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
             {ledgerType === 'partner'
               ? 'View and manage capital account entries (investments, withdrawals, profit payouts)'
               : ledgerType === 'sale'
-              ? 'View and manage sale ledger entries (payments, withdrawals, profit payouts)'
+              ? 'View and manage sale ledger entries (payments, withdrawals, profit payouts, internal transfers)'
               : `View and manage ${ledgerType === 'purchase' ? 'purchase' : 'sale'} payment entries`
             }
           </DrawerDescription>
@@ -6064,14 +6139,28 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
               </CardContent>
             </Card>
           ) : !showAddForm ? (
-            <Button
-              type="button"
-              variant="outline"
-              className="w-full mb-4"
-              onClick={() => setShowAddForm(true)}
-            >
-              <Plus className="w-4 h-4 mr-2" /> Add New Entry
-            </Button>
+            <div className={`mb-4 grid gap-2 ${ledgerType === 'sale' && sameCustomerSales.length > 0 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'}`}>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={() => setShowAddForm(true)}
+              >
+                <Plus className="w-4 h-4 mr-2" /> Add New Entry
+              </Button>
+              {ledgerType === 'sale' && sameCustomerSales.length > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full border-indigo-300 text-indigo-700 hover:bg-indigo-50"
+                  onClick={() => setShowTransferDialog(true)}
+                  disabled={totals.runningBalance <= 0}
+                  title={totals.runningBalance <= 0 ? 'Source has no paid balance to transfer' : 'Move paid amount to another sale of this customer'}
+                >
+                  <ArrowRightLeft className="w-4 h-4 mr-2" /> Transfer to another sale
+                </Button>
+              )}
+            </div>
           ) : (
           <Card className="mb-4">
             <CardHeader className="flex flex-row items-center justify-between">
@@ -6258,7 +6347,18 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                             {(ledgerType === 'partner' || ledgerType === 'purchase' || ledgerType === 'sale')
                               && onEditEntry
                               && entry.source !== 'CUSTOMER_PAYMENT_ALLOCATION' && (
-                              <Button variant="outline" size="sm" onClick={() => onEditEntry(entry)} title="Edit entry">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  if (entry.entryType === 'TRANSFER_IN' || entry.entryType === 'TRANSFER_OUT') {
+                                    setEditingTransfer(entry)
+                                  } else {
+                                    onEditEntry(entry)
+                                  }
+                                }}
+                                title="Edit entry"
+                              >
                                 <Pencil className="w-4 h-4" />
                               </Button>
                             )}
@@ -6275,7 +6375,9 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                                   <AlertDialogHeader>
                                     <AlertDialogTitle>Delete Entry?</AlertDialogTitle>
                                     <AlertDialogDescription>
-                                      This action cannot be undone.
+                                      {(entry.entryType === 'TRANSFER_IN' || entry.entryType === 'TRANSFER_OUT')
+                                        ? 'This is an internal transfer. Deleting it will also remove the paired entry on the other sale and revert both balances.'
+                                        : 'This action cannot be undone.'}
                                     </AlertDialogDescription>
                                   </AlertDialogHeader>
                                   <AlertDialogFooter>
@@ -6301,6 +6403,211 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
         </DrawerFooter>
       </DrawerContent>
     </Drawer>
+
+    {/* Internal Transfer Dialog — moves a paid amount from this sale to
+        another sale of the same customer. No daybook txn is written. */}
+    {ledgerType === 'sale' && (
+      <Dialog open={showTransferDialog} onOpenChange={(open) => { if (!open && !transferBusy) { setShowTransferDialog(false) } }}>
+        <DialogContent className="sm:max-w-[520px]">
+          <DialogHeader>
+            <DialogTitle>Transfer between sales</DialogTitle>
+            <DialogDescription>
+              Move a paid amount from <span className="font-medium">this sale</span> to another sale of the same customer. Cash account balance is not affected.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            className="space-y-3"
+            onSubmit={async (e) => {
+              e.preventDefault()
+              if (!onTransfer) return
+              const amount = parseFloat(transferForm.amount) || 0
+              if (!(amount > 0)) return
+              if (!transferForm.destinationSaleId) return
+              setTransferBusy(true)
+              const ok = await onTransfer({
+                destinationSaleId: transferForm.destinationSaleId,
+                amount,
+                transferDate: transferForm.transferDate,
+                remark: transferForm.remark,
+              })
+              setTransferBusy(false)
+              if (ok) {
+                setShowTransferDialog(false)
+                setTransferForm({ destinationSaleId: '', amount: '', transferDate: '', remark: '' })
+              }
+            }}
+          >
+            <div>
+              <Label>Destination Sale *</Label>
+              <Select
+                value={transferForm.destinationSaleId}
+                onValueChange={(v) => setTransferForm(f => ({ ...f, destinationSaleId: v }))}
+              >
+                <SelectTrigger><SelectValue placeholder="Select another sale of this customer" /></SelectTrigger>
+                <SelectContent>
+                  {sameCustomerSales.map(s => {
+                    const label = s.inventoryNumber && s.inventoryNumber !== 'N/A'
+                      ? `${s.inventoryType || ''} ${s.inventoryNumber} — ₹${fmt(s.finalAmount || 0)}`
+                      : `Sale ${s.id?.slice(0, 6)} — ₹${fmt(s.finalAmount || 0)}`
+                    return (
+                      <SelectItem key={s.id} value={s.id}>{label}</SelectItem>
+                    )
+                  })}
+                </SelectContent>
+              </Select>
+              {sameCustomerSales.length === 0 && (
+                <p className="text-xs text-orange-600 mt-1">No other live sales found for this customer.</p>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <Label>Amount (₹) *</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={transferForm.amount}
+                  onChange={(e) => setTransferForm(f => ({ ...f, amount: e.target.value }))}
+                  required
+                />
+                <p className="text-xs text-slate-500 mt-1">Available from this sale: ₹{fmt(totals.runningBalance || 0)}</p>
+              </div>
+              <div>
+                <Label>Date *</Label>
+                <Input
+                  type="date"
+                  value={transferForm.transferDate}
+                  onChange={(e) => setTransferForm(f => ({ ...f, transferDate: e.target.value }))}
+                  required
+                />
+              </div>
+            </div>
+            <div>
+              <Label>Remark</Label>
+              <Textarea
+                value={transferForm.remark}
+                onChange={(e) => setTransferForm(f => ({ ...f, remark: e.target.value }))}
+                placeholder="Reason for the internal transfer (optional)"
+              />
+            </div>
+            <div className="rounded-md bg-indigo-50 border border-indigo-200 p-3 text-sm text-indigo-700">
+              <strong>Note:</strong> This is an accounting move only. Two linked entries are recorded — <em>Transfer Out</em> on this sale and <em>Transfer In</em> on the destination. Deleting either side reverses both.
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setShowTransferDialog(false)} disabled={transferBusy}>Cancel</Button>
+              <Button
+                type="submit"
+                disabled={transferBusy || !transferForm.destinationSaleId || !(parseFloat(transferForm.amount) > 0) || !transferForm.transferDate}
+              >
+                {transferBusy ? 'Transferring…' : 'Transfer'}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+    )}
+
+    {/* Edit Transfer Dialog — amount / date / remark only. Destination is
+        fixed: to change it, delete and re-create the transfer. */}
+    {ledgerType === 'sale' && editingTransfer && (
+      <Dialog open={!!editingTransfer} onOpenChange={(open) => { if (!open && !editTransferBusy) setEditingTransfer(null) }}>
+        <DialogContent className="sm:max-w-[520px]">
+          <DialogHeader>
+            <DialogTitle>Edit Transfer</DialogTitle>
+            <DialogDescription>
+              Both legs of this transfer update together. Destination can&apos;t be changed — delete and create a new transfer for that.
+            </DialogDescription>
+          </DialogHeader>
+          {(() => {
+            const otherSaleId = (() => {
+              // Sibling sale id: for a TRANSFER_OUT row we're looking at the
+              // source ledger, so the destination is the partner entry on
+              // another sale; for a TRANSFER_IN row it's the reverse.
+              const sibling = (entries || []).find(e =>
+                e.transferGroupId === editingTransfer.transferGroupId
+                && e.id !== editingTransfer.id
+              )
+              return sibling?.saleId || null
+            })()
+            const otherSale = otherSaleId ? (sales || []).find(s => s.id === otherSaleId) : null
+            const otherLabel = otherSale
+              ? (otherSale.inventoryNumber && otherSale.inventoryNumber !== 'N/A'
+                  ? `${otherSale.inventoryType || ''} ${otherSale.inventoryNumber} — ₹${fmt(otherSale.finalAmount || 0)}`
+                  : `Sale ${otherSale.id?.slice(0, 6)} — ₹${fmt(otherSale.finalAmount || 0)}`)
+              : (otherSaleId ? `Sale ${otherSaleId.slice(0, 6)}` : 'Other sale')
+            const directionLabel = editingTransfer.entryType === 'TRANSFER_OUT'
+              ? `Transfer Out → ${otherLabel}`
+              : `Transfer In ← ${otherLabel}`
+            return (
+              <form
+                className="space-y-3"
+                onSubmit={async (e) => {
+                  e.preventDefault()
+                  if (!onUpdateTransfer || !editingTransfer.transferGroupId) return
+                  const amount = parseFloat(editTransferForm.amount) || 0
+                  if (!(amount > 0)) return
+                  setEditTransferBusy(true)
+                  const ok = await onUpdateTransfer(editingTransfer.transferGroupId, {
+                    amount,
+                    transferDate: editTransferForm.transferDate,
+                    remark: editTransferForm.remark,
+                  })
+                  setEditTransferBusy(false)
+                  if (ok) setEditingTransfer(null)
+                }}
+              >
+                <div className="rounded-md bg-slate-50 border p-3 text-sm">
+                  <p className="text-slate-500">Direction</p>
+                  <p className="font-medium">{directionLabel}</p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <Label>Amount (₹) *</Label>
+                    <Input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={editTransferForm.amount}
+                      onChange={(e) => setEditTransferForm(f => ({ ...f, amount: e.target.value }))}
+                      required
+                    />
+                  </div>
+                  <div>
+                    <Label>Date *</Label>
+                    <Input
+                      type="date"
+                      value={editTransferForm.transferDate}
+                      onChange={(e) => setEditTransferForm(f => ({ ...f, transferDate: e.target.value }))}
+                      required
+                    />
+                  </div>
+                </div>
+                <div>
+                  <Label>Remark</Label>
+                  <Textarea
+                    value={editTransferForm.remark}
+                    onChange={(e) => setEditTransferForm(f => ({ ...f, remark: e.target.value }))}
+                  />
+                </div>
+                <div className="rounded-md bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
+                  <strong>Note:</strong> Source must still have enough paid balance and destination must have enough remaining due for the new amount.
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button type="button" variant="outline" onClick={() => setEditingTransfer(null)} disabled={editTransferBusy}>Cancel</Button>
+                  <Button
+                    type="submit"
+                    disabled={editTransferBusy || !(parseFloat(editTransferForm.amount) > 0) || !editTransferForm.transferDate}
+                  >
+                    {editTransferBusy ? 'Saving…' : 'Update Transfer'}
+                  </Button>
+                </div>
+              </form>
+            )
+          })()}
+        </DialogContent>
+      </Dialog>
+    )}
+    </>
   )
 }
 

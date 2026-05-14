@@ -188,7 +188,8 @@ const setAllocations = async (paymentId, body, userId) => {
     }, {});
     const ledgerNetBySale = ledgerEntries.reduce((acc, e) => {
       const t = e.entryType || 'SALE_PAYMENT';
-      const delta = t === 'SALE_PAYMENT' ? (e.amount || 0) : -(e.amount || 0);
+      const isCredit = t === 'SALE_PAYMENT' || t === 'TRANSFER_IN';
+      const delta = isCredit ? (e.amount || 0) : -(e.amount || 0);
       acc[e.saleId] = (acc[e.saleId] || 0) + delta;
       return acc;
     }, {});

@@ -16,6 +16,7 @@ flatRouter.get('/:saleId/payments', verifyToken, ctrl.listPayments);
 flatRouter.post('/:saleId/payments', verifyToken, ctrl.addPayment);
 flatRouter.get('/:saleId/ledger', verifyToken, ctrl.listLedger);
 flatRouter.post('/:saleId/ledger', verifyToken, ctrl.addLedgerEntry);
+flatRouter.post('/:saleId/transfer', verifyToken, ctrl.transferBetweenSales);
 flatRouter.get('/:id', verifyToken, ctrl.getById);
 flatRouter.put('/:id', verifyToken, ctrl.update);
 flatRouter.delete('/:id', verifyToken, ctrl.remove);
@@ -25,4 +26,8 @@ const salePaymentsRouter = express.Router();
 salePaymentsRouter.put('/:id', verifyToken, ctrl.updateSalePayment);
 salePaymentsRouter.delete('/:id', verifyToken, ctrl.deleteSalePayment);
 
-module.exports = { societyScopedRouter, flatRouter, salePaymentsRouter };
+// Standalone: /api/sale-transfers/:transferGroupId
+const saleTransfersRouter = express.Router();
+saleTransfersRouter.put('/:transferGroupId', verifyToken, ctrl.updateTransfer);
+
+module.exports = { societyScopedRouter, flatRouter, salePaymentsRouter, saleTransfersRouter };

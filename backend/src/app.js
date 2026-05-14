@@ -65,6 +65,7 @@ app.use('/api/purchases', purchasesRoutes.flatRouter);
 app.use('/api/purchase-payments', purchasesRoutes.purchasePaymentsRouter);
 app.use('/api/sales', salesRoutes.flatRouter);
 app.use('/api/sale-payments', salesRoutes.salePaymentsRouter);
+app.use('/api/sale-transfers', salesRoutes.saleTransfersRouter);
 app.use('/api/customers', customersRoutes);
 app.use('/api/customer-payments', customerPaymentsRoutes);
 app.use('/api/accounts', accountsRoutes);

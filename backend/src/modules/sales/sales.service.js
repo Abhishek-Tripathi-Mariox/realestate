@@ -17,6 +17,16 @@ const SALE_UPDATABLE = [
 
 const stripId = ({ _id, ...rest }) => rest;
 
+// Credit-side entry types contribute positively to a sale's net amountPaid:
+// regular SALE_PAYMENT receipts and the IN leg of an internal inter-sale
+// transfer. Everything else (WITHDRAWAL, PROFIT_PAYOUT, TRANSFER_OUT)
+// reduces it.
+const isCreditEntryType = (t) => t === 'SALE_PAYMENT' || t === 'TRANSFER_IN';
+const signedDelta = (entry) => {
+  const t = entry?.entryType || 'SALE_PAYMENT';
+  return isCreditEntryType(t) ? (entry.amount || 0) : -(entry.amount || 0);
+};
+
 const listForSociety = async (societyId) => {
   const sales = await Sale.find(notDeleted({ societyId })).lean();
   const saleIds = sales.map(s => s.id);
@@ -38,9 +48,7 @@ const listForSociety = async (societyId) => {
     ? await SalePaymentEntry.find(notDeleted({ saleId: { $in: saleIds } })).lean()
     : [];
   const ledgerNetBySale = ledgerEntries.reduce((acc, e) => {
-    const type = e.entryType || 'SALE_PAYMENT';
-    const delta = type === 'SALE_PAYMENT' ? (e.amount || 0) : -(e.amount || 0);
-    acc[e.saleId] = (acc[e.saleId] || 0) + delta;
+    acc[e.saleId] = (acc[e.saleId] || 0) + signedDelta(e);
     return acc;
   }, {});
 
@@ -165,8 +173,10 @@ const getById = async (id) => {
     .find(notDeleted({
       saleId: id,
       // $nin (not $or) so the entryType filter isn't overwritten by
-      // notDeleted()'s own $or via object-spread last-key-wins.
-      entryType: { $nin: ['WITHDRAWAL', 'PROFIT_PAYOUT'] },
+      // notDeleted()'s own $or via object-spread last-key-wins. Excludes
+      // debit-side types from the "Payments" list view; the running net
+      // balance is recomputed from all entries below.
+      entryType: { $nin: ['WITHDRAWAL', 'PROFIT_PAYOUT', 'TRANSFER_OUT'] },
     }))
     .sort({ paymentDate: -1 })
     .lean();
@@ -185,13 +195,10 @@ const getById = async (id) => {
   const allocations = await PaymentAllocation.find({ saleId: id }).lean();
   const allocatedTotal = allocations.reduce((sum, a) => sum + (a.amount || 0), 0);
 
-  // Recompute net ledger balance from entries (credits minus withdrawals /
-  // profit payouts) so legacy rows with stale Sale.amountPaid self-heal.
+  // Recompute net ledger balance from entries (credits minus debits) so
+  // legacy rows with stale Sale.amountPaid self-heal.
   const allEntries = await SalePaymentEntry.find(notDeleted({ saleId: id })).lean();
-  const ledgerNet = allEntries.reduce((sum, e) => {
-    const type = e.entryType || 'SALE_PAYMENT';
-    return sum + (type === 'SALE_PAYMENT' ? (e.amount || 0) : -(e.amount || 0));
-  }, 0);
+  const ledgerNet = allEntries.reduce((sum, e) => sum + signedDelta(e), 0);
 
   const totalPaid = ledgerNet + allocatedTotal;
   const balance = sale.status === 'TRANSFERRED' ? 0 : (sale.finalAmount || 0) - totalPaid;
@@ -406,6 +413,9 @@ const addLedgerEntry = async (saleId, body, userId) => {
   }
 
   const entryType = body.entryType || 'SALE_PAYMENT';
+  if (entryType === 'TRANSFER_IN' || entryType === 'TRANSFER_OUT') {
+    return { error: 'Transfer entries must be created via /sales/:id/transfer', status: 400 };
+  }
   const amount = parseFloat(body.amount) || 0;
 
   if (amount <= 0) {
@@ -419,10 +429,8 @@ const addLedgerEntry = async (saleId, body, userId) => {
       .find(notDeleted({ saleId }))
       .lean();
     const allocations = await PaymentAllocation.find({ saleId }).lean();
-    const currentNet = existingEntries.reduce((sum, e) => {
-      const t = e.entryType || 'SALE_PAYMENT';
-      return sum + (t === 'SALE_PAYMENT' ? (e.amount || 0) : -(e.amount || 0));
-    }, 0) + allocations.reduce((sum, a) => sum + (a.amount || 0), 0);
+    const currentNet = existingEntries.reduce((sum, e) => sum + signedDelta(e), 0)
+      + allocations.reduce((sum, a) => sum + (a.amount || 0), 0);
     const remaining = (sale.finalAmount || 0) - currentNet;
     if (remaining <= 0) {
       return {
@@ -460,7 +468,7 @@ const addLedgerEntry = async (saleId, body, userId) => {
   // SALE_PAYMENT increases it; WITHDRAWAL / PROFIT_PAYOUT decrease it so the
   // Sales tab's totalPaid stays in sync with the Sale Ledger's running balance.
   // Use $inc so concurrent ledger entries can't lose updates.
-  const delta = entryType === 'SALE_PAYMENT' ? amount : -amount;
+  const delta = isCreditEntryType(entryType) ? amount : -amount;
   const updatedSale = await Sale.findOneAndUpdate(
     { id: saleId },
     { $inc: { amountPaid: delta } },
@@ -472,7 +480,7 @@ const addLedgerEntry = async (saleId, body, userId) => {
     : (gteMoney(newAmountPaid, sale.finalAmount || 0) ? 'Paid' : 'Partial');
   await Sale.updateOne({ id: saleId }, { $set: { paymentStatus } });
 
-  const direction = entryType === 'SALE_PAYMENT' ? 'IN' : 'OUT';
+  const direction = isCreditEntryType(entryType) ? 'IN' : 'OUT';
   await createTransaction({
     txnDate: body.paymentDate,
     societyId: sale.societyId,
@@ -489,10 +497,265 @@ const addLedgerEntry = async (saleId, body, userId) => {
 
   return entry;
 };
+// Internal inter-sale transfer: moves a paid amount from one of a
+// customer's sales to another sale of the SAME customer. No cash actually
+// moves, so no daybook transaction is written. Records a paired
+// TRANSFER_OUT (source) + TRANSFER_IN (destination) on the ledger, linked
+// by a shared transferGroupId so they can be deleted together later.
+const transferBetweenSales = async (sourceSaleId, body, userId) => {
+  const destinationSaleId = body.destinationSaleId;
+  if (!destinationSaleId) {
+    return { error: 'destinationSaleId is required', status: 400 };
+  }
+  if (destinationSaleId === sourceSaleId) {
+    return { error: 'Source and destination must be different sales', status: 400 };
+  }
+  const amount = parseFloat(body.amount) || 0;
+  if (!(amount > 0)) {
+    return { error: 'Amount must be greater than zero', status: 400 };
+  }
+
+  const [source, destination] = await Promise.all([
+    Sale.findOne({ id: sourceSaleId }).lean(),
+    Sale.findOne({ id: destinationSaleId }).lean(),
+  ]);
+  if (!source || source.isDeleted) return { error: 'Source sale not found', status: 404 };
+  if (!destination || destination.isDeleted) return { error: 'Destination sale not found', status: 404 };
+  if (source.status === 'TRANSFERRED' || destination.status === 'TRANSFERRED') {
+    return { error: 'Transferred sales can\'t participate in internal transfers', status: 400 };
+  }
+  if (!source.customerId || source.customerId !== destination.customerId) {
+    return { error: 'Both sales must belong to the same customer', status: 400 };
+  }
+
+  // Source must have enough net paid balance to hand over.
+  const sourceEntries = await SalePaymentEntry.find(notDeleted({ saleId: sourceSaleId })).lean();
+  const sourceAllocs = await PaymentAllocation.find({ saleId: sourceSaleId }).lean();
+  const sourcePaid = sourceEntries.reduce((s, e) => s + signedDelta(e), 0)
+    + sourceAllocs.reduce((s, a) => s + (a.amount || 0), 0);
+  if (amount > sourcePaid + 0.01) {
+    const fmt = (n) => `₹${(n || 0).toLocaleString('en-IN')}`;
+    return {
+      error: `Transfer ${fmt(amount)} exceeds source sale's paid balance ${fmt(sourcePaid)}.`,
+      status: 400,
+    };
+  }
+
+  // Destination must have remaining capacity.
+  const destEntries = await SalePaymentEntry.find(notDeleted({ saleId: destinationSaleId })).lean();
+  const destAllocs = await PaymentAllocation.find({ saleId: destinationSaleId }).lean();
+  const destPaid = destEntries.reduce((s, e) => s + signedDelta(e), 0)
+    + destAllocs.reduce((s, a) => s + (a.amount || 0), 0);
+  const destRemaining = (destination.finalAmount || 0) - destPaid;
+  if (amount > destRemaining + 0.01) {
+    const fmt = (n) => `₹${(n || 0).toLocaleString('en-IN')}`;
+    return {
+      error: `Transfer ${fmt(amount)} exceeds destination sale's remaining due ${fmt(destRemaining)}.`,
+      status: 400,
+    };
+  }
+
+  const transferGroupId = uuidv4();
+  const transferDate = body.transferDate || body.paymentDate || new Date().toISOString().slice(0, 10);
+  const remark = body.remark || '';
+
+  const outEntry = {
+    id: uuidv4(),
+    saleId: sourceSaleId,
+    societyId: source.societyId,
+    accountId: null,
+    entryType: 'TRANSFER_OUT',
+    amount,
+    paymentDate: transferDate,
+    paymentMode: 'Internal',
+    transferGroupId,
+    referenceNo: '',
+    remark: remark || `Transfer to sale ${destinationSaleId}`,
+    createdBy: userId,
+    createdAt: new Date(),
+  };
+  const inEntry = {
+    id: uuidv4(),
+    saleId: destinationSaleId,
+    societyId: destination.societyId,
+    accountId: null,
+    entryType: 'TRANSFER_IN',
+    amount,
+    paymentDate: transferDate,
+    paymentMode: 'Internal',
+    transferGroupId,
+    referenceNo: '',
+    remark: remark || `Transfer from sale ${sourceSaleId}`,
+    createdBy: userId,
+    createdAt: new Date(),
+  };
+  await SalePaymentEntry.insertMany([outEntry, inEntry]);
+
+  // Apply the signed deltas to both sales' amountPaid. No daybook txns — no
+  // cash actually moved.
+  const [updatedSource, updatedDest] = await Promise.all([
+    Sale.findOneAndUpdate({ id: sourceSaleId }, { $inc: { amountPaid: -amount } }, { new: true }).lean(),
+    Sale.findOneAndUpdate({ id: destinationSaleId }, { $inc: { amountPaid: amount } }, { new: true }).lean(),
+  ]);
+  const recomputeStatus = (sale) => {
+    if (!sale) return null;
+    const paid = sale.amountPaid || 0;
+    if (paid <= 0) return 'Pending';
+    return gteMoney(paid, sale.finalAmount || 0) ? 'Paid' : 'Partial';
+  };
+  await Promise.all([
+    Sale.updateOne({ id: sourceSaleId }, { $set: { paymentStatus: recomputeStatus(updatedSource) } }),
+    Sale.updateOne({ id: destinationSaleId }, { $set: { paymentStatus: recomputeStatus(updatedDest) } }),
+  ]);
+
+  return {
+    message: 'Transfer recorded',
+    transferGroupId,
+    source: { entryId: outEntry.id, saleId: sourceSaleId, amountPaid: updatedSource?.amountPaid || 0 },
+    destination: { entryId: inEntry.id, saleId: destinationSaleId, amountPaid: updatedDest?.amountPaid || 0 },
+  };
+};
+
+// Edit a previously-recorded transfer pair atomically. Destination sale is
+// fixed — to move money to a different sale, delete the transfer and create
+// a new one. Amount / date / remark can be adjusted; both legs and both
+// sales' amountPaid stay in sync, and per-sale caps (source can give, dest
+// can receive) are re-checked against everything ELSE on each sale.
+const updateTransfer = async (transferGroupId, body) => {
+  if (!transferGroupId) return { error: 'transferGroupId is required', status: 400 };
+  const legs = await SalePaymentEntry
+    .find(notDeleted({ transferGroupId }))
+    .lean();
+  if (legs.length !== 2) {
+    return { error: 'Transfer pair not found or incomplete', status: 404 };
+  }
+  const outLeg = legs.find(l => l.entryType === 'TRANSFER_OUT');
+  const inLeg = legs.find(l => l.entryType === 'TRANSFER_IN');
+  if (!outLeg || !inLeg) {
+    return { error: 'Transfer pair is malformed', status: 400 };
+  }
+
+  const newAmount = body.amount !== undefined ? parseFloat(body.amount) : outLeg.amount;
+  if (!(newAmount > 0)) {
+    return { error: 'Amount must be greater than zero', status: 400 };
+  }
+  const newDate = body.transferDate || body.paymentDate || outLeg.paymentDate;
+  const newRemark = body.remark !== undefined ? body.remark : (outLeg.remark || '');
+
+  const [sourceSale, destSale] = await Promise.all([
+    Sale.findOne({ id: outLeg.saleId }).lean(),
+    Sale.findOne({ id: inLeg.saleId }).lean(),
+  ]);
+  if (!sourceSale || sourceSale.isDeleted) return { error: 'Source sale not found', status: 404 };
+  if (!destSale || destSale.isDeleted) return { error: 'Destination sale not found', status: 404 };
+
+  const fmt = (n) => `₹${(n || 0).toLocaleString('en-IN')}`;
+
+  // Re-validate source: with this transfer's contribution stripped out, the
+  // remaining net paid must still be >= newAmount.
+  const [sourceEntries, sourceAllocs] = await Promise.all([
+    SalePaymentEntry.find(notDeleted({ saleId: sourceSale.id, id: { $ne: outLeg.id } })).lean(),
+    PaymentAllocation.find({ saleId: sourceSale.id }).lean(),
+  ]);
+  const sourcePaidExcludingThis = sourceEntries.reduce((s, e) => s + signedDelta(e), 0)
+    + sourceAllocs.reduce((s, a) => s + (a.amount || 0), 0);
+  if (newAmount > sourcePaidExcludingThis + 0.01) {
+    return {
+      error: `Transfer ${fmt(newAmount)} exceeds source sale's available balance ${fmt(sourcePaidExcludingThis)}.`,
+      status: 400,
+    };
+  }
+
+  // Re-validate destination: with this transfer's contribution stripped out,
+  // the remaining capacity (finalAmount - other paid) must still be >= newAmount.
+  const [destEntries, destAllocs] = await Promise.all([
+    SalePaymentEntry.find(notDeleted({ saleId: destSale.id, id: { $ne: inLeg.id } })).lean(),
+    PaymentAllocation.find({ saleId: destSale.id }).lean(),
+  ]);
+  const destPaidExcludingThis = destEntries.reduce((s, e) => s + signedDelta(e), 0)
+    + destAllocs.reduce((s, a) => s + (a.amount || 0), 0);
+  const destRemaining = (destSale.finalAmount || 0) - destPaidExcludingThis;
+  if (newAmount > destRemaining + 0.01) {
+    return {
+      error: `Transfer ${fmt(newAmount)} exceeds destination sale's remaining due ${fmt(destRemaining)}.`,
+      status: 400,
+    };
+  }
+
+  // Apply signed deltas to both sales' amountPaid: source loses (newAmount -
+  // oldAmount); destination gains the same.
+  const oldAmount = outLeg.amount || 0;
+  const sourceDelta = -(newAmount - oldAmount);
+  const destDelta = newAmount - oldAmount;
+  const [updatedSource, updatedDest] = await Promise.all([
+    sourceDelta === 0
+      ? sourceSale
+      : Sale.findOneAndUpdate({ id: sourceSale.id }, { $inc: { amountPaid: sourceDelta } }, { new: true }).lean(),
+    destDelta === 0
+      ? destSale
+      : Sale.findOneAndUpdate({ id: destSale.id }, { $inc: { amountPaid: destDelta } }, { new: true }).lean(),
+  ]);
+
+  const recomputeStatus = (sale) => {
+    if (!sale) return null;
+    const paid = sale.amountPaid || 0;
+    if (paid <= 0) return 'Pending';
+    return gteMoney(paid, sale.finalAmount || 0) ? 'Paid' : 'Partial';
+  };
+  await Promise.all([
+    Sale.updateOne({ id: sourceSale.id }, { $set: { paymentStatus: recomputeStatus(updatedSource) } }),
+    Sale.updateOne({ id: destSale.id }, { $set: { paymentStatus: recomputeStatus(updatedDest) } }),
+    SalePaymentEntry.updateOne(
+      { id: outLeg.id },
+      { $set: { amount: newAmount, paymentDate: newDate, remark: newRemark, updatedAt: new Date() } },
+    ),
+    SalePaymentEntry.updateOne(
+      { id: inLeg.id },
+      { $set: { amount: newAmount, paymentDate: newDate, remark: newRemark, updatedAt: new Date() } },
+    ),
+  ]);
+
+  return {
+    message: 'Transfer updated',
+    transferGroupId,
+    amount: newAmount,
+    source: { saleId: sourceSale.id, amountPaid: updatedSource?.amountPaid || 0 },
+    destination: { saleId: destSale.id, amountPaid: updatedDest?.amountPaid || 0 },
+  };
+};
 
 const deleteSalePayment = async (id, userId) => {
   const entry = await SalePaymentEntry.findOne({ id }).lean();
   if (!entry) return { error: 'Entry not found', status: 404 };
+
+  // Internal transfers are paired — deleting one side requires deleting the
+  // other so both sales' amountPaid stay in sync. No daybook txn was written
+  // for either leg, so no reversal txn either.
+  if (entry.transferGroupId && (entry.entryType === 'TRANSFER_OUT' || entry.entryType === 'TRANSFER_IN')) {
+    const siblings = await SalePaymentEntry
+      .find({ transferGroupId: entry.transferGroupId, isDeleted: { $ne: true } })
+      .lean();
+    for (const leg of siblings) {
+      const legDelta = isCreditEntryType(leg.entryType) ? -(leg.amount || 0) : (leg.amount || 0);
+      const updated = await Sale.findOneAndUpdate(
+        { id: leg.saleId },
+        { $inc: { amountPaid: legDelta } },
+        { new: true },
+      ).lean();
+      if (updated) {
+        const newPaid = updated.amountPaid || 0;
+        const paymentStatus = newPaid <= 0
+          ? 'Pending'
+          : (gteMoney(newPaid, updated.finalAmount || 0) ? 'Paid' : 'Partial');
+        await Sale.updateOne({ id: leg.saleId }, { $set: { paymentStatus } });
+      }
+    }
+    await SalePaymentEntry.updateMany(
+      { transferGroupId: entry.transferGroupId, isDeleted: { $ne: true } },
+      { $set: { isDeleted: true, deletedAt: new Date(), deletedReason: 'Transfer reversed' } },
+    );
+    return { message: 'Transfer reversed (both legs deleted)' };
+  }
 
   const originalTxn = await Transaction.findOne({ sourceType: 'SALE_PAYMENT', sourceId: id }).lean();
   if (originalTxn) {
@@ -504,7 +767,7 @@ const deleteSalePayment = async (id, userId) => {
   // Atomic $inc avoids the read-modify-write race when several payments are
   // deleted concurrently.
   const entryType = entry.entryType || 'SALE_PAYMENT';
-  const reverseDelta = entryType === 'SALE_PAYMENT' ? -(entry.amount || 0) : (entry.amount || 0);
+  const reverseDelta = isCreditEntryType(entryType) ? -(entry.amount || 0) : (entry.amount || 0);
   const updatedSale = await Sale.findOneAndUpdate(
     { id: entry.saleId },
     { $inc: { amountPaid: reverseDelta } },
@@ -531,6 +794,33 @@ const updateSalePayment = async (id, body, userId) => {
   const entry = await SalePaymentEntry.findOne({ id }).lean();
   if (!entry) return { error: 'Entry not found', status: 404 };
   if (entry.isDeleted) return { error: 'Entry is deleted', status: 400 };
+
+  // Transfer entries are paired — editing one in isolation would desync the
+  // other side. Allow remark-only edits in place; everything else must be
+  // done by deleting (which deletes both sides) and recording a new transfer.
+  if (entry.entryType === 'TRANSFER_OUT' || entry.entryType === 'TRANSFER_IN') {
+    const onlyRemark =
+      body.remark !== undefined
+      && body.amount === undefined
+      && body.entryType === undefined
+      && body.type === undefined
+      && body.paymentMode === undefined
+      && body.accountId === undefined
+      && body.paymentDate === undefined
+      && body.entryDate === undefined;
+    if (!onlyRemark) {
+      return {
+        error: 'Transfer entries can only be edited by remark. Delete the transfer and record a new one for any other change.',
+        status: 400,
+      };
+    }
+    await SalePaymentEntry.updateOne(
+      { id },
+      { $set: { remark: body.remark, updatedAt: new Date() } },
+    );
+    const fresh = await SalePaymentEntry.findOne({ id }).lean();
+    return { message: 'Transfer entry remark updated', entry: fresh };
+  }
 
   const sale = await Sale.findOne({ id: entry.saleId }).lean();
   if (!sale) return { error: 'Parent sale not found', status: 404 };
@@ -565,10 +855,8 @@ const updateSalePayment = async (id, body, userId) => {
       .find(notDeleted({ saleId: entry.saleId, id: { $ne: id } }))
       .lean();
     const allocations = await PaymentAllocation.find({ saleId: entry.saleId }).lean();
-    const otherNet = otherEntries.reduce((sum, e) => {
-      const t = e.entryType || 'SALE_PAYMENT';
-      return sum + (t === 'SALE_PAYMENT' ? (e.amount || 0) : -(e.amount || 0));
-    }, 0) + allocations.reduce((sum, a) => sum + (a.amount || 0), 0);
+    const otherNet = otherEntries.reduce((sum, e) => sum + signedDelta(e), 0)
+      + allocations.reduce((sum, a) => sum + (a.amount || 0), 0);
     const remaining = (sale.finalAmount || 0) - otherNet;
     if (remaining <= 0) {
       return { error: 'Sale is already fully paid by other entries.', status: 400 };
@@ -594,8 +882,8 @@ const updateSalePayment = async (id, body, userId) => {
     }
 
     // Net delta on Sale.amountPaid: (new contribution) - (old contribution)
-    const oldDelta = oldType === 'SALE_PAYMENT' ? (entry.amount || 0) : -(entry.amount || 0);
-    const newDelta = newEntryType === 'SALE_PAYMENT' ? newAmount : -newAmount;
+    const oldDelta = isCreditEntryType(oldType) ? (entry.amount || 0) : -(entry.amount || 0);
+    const newDelta = isCreditEntryType(newEntryType) ? newAmount : -newAmount;
     const netDelta = newDelta - oldDelta;
     const updatedSale = await Sale.findOneAndUpdate(
       { id: entry.saleId },
@@ -626,7 +914,7 @@ const updateSalePayment = async (id, body, userId) => {
         : (gteMoney(newAmountPaid, updatedSale.finalAmount || 0) ? 'Paid' : 'Partial');
       await Sale.updateOne({ id: entry.saleId }, { $set: { paymentStatus } });
 
-      const direction = newEntryType === 'SALE_PAYMENT' ? 'IN' : 'OUT';
+      const direction = isCreditEntryType(newEntryType) ? 'IN' : 'OUT';
       await createTransaction({
         txnDate: newPaymentDate,
         societyId: updatedSale.societyId,
@@ -693,5 +981,6 @@ module.exports = {
   listForSociety, create, getById, update, remove,
   listPayments, addPayment,
   listLedger, addLedgerEntry, deleteSalePayment, updateSalePayment,
+  transferBetweenSales, updateTransfer,
   listUnassigned, assignCustomer,
 };

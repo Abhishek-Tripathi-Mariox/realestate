@@ -9,6 +9,7 @@ const schema = buildSchema({
   amount: Number,
   paymentDate: String,
   paymentMode: String,
+  transferGroupId: String,
   referenceNo: String,
   remark: String,
   createdBy: String,
