@@ -16,6 +16,7 @@ import {
   Trash2,
   KeyRound,
   HardHat,
+  IndianRupee,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -53,6 +54,7 @@ export function Sidebar({ user, onLogout, onChangePassword, mobileOpen = false, 
     { label: 'Daybook', href: '/daybook', icon: BookOpen },
     { label: 'Expenses', href: '/expenses', icon: Receipt },
     { label: 'Vendor Ledger', href: '/vendor-ledger', icon: HardHat },
+    { label: 'Margin Ledger', href: '/margin-ledger', icon: IndianRupee },
     { label: 'Loans', href: '/borrow', icon: CreditCard },
   ]
 

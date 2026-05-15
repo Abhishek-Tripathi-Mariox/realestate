@@ -52,11 +52,35 @@ import { Ta } from 'zod/v4/locales'
 const VENDOR_TYPES = ['Electrician', 'Broker', 'Labour', 'Legal', 'Marketing', 'Plumber', 'Civil', 'Other']
 const EXPENSE_CATEGORIES = ['Civil', 'Tiles', 'Electrical', 'Plumbing', 'Paint', 'Labour', 'Legal', 'Marketing', 'Office', 'Other']
 const PAYMENT_MODES = ['Cash', 'Bank Transfer', 'Cheque', 'RTGS', 'UPI']
+
+// Rows-per-page options used by every paginated table in the app.
+const PAGE_SIZE_OPTIONS = [25, 50, 100, 200]
+
+// Returns the paged slice of a filtered list + meta so each tab can render
+// pagination controls (Previous / Next, "Showing X to Y of Z") consistently.
+// Page is clamped so a stale page index from a previous filter doesn't blank
+// out the table.
+const slicePage = (list, pageSize, page) => {
+  const total = list.length
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const currentPage = Math.min(Math.max(1, page || 1), totalPages)
+  const start = (currentPage - 1) * pageSize
+  return {
+    paged: list.slice(start, start + pageSize),
+    total,
+    totalPages,
+    currentPage,
+    start,
+    end: Math.min(start + pageSize, total),
+  }
+}
 const SOURCE_TYPE_LABELS = {
   'SALE_PAYMENT': 'Sale Payment',
   'PURCHASE_PAYMENT': 'Purchase Payment',
   'EXPENSE_PAYMENT': 'Expense Payment',
   'BROKER_COMMISSION': 'Broker Commission',
+  'COMMISSION_PAYMENT': 'Commission Payment',
+  'MARGIN_PAYMENT': 'Margin Payment',
   'PARTNER_CAPITAL': 'Partner Capital',
   'CUSTOMER_PAYMENT': 'Customer Payment',
   'CUSTOMER_PAYMENT_REVERSAL': 'Customer Payment (Reversal)',
@@ -79,6 +103,59 @@ const fmt = (value) => {
   const n = Math.round((Number(value) || 0) * 100) / 100
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
+
+// Shared pagination footer used under every paginated table. Keeps the
+// "Showing X to Y of Z" line + Prev/Next controls visually consistent
+// across tabs without each tab reimplementing the math.
+const TablePager = ({ total, totalPages, currentPage, start, end, onChange, label = 'rows' }) => {
+  if (total <= 0) return null
+  return (
+    <div className="flex items-center justify-between mt-3 pt-3 border-t">
+      <div className="text-sm text-muted-foreground">
+        Showing {start + 1} to {end} of {total} {label}
+      </div>
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => onChange(Math.max(1, currentPage - 1))}
+          disabled={currentPage <= 1}
+        >
+          Previous
+        </Button>
+        <span className="text-sm text-muted-foreground px-2">
+          Page {currentPage} of {totalPages}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => onChange(Math.min(totalPages, currentPage + 1))}
+          disabled={currentPage >= totalPages}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// Inline rows-per-page selector — paired with TablePager via the same filter
+// state object on each tab.
+const PageSizeSelect = ({ value, onChange }) => (
+  <div className="flex items-center gap-2">
+    <span className="text-sm text-muted-foreground">Rows per page:</span>
+    <Select value={String(value)} onValueChange={(v) => onChange(parseInt(v))}>
+      <SelectTrigger className="w-[80px] h-8">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {PAGE_SIZE_OPTIONS.map(n => (
+          <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  </div>
+)
 
 export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => {
   const router = useRouter()
@@ -108,6 +185,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
   const [vendors, setVendors] = useState([])
   const [expenseBills, setExpenseBills] = useState([])
   const [commissionBills, setCommissionBills] = useState([])
+  const [marginBills, setMarginBills] = useState([])
   const [resaleDeals, setResaleDeals] = useState([])
   const [summary, setSummary] = useState(null)
   const [accounts, setAccounts] = useState([])
@@ -131,6 +209,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
   // amount FIFO across the vendor's unpaid bills (oldest first).
   const [addingVendorPayment, setAddingVendorPayment] = useState(null)
   const [editingCommissionBill, setEditingCommissionBill] = useState(null)
+  const [editingMarginBill, setEditingMarginBill] = useState(null)
   
   // Partner edit state
   const [editingPartner, setEditingPartner] = useState(null)
@@ -209,7 +288,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
   const [customerPayments, setCustomerPayments] = useState([])
   const [customerPaymentsPagination, setCustomerPaymentsPagination] = useState({
     page: 1,
-    limit: 10,
+    limit: 25,
     total: 0,
     totalPages: 0
   })
@@ -242,21 +321,50 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     vendorId: 'all',
     categoryId: 'all',
     startDate: '',
-    endDate: ''
+    endDate: '',
+    search: '',
+    pageSize: 25,
+    page: 1,
   })
   // Vendor Ledger (Daily Khata style) filters + per-vendor action target
   const [vendorLedgerFilters, setVendorLedgerFilters] = useState({
     search: '',
     category: 'all',
-    status: 'all'
+    status: 'all',
+    pageSize: 25,
+    page: 1,
   })
   const [addWorkVendor, setAddWorkVendor] = useState(null)
   const [commissionFilters, setCommissionFilters] = useState({
     status: 'all',
     brokerId: 'all',
     startDate: '',
-    endDate: ''
+    endDate: '',
+    search: '',
+    pageSize: 25,
+    page: 1,
   })
+  const [marginFilters, setMarginFilters] = useState({
+    status: 'all',
+    startDate: '',
+    endDate: '',
+    search: '',
+    pageSize: 25,
+    page: 1,
+  })
+  const [customerFilters, setCustomerFilters] = useState({
+    search: '',
+    startDate: '',
+    endDate: '',
+    pageSize: 25,
+    page: 1,
+  })
+  const [salesFilters, setSalesFilters] = useState({ search: '', startDate: '', endDate: '', pageSize: 25, page: 1 })
+  const [purchasesFilters, setPurchasesFilters] = useState({ search: '', startDate: '', endDate: '', pageSize: 25, page: 1 })
+  const [resalesFilters, setResalesFilters] = useState({ search: '', startDate: '', endDate: '', pageSize: 25, page: 1 })
+  const [inventoryFilters, setInventoryFilters] = useState({ search: '', status: 'all', pageSize: 25, page: 1 })
+  const [partnersFilters, setPartnersFilters] = useState({ search: '', pageSize: 25, page: 1 })
+  const [auditLogsFilters, setAuditLogsFilters] = useState({ search: '', pageSize: 50, page: 1 })
 
   useEffect(() => {
     try {
@@ -624,6 +732,19 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     }
   }
 
+  const loadMarginsTab = async () => {
+    // Margin bills attach to a ResaleDeal. We also pull inventory so the
+    // dropdown can show flat numbers next to each resale.
+    const [billsData, dealsData, inventoryData] = await Promise.all([
+      apiCall(`/margin-bills?societyId=${selectedSociety}`),
+      apiCall(`/resales?societyId=${selectedSociety}`),
+      apiCall(`/societies/${selectedSociety}/inventory`),
+    ])
+    setMarginBills(billsData)
+    setResaleDeals(dealsData)
+    setInventory(inventoryData)
+  }
+
   const tabLoaders = {
     partners: loadPartnersTab,
     inventory: loadInventoryTab,
@@ -634,6 +755,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     vendors: loadVendorsTab,
     expenses: loadExpensesTab,
     commissions: loadCommissionsTab,
+    margins: loadMarginsTab,
   }
 
   // Lazy-load a tab's data on first visit. Reuses the cached fetch across
@@ -666,7 +788,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
   }
   
   // Dedicated function to load customer payments with pagination
-  const loadCustomerPayments = async (page = 1, limit = 10) => {
+  const loadCustomerPayments = async (page = 1, limit = 25) => {
     if (!selectedSociety) return
     
     setCustomerPaymentsLoading(true)
@@ -841,6 +963,8 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
         payments = await apiCall(`/expense-bills/${bill.id}/payments`)
       } else if (type === 'commission') {
         payments = await apiCall(`/commission-bills/${bill.id}/payments`)
+      } else if (type === 'margin') {
+        payments = await apiCall(`/margin-bills/${bill.id}/payments`)
       }
       setBillPayments(payments)
     } catch (error) {
@@ -858,6 +982,8 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
         await apiCall(`/expense-bills/${paymentBill.id}/payments`, 'POST', formData)
       } else if (paymentBillType === 'commission') {
         await apiCall(`/commission-bills/${paymentBill.id}/payments`, 'POST', formData)
+      } else if (paymentBillType === 'margin') {
+        await apiCall(`/margin-bills/${paymentBill.id}/payments`, 'POST', formData)
       }
       
       await openBillPayments(paymentBillType, paymentBill)
@@ -875,6 +1001,8 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
         await apiCall(`/expense-payments/${paymentId}`, 'DELETE')
       } else if (paymentBillType === 'commission') {
         await apiCall(`/commission-payments/${paymentId}`, 'DELETE')
+      } else if (paymentBillType === 'margin') {
+        await apiCall(`/margin-payments/${paymentId}`, 'DELETE')
       }
 
       await openBillPayments(paymentBillType, paymentBill)
@@ -892,6 +1020,8 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
         await apiCall(`/expense-payments/${paymentId}`, 'PUT', formData)
       } else if (paymentBillType === 'commission') {
         await apiCall(`/commission-payments/${paymentId}`, 'PUT', formData)
+      } else if (paymentBillType === 'margin') {
+        await apiCall(`/margin-payments/${paymentId}`, 'PUT', formData)
       }
 
       await openBillPayments(paymentBillType, paymentBill)
@@ -1533,10 +1663,13 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     }
   }
 
-  // Audit Log handlers
-  const loadAuditLogs = async () => {
+  // Audit Log handlers — fetches up to `pageSize` rows from the server so the
+  // selected page size matches what the user sees. Search + paging beyond the
+  // fetched window is then handled client-side.
+  const loadAuditLogs = async (size) => {
     try {
-      const data = await apiCall('/admin/audit-logs?limit=50')
+      const limit = size || auditLogsFilters.pageSize || 50
+      const data = await apiCall(`/admin/audit-logs?limit=${limit}`)
       setAuditLogsData(data)
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
@@ -1694,6 +1827,64 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
       await loadSocietyData()
       setEditingCommissionBill(null)
       toast({ title: 'Success', description: 'Commission bill updated successfully' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  // Margin Bill Management — mirrors Commission Bill flow but the bill is
+  // attached to a ResaleDeal instead of a broker vendor + sale.
+  const handleCreateMarginBill = async (formData) => {
+    try {
+      // Mirror the expense flow — strip the inline payment, create the bill,
+      // then replay the payment as a POST to /payments. Saves a second click
+      // when the user is recording an advance/full payment with the entry.
+      const { initialPayment, ...billBody } = formData
+      const bill = await apiCall('/margin-bills', 'POST', { ...billBody, societyId: selectedSociety })
+
+      if (initialPayment && bill?.id && initialPayment.amount > 0) {
+        try {
+          await apiCall(`/margin-bills/${bill.id}/payments`, 'POST', initialPayment)
+        } catch (payErr) {
+          toast({
+            title: 'Margin saved, payment failed',
+            description: payErr.message || 'Add the payment from the bill drawer.',
+            variant: 'destructive',
+          })
+          await loadSocietyData()
+          setIsDialogOpen(false)
+          return
+        }
+      }
+
+      await loadSocietyData()
+      setIsDialogOpen(false)
+      toast({
+        title: 'Success',
+        description: initialPayment ? 'Margin saved with payment' : 'Margin bill created successfully',
+      })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  const handleDeleteMarginBill = async (billId) => {
+    try {
+      await apiCall(`/margin-bills/${billId}`, 'DELETE')
+      await loadSocietyData()
+      toast({ title: 'Success', description: 'Margin bill deleted successfully' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  const handleUpdateMarginBill = async (formData) => {
+    if (!editingMarginBill?.id) return
+    try {
+      await apiCall(`/margin-bills/${editingMarginBill.id}`, 'PUT', formData)
+      await loadSocietyData()
+      setEditingMarginBill(null)
+      toast({ title: 'Success', description: 'Margin bill updated successfully' })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
     }
@@ -1881,8 +2072,14 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     if (expenseFilters.categoryId !== 'all' && bill.categoryId !== expenseFilters.categoryId) return false
     if (expenseFilters.startDate && new Date(bill.billDate) < new Date(expenseFilters.startDate)) return false
     if (expenseFilters.endDate && new Date(bill.billDate) > new Date(expenseFilters.endDate)) return false
+    const q = (expenseFilters.search || '').trim().toLowerCase()
+    if (q) {
+      const hay = `${bill.vendorName || ''} ${bill.categoryName || bill.category || ''} ${bill.description || ''} ${bill.referenceNo || ''}`.toLowerCase()
+      if (!hay.includes(q)) return false
+    }
     return true
   })
+  const expenseBillsPage = slicePage(filteredExpenseBills, expenseFilters.pageSize, expenseFilters.page)
 
   // Filter commission bills based on filters
   const filteredCommissionBills = commissionBills.filter(bill => {
@@ -1890,8 +2087,28 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     if (commissionFilters.brokerId !== 'all' && bill.brokerVendorId !== commissionFilters.brokerId) return false
     if (commissionFilters.startDate && new Date(bill.commissionDate) < new Date(commissionFilters.startDate)) return false
     if (commissionFilters.endDate && new Date(bill.commissionDate) > new Date(commissionFilters.endDate)) return false
+    const q = (commissionFilters.search || '').trim().toLowerCase()
+    if (q) {
+      const hay = `${bill.brokerName || ''} ${bill.customerName || ''} ${bill.inventoryName || ''} ${bill.description || ''}`.toLowerCase()
+      if (!hay.includes(q)) return false
+    }
     return true
   })
+  const commissionBillsPage = slicePage(filteredCommissionBills, commissionFilters.pageSize, commissionFilters.page)
+
+  // Filter margin bills based on filters
+  const filteredMarginBills = marginBills.filter(bill => {
+    if (marginFilters.status !== 'all' && bill.status !== marginFilters.status) return false
+    if (marginFilters.startDate && new Date(bill.billDate) < new Date(marginFilters.startDate)) return false
+    if (marginFilters.endDate && new Date(bill.billDate) > new Date(marginFilters.endDate)) return false
+    const q = (marginFilters.search || '').trim().toLowerCase()
+    if (q) {
+      const hay = `${bill.description || ''} ${bill.remark || ''}`.toLowerCase()
+      if (!hay.includes(q)) return false
+    }
+    return true
+  })
+  const marginBillsPage = slicePage(filteredMarginBills, marginFilters.pageSize, marginFilters.page)
 
   // Calculate expense totals based on filtered data
   const expenseTotals = {
@@ -1899,6 +2116,143 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     totalPaid: filteredExpenseBills.reduce((sum, b) => sum + (b.totalPaid || 0), 0),
     totalBalance: filteredExpenseBills.reduce((sum, b) => sum + (b.balance || 0), 0)
   }
+
+  // Customers list: search by name/phone/notes, date range applies to the
+  // customer's createdAt OR any of their payments — so the list shows people
+  // who were either added or active in that window. The summary cards above
+  // the table use the same date range against customerPayments to show
+  // "amount received in this date range".
+  const customerSearchLc = (customerFilters.search || '').trim().toLowerCase()
+  const customerStartTs = customerFilters.startDate ? new Date(customerFilters.startDate).getTime() : null
+  const customerEndTs = customerFilters.endDate ? new Date(customerFilters.endDate).getTime() + 86400000 - 1 : null
+
+  const inCustomerDateRange = (ts) => {
+    if (!ts) return false
+    if (customerStartTs !== null && ts < customerStartTs) return false
+    if (customerEndTs !== null && ts > customerEndTs) return false
+    return true
+  }
+  const dateFilterActive = customerStartTs !== null || customerEndTs !== null
+
+  // Map of customerId → had-payment-in-range, used to decide if a customer
+  // row passes the date filter without re-scanning payments per row.
+  const customerHasPaymentInRange = (() => {
+    if (!dateFilterActive) return null
+    const set = new Set()
+    for (const p of customerPayments) {
+      const ts = p.paymentDate ? new Date(p.paymentDate).getTime() : null
+      if (ts !== null && inCustomerDateRange(ts) && p.customerId) {
+        set.add(p.customerId)
+      }
+    }
+    return set
+  })()
+
+  const filteredCustomers = customers.filter(c => {
+    if (customerSearchLc) {
+      const hay = `${c.name || ''} ${c.phone || ''} ${c.notes || ''}`.toLowerCase()
+      if (!hay.includes(customerSearchLc)) return false
+    }
+    if (dateFilterActive) {
+      const createdTs = c.createdAt ? new Date(c.createdAt).getTime() : null
+      const createdInRange = createdTs !== null && inCustomerDateRange(createdTs)
+      const hadPayment = customerHasPaymentInRange?.has(c.id)
+      if (!createdInRange && !hadPayment) return false
+    }
+    return true
+  })
+
+  // Payments matching the active date range (used by the summary cards so
+  // the "Total Payments" card answers "how much came in between X and Y").
+  const customerPaymentsInRange = dateFilterActive
+    ? customerPayments.filter(p => {
+        const ts = p.paymentDate ? new Date(p.paymentDate).getTime() : null
+        return ts !== null && inCustomerDateRange(ts)
+      })
+    : customerPayments
+
+  const customerTotalPages = Math.max(1, Math.ceil(filteredCustomers.length / customerFilters.pageSize))
+  const customerCurrentPage = Math.min(customerFilters.page, customerTotalPages)
+  const customerPageStart = (customerCurrentPage - 1) * customerFilters.pageSize
+  const customersPaged = filteredCustomers.slice(customerPageStart, customerPageStart + customerFilters.pageSize)
+
+  // Generic helper: filter a list of records by a free-text search across the
+  // given field names, plus an inclusive date range against a chosen field.
+  // Used by Sales / Purchases / Resales / etc. so each tab doesn't have to
+  // reimplement the same predicate.
+  const applyListFilter = (list, filters, { searchFields = [], dateField = null }) => {
+    const q = (filters.search || '').trim().toLowerCase()
+    const startTs = filters.startDate ? new Date(filters.startDate).getTime() : null
+    const endTs = filters.endDate ? new Date(filters.endDate).getTime() + 86400000 - 1 : null
+    return (list || []).filter(row => {
+      if (q) {
+        const hay = searchFields.map(f => row?.[f] ?? '').join(' ').toLowerCase()
+        if (!hay.includes(q)) return false
+      }
+      if (dateField && (startTs !== null || endTs !== null)) {
+        const ts = row?.[dateField] ? new Date(row[dateField]).getTime() : null
+        if (ts === null) return false
+        if (startTs !== null && ts < startTs) return false
+        if (endTs !== null && ts > endTs) return false
+      }
+      return true
+    })
+  }
+
+  const filteredSales = applyListFilter(sales, salesFilters, {
+    searchFields: ['customerName', 'buyerName', 'inventoryNumber', 'inventoryType', 'phase', 'notes'],
+    dateField: 'saleDate',
+  })
+  const salesPage = slicePage(filteredSales, salesFilters.pageSize, salesFilters.page)
+  const salesFilteredTotals = {
+    finalAmount: filteredSales.reduce((s, r) => s + (r.finalAmount || 0), 0),
+    totalPaid: filteredSales.reduce((s, r) => s + (r.totalPaid || 0), 0),
+    balance: filteredSales.reduce((s, r) => s + (r.balance || 0), 0),
+  }
+
+  const filteredPurchases = applyListFilter(purchases || [], purchasesFilters, {
+    searchFields: ['partyName', 'vendorName', 'notes'],
+    dateField: 'purchaseDate',
+  })
+  const purchasesPage = slicePage(filteredPurchases, purchasesFilters.pageSize, purchasesFilters.page)
+  const purchasesFilteredTotals = {
+    dealAmount: filteredPurchases.reduce((s, r) => s + (r.dealAmount || r.totalCost || 0), 0),
+    totalPaid: filteredPurchases.reduce((s, r) => s + (r.totalPaid || 0), 0),
+    balance: filteredPurchases.reduce((s, r) => s + (r.balance || 0), 0),
+  }
+
+  const filteredResales = applyListFilter(resaleDeals || [], resalesFilters, {
+    searchFields: ['sellerName', 'buyerName', 'inventoryName', 'inventoryNumber', 'notes'],
+    dateField: 'dealDate',
+  })
+  const resalesPage = slicePage(filteredResales, resalesFilters.pageSize, resalesFilters.page)
+
+  const filteredInventory = (inventory || []).filter(item => {
+    const q = (inventoryFilters.search || '').trim().toLowerCase()
+    if (q) {
+      const hay = `${item.type || ''} ${item.inventoryNumber || ''} ${item.phase || ''} ${item.status || ''} ${item.currentOwner || ''}`.toLowerCase()
+      if (!hay.includes(q)) return false
+    }
+    if (inventoryFilters.status !== 'all' && item.status !== inventoryFilters.status) return false
+    return true
+  })
+  const inventoryPage = slicePage(filteredInventory, inventoryFilters.pageSize, inventoryFilters.page)
+
+  const filteredPartners = (partners || []).filter(p => {
+    const q = (partnersFilters.search || '').trim().toLowerCase()
+    if (!q) return true
+    return `${p.name || ''} ${p.phone || ''} ${p.email || ''} ${p.notes || ''}`.toLowerCase().includes(q)
+  })
+  const partnersPage = slicePage(filteredPartners, partnersFilters.pageSize, partnersFilters.page)
+
+  const auditLogsAll = auditLogsData?.logs || []
+  const filteredAuditLogs = auditLogsAll.filter(log => {
+    const q = (auditLogsFilters.search || '').trim().toLowerCase()
+    if (!q) return true
+    const hay = `${log.action || ''} ${log.entityType || ''} ${log.entityId || ''} ${log.userName || ''} ${log.reason || ''}`.toLowerCase()
+    return hay.includes(q)
+  })
+  const auditLogsPage = slicePage(filteredAuditLogs, auditLogsFilters.pageSize, auditLogsFilters.page)
 
   // Per-vendor ledger summary (Daily Khata view). Joins vendors with their
   // expense bills + payments so each row is a vendor card, not a bill.
@@ -1952,6 +2306,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     totalPending: filteredVendorLedger.reduce((s, r) => s + r.pending, 0),
     labourCost: filteredVendorLedger.reduce((s, r) => s + (r.labourValue || 0), 0),
   }
+  const vendorLedgerPage = slicePage(filteredVendorLedger, vendorLedgerFilters.pageSize, vendorLedgerFilters.page)
   vendorLedgerTotals.materialCost = vendorLedgerTotals.totalWorkValue - vendorLedgerTotals.labourCost
 
   const vendorLedgerCategories = Array.from(
@@ -1976,6 +2331,12 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     totalCommission: filteredCommissionBills.reduce((sum, b) => sum + b.commissionAmount, 0),
     totalPaid: filteredCommissionBills.reduce((sum, b) => sum + (b.totalPaid || 0), 0),
     totalBalance: filteredCommissionBills.reduce((sum, b) => sum + (b.balance || 0), 0)
+  }
+
+  const marginTotals = {
+    totalMargin: filteredMarginBills.reduce((sum, b) => sum + (b.amount || 0), 0),
+    totalPaid: filteredMarginBills.reduce((sum, b) => sum + (b.totalPaid || 0), 0),
+    totalBalance: filteredMarginBills.reduce((sum, b) => sum + (b.balance || 0), 0)
   }
 
   // Export to CSV function
@@ -2118,23 +2479,40 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
 
   // Clear expense filters
   const clearExpenseFilters = () => {
-    setExpenseFilters({
+    setExpenseFilters(f => ({
       status: 'all',
       vendorId: 'all',
       categoryId: 'all',
       startDate: '',
-      endDate: ''
-    })
+      endDate: '',
+      search: '',
+      pageSize: f.pageSize,
+      page: 1,
+    }))
   }
 
   // Clear commission filters
   const clearCommissionFilters = () => {
-    setCommissionFilters({
+    setCommissionFilters(f => ({
       status: 'all',
       brokerId: 'all',
       startDate: '',
-      endDate: ''
-    })
+      endDate: '',
+      search: '',
+      pageSize: f.pageSize,
+      page: 1,
+    }))
+  }
+
+  const clearMarginFilters = () => {
+    setMarginFilters(f => ({
+      status: 'all',
+      startDate: '',
+      endDate: '',
+      search: '',
+      pageSize: f.pageSize,
+      page: 1,
+    }))
   }
 
   // Quick Add Expense Handler
@@ -2474,15 +2852,15 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
             {/* Tabs for different modules */}
             <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
               {!singleTabMode && (
-                <TabsList className="flex w-full overflow-x-auto whitespace-nowrap lg:grid lg:grid-cols-8 h-11 p-1 bg-slate-100/80 border border-slate-200/70 rounded-xl">
-                  <TabsTrigger value="partners" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Partners</TabsTrigger>
-                  <TabsTrigger value="inventory" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Inventory</TabsTrigger>
-                  <TabsTrigger value="purchases" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Purchases</TabsTrigger>
-                  <TabsTrigger value="customers" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Customers</TabsTrigger>
-                  <TabsTrigger value="sales" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Sales</TabsTrigger>
-                  <TabsTrigger value="resales" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Resale</TabsTrigger>
-                  <TabsTrigger value="vendors" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Vendors</TabsTrigger>
-                  <TabsTrigger value="commissions" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Commissions</TabsTrigger>
+                <TabsList className="flex w-full flex-nowrap overflow-x-auto whitespace-nowrap lg:grid lg:grid-cols-8 h-11 p-1 bg-slate-100/80 border border-slate-200/70 rounded-xl">
+                  <TabsTrigger value="partners" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Partners</TabsTrigger>
+                  <TabsTrigger value="inventory" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Inventory</TabsTrigger>
+                  <TabsTrigger value="purchases" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Purchases</TabsTrigger>
+                  <TabsTrigger value="customers" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Customers</TabsTrigger>
+                  <TabsTrigger value="sales" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Sales</TabsTrigger>
+                  <TabsTrigger value="resales" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Resale</TabsTrigger>
+                  <TabsTrigger value="vendors" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Vendors</TabsTrigger>
+                  <TabsTrigger value="commissions" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Commissions</TabsTrigger>
                 </TabsList>
               )}
 
@@ -2534,9 +2912,40 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                       </div>
                     )}
                     
+                    {/* Filter Bar */}
+                    <div className="mb-4 p-4 bg-gray-50 rounded-lg border">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Filter className="w-4 h-4 text-gray-500" />
+                        <span className="text-sm font-medium text-gray-700">Search</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="ml-auto"
+                          onClick={() => setPartnersFilters(f => ({ search: '', pageSize: f.pageSize, page: 1 }))}
+                        >
+                          <X className="w-4 h-4 mr-1" /> Clear
+                        </Button>
+                      </div>
+                      <Input
+                        placeholder="Search by name / phone / email / notes…"
+                        className="h-9"
+                        value={partnersFilters.search}
+                        onChange={(e) => setPartnersFilters(f => ({ ...f, search: e.target.value, page: 1 }))}
+                      />
+                    </div>
+
                     {partners.length === 0 ? (
                       <p className="text-center text-gray-500 py-8">No partners added yet</p>
+                    ) : filteredPartners.length === 0 ? (
+                      <p className="text-center text-gray-500 py-8">No partners match your search</p>
                     ) : (
+                      <>
+                      <div className="flex items-center justify-end mb-2">
+                        <PageSizeSelect
+                          value={partnersFilters.pageSize}
+                          onChange={(n) => setPartnersFilters(f => ({ ...f, pageSize: n, page: 1 }))}
+                        />
+                      </div>
                       <Table>
                         <TableHeader>
                           <TableRow>
@@ -2553,7 +2962,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {partners.map(partner => {
+                          {partnersPage.paged.map(partner => {
                             const profitShare = summary?.partnerDistribution?.find(p => p.partnerId === partner.id)?.profitShare || 0
                             const pledged = Number(partner.expectedInvestment || 0)
                             const actual = Number(partner.totalInvestment || 0)
@@ -2639,6 +3048,16 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                           })}
                         </TableBody>
                       </Table>
+                      <TablePager
+                        total={partnersPage.total}
+                        totalPages={partnersPage.totalPages}
+                        currentPage={partnersPage.currentPage}
+                        start={partnersPage.start}
+                        end={partnersPage.end}
+                        label="partners"
+                        onChange={(p) => setPartnersFilters(f => ({ ...f, page: p }))}
+                      />
+                      </>
                     )}
                   </CardContent>
                 </Card>
@@ -2670,9 +3089,58 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                     </div>
                   </CardHeader>
                   <CardContent>
+                    {/* Filter Bar */}
+                    <div className="mb-4 p-4 bg-gray-50 rounded-lg border">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Filter className="w-4 h-4 text-gray-500" />
+                        <span className="text-sm font-medium text-gray-700">Search & Filters</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="ml-auto"
+                          onClick={() => setInventoryFilters(f => ({ search: '', status: 'all', pageSize: f.pageSize, page: 1 }))}
+                        >
+                          <X className="w-4 h-4 mr-1" /> Clear
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <Label className="text-xs text-gray-500">Search (type / number / phase / owner)</Label>
+                          <Input
+                            placeholder="Type to filter…"
+                            className="h-9"
+                            value={inventoryFilters.search}
+                            onChange={(e) => setInventoryFilters(f => ({ ...f, search: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">Status</Label>
+                          <Select value={inventoryFilters.status} onValueChange={(v) => setInventoryFilters(f => ({ ...f, status: v, page: 1 }))}>
+                            <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="all">All</SelectItem>
+                              <SelectItem value="Available">Available</SelectItem>
+                              <SelectItem value="Sold">Sold</SelectItem>
+                              <SelectItem value="Resold">Resold</SelectItem>
+                              <SelectItem value="Blocked">Blocked</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                    </div>
+
                     {inventory.length === 0 ? (
                       <p className="text-center text-gray-500 py-8">No inventory added yet</p>
+                    ) : filteredInventory.length === 0 ? (
+                      <p className="text-center text-gray-500 py-8">No inventory matches your filters</p>
                     ) : (
+                      <>
+                      <div className="flex items-center justify-end mb-2">
+                        <PageSizeSelect
+                          value={inventoryFilters.pageSize}
+                          onChange={(n) => setInventoryFilters(f => ({ ...f, pageSize: n, page: 1 }))}
+                        />
+                      </div>
                       <Table>
                         <TableHeader>
                           <TableRow>
@@ -2688,7 +3156,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {inventory.map(item => (
+                          {inventoryPage.paged.map(item => (
                             <TableRow key={item.id}>
                               <TableCell>
                                 <Badge variant={item.type === 'Flat' ? 'default' : 'secondary'}>
@@ -2741,6 +3209,16 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                           ))}
                         </TableBody>
                       </Table>
+                      <TablePager
+                        total={inventoryPage.total}
+                        totalPages={inventoryPage.totalPages}
+                        currentPage={inventoryPage.currentPage}
+                        start={inventoryPage.start}
+                        end={inventoryPage.end}
+                        label="items"
+                        onChange={(p) => setInventoryFilters(f => ({ ...f, page: p }))}
+                      />
+                      </>
                     )}
                   </CardContent>
                 </Card>
@@ -2768,9 +3246,75 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                     </div>
                   </CardHeader>
                   <CardContent>
+                    {/* Filter Bar */}
+                    <div className="mb-4 p-4 bg-gray-50 rounded-lg border">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Filter className="w-4 h-4 text-gray-500" />
+                        <span className="text-sm font-medium text-gray-700">Search & Filters</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="ml-auto"
+                          onClick={() => setPurchasesFilters(f => ({ search: '', startDate: '', endDate: '', pageSize: f.pageSize, page: 1 }))}
+                        >
+                          <X className="w-4 h-4 mr-1" /> Clear
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div>
+                          <Label className="text-xs text-gray-500">Search (party / notes)</Label>
+                          <Input
+                            placeholder="Type to filter…"
+                            className="h-9"
+                            value={purchasesFilters.search}
+                            onChange={(e) => setPurchasesFilters(f => ({ ...f, search: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">From Date</Label>
+                          <Input type="date" className="h-9"
+                            value={purchasesFilters.startDate}
+                            onChange={(e) => setPurchasesFilters(f => ({ ...f, startDate: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">To Date</Label>
+                          <Input type="date" className="h-9"
+                            value={purchasesFilters.endDate}
+                            onChange={(e) => setPurchasesFilters(f => ({ ...f, endDate: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                      </div>
+                      {(purchasesFilters.search || purchasesFilters.startDate || purchasesFilters.endDate) && (
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-3 p-3 bg-white rounded border">
+                          <div>
+                            <p className="text-xs text-gray-500">Filtered Deal Amount</p>
+                            <p className="text-base font-bold text-blue-700">₹{fmt(purchasesFilteredTotals.dealAmount)}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-500">Filtered Paid</p>
+                            <p className="text-base font-bold text-green-600">₹{fmt(purchasesFilteredTotals.totalPaid)}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-500">Filtered Balance</p>
+                            <p className="text-base font-bold text-orange-600">₹{fmt(purchasesFilteredTotals.balance)}</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
                     {purchases.length === 0 ? (
                       <p className="text-center text-gray-500 py-8">No purchases recorded yet</p>
+                    ) : filteredPurchases.length === 0 ? (
+                      <p className="text-center text-gray-500 py-8">No purchases match your search / filters</p>
                     ) : (
+                      <>
+                      <div className="flex items-center justify-end mb-2">
+                        <PageSizeSelect
+                          value={purchasesFilters.pageSize}
+                          onChange={(n) => setPurchasesFilters(f => ({ ...f, pageSize: n, page: 1 }))}
+                        />
+                      </div>
                       <Table>
                         <TableHeader>
                           <TableRow>
@@ -2784,7 +3328,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {purchases.map(purchase => (
+                          {purchasesPage.paged.map(purchase => (
                             <TableRow key={purchase.id}>
                               <TableCell className="font-medium">{purchase.partyName}</TableCell>
                               <TableCell>₹{fmt(purchase.dealAmount)}</TableCell>
@@ -2830,6 +3374,16 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                           ))}
                         </TableBody>
                       </Table>
+                      <TablePager
+                        total={purchasesPage.total}
+                        totalPages={purchasesPage.totalPages}
+                        currentPage={purchasesPage.currentPage}
+                        start={purchasesPage.start}
+                        end={purchasesPage.end}
+                        label="purchases"
+                        onChange={(p) => setPurchasesFilters(f => ({ ...f, page: p }))}
+                      />
+                      </>
                     )}
                   </CardContent>
                 </Card>
@@ -2858,27 +3412,85 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
+                    {/* Filter Bar — search by name/phone/notes plus date range
+                        that drives both the summary cards (amount received in
+                        the range) and which customers appear in the list. */}
+                    <div className="mb-4 p-4 bg-gray-50 rounded-lg border">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Filter className="w-4 h-4 text-gray-500" />
+                        <span className="text-sm font-medium text-gray-700">Search & Filters</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="ml-auto"
+                          onClick={() => setCustomerFilters({ search: '', startDate: '', endDate: '', pageSize: customerFilters.pageSize, page: 1 })}
+                        >
+                          <X className="w-4 h-4 mr-1" /> Clear
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div>
+                          <Label className="text-xs text-gray-500">Search (name / phone / notes)</Label>
+                          <Input
+                            placeholder="Type to filter…"
+                            className="h-9"
+                            value={customerFilters.search}
+                            onChange={(e) => setCustomerFilters(f => ({ ...f, search: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">From Date</Label>
+                          <Input
+                            type="date"
+                            className="h-9"
+                            value={customerFilters.startDate}
+                            onChange={(e) => setCustomerFilters(f => ({ ...f, startDate: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">To Date</Label>
+                          <Input
+                            type="date"
+                            className="h-9"
+                            value={customerFilters.endDate}
+                            onChange={(e) => setCustomerFilters(f => ({ ...f, endDate: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                      </div>
+                      {dateFilterActive && (
+                        <p className="text-xs text-blue-600 mt-2">
+                          Date range active — &ldquo;Total Payments&rdquo; below shows amount received in this window.
+                        </p>
+                      )}
+                    </div>
+
                     {/* Customer Summary Cards */}
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
                       <Card className="bg-blue-50">
                         <CardContent className="pt-4">
                           <div className="text-sm text-muted-foreground">Total Customers</div>
-                          <div className="text-2xl font-bold text-blue-700">{customers.length}</div>
+                          <div className="text-2xl font-bold text-blue-700">{filteredCustomers.length}</div>
+                          {filteredCustomers.length !== customers.length && (
+                            <div className="text-xs text-blue-500 mt-1">of {customers.length}</div>
+                          )}
                         </CardContent>
                       </Card>
                       <Card className="bg-green-50">
                         <CardContent className="pt-4">
-                          <div className="text-sm text-muted-foreground">Total Payments</div>
+                          <div className="text-sm text-muted-foreground">{dateFilterActive ? 'Payments in Range' : 'Total Payments'}</div>
                           <div className="text-2xl font-bold text-green-700">
-                            ₹{fmt(customerPayments.reduce((sum, p) => sum + p.amount, 0))}
+                            ₹{fmt(customerPaymentsInRange.reduce((sum, p) => sum + (p.amount || 0), 0))}
                           </div>
+                          {dateFilterActive && (
+                            <div className="text-xs text-green-600 mt-1">{customerPaymentsInRange.length} entries</div>
+                          )}
                         </CardContent>
                       </Card>
                       <Card className="bg-purple-50">
                         <CardContent className="pt-4">
                           <div className="text-sm text-muted-foreground">Fully Allocated</div>
                           <div className="text-2xl font-bold text-purple-700">
-                            {customerPayments.filter(p => p.status === 'FULLY_ALLOCATED').length}
+                            {customerPaymentsInRange.filter(p => p.status === 'FULLY_ALLOCATED').length}
                           </div>
                         </CardContent>
                       </Card>
@@ -2886,17 +3498,40 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                         <CardContent className="pt-4">
                           <div className="text-sm text-muted-foreground">Pending Allocation</div>
                           <div className="text-2xl font-bold text-orange-700">
-                            {customerPayments.filter(p => p.status !== 'FULLY_ALLOCATED').length}
+                            {customerPaymentsInRange.filter(p => p.status !== 'FULLY_ALLOCATED').length}
                           </div>
                         </CardContent>
                       </Card>
                     </div>
 
                     {/* Customer List */}
-                    <h3 className="font-semibold mb-3">Customer List</h3>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="font-semibold">Customer List</h3>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-muted-foreground">Rows per page:</span>
+                        <Select
+                          value={String(customerFilters.pageSize)}
+                          onValueChange={(v) => setCustomerFilters(f => ({ ...f, pageSize: parseInt(v), page: 1 }))}
+                        >
+                          <SelectTrigger className="w-[80px] h-8">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="25">25</SelectItem>
+                            <SelectItem value="50">50</SelectItem>
+                            <SelectItem value="100">100</SelectItem>
+                            <SelectItem value="200">200</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
                     {customers.length === 0 ? (
                       <div className="text-center py-8 text-muted-foreground">
                         No customers added yet. Add a customer to start recording payments.
+                      </div>
+                    ) : filteredCustomers.length === 0 ? (
+                      <div className="text-center py-8 text-muted-foreground">
+                        No customers match your search / date range.
                       </div>
                     ) : (
                       <Table>
@@ -2914,7 +3549,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {customers.map(customer => (
+                          {customersPaged.map(customer => (
                             <TableRow key={customer.id}>
                               <TableCell className="font-medium">{customer.name}</TableCell>
                               <TableCell>{customer.phone || '-'}</TableCell>
@@ -2946,6 +3581,36 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                       </Table>
                     )}
 
+                    {/* Customer list pagination controls */}
+                    {filteredCustomers.length > customerFilters.pageSize && (
+                      <div className="flex items-center justify-between mt-3 pt-3 border-t">
+                        <div className="text-sm text-muted-foreground">
+                          Showing {customerPageStart + 1} to {Math.min(customerPageStart + customerFilters.pageSize, filteredCustomers.length)} of {filteredCustomers.length} customers
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setCustomerFilters(f => ({ ...f, page: Math.max(1, customerCurrentPage - 1) }))}
+                            disabled={customerCurrentPage <= 1}
+                          >
+                            Previous
+                          </Button>
+                          <span className="text-sm text-muted-foreground px-2">
+                            Page {customerCurrentPage} of {customerTotalPages}
+                          </span>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setCustomerFilters(f => ({ ...f, page: Math.min(customerTotalPages, customerCurrentPage + 1) }))}
+                            disabled={customerCurrentPage >= customerTotalPages}
+                          >
+                            Next
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Recent Payments Section */}
                     <div className="flex items-center justify-between mt-8 mb-3">
                       <h3 className="font-semibold">Recent Customer Payments</h3>
@@ -2959,15 +3624,15 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="10">10</SelectItem>
-                            <SelectItem value="20">20</SelectItem>
+                            <SelectItem value="25">25</SelectItem>
                             <SelectItem value="50">50</SelectItem>
                             <SelectItem value="100">100</SelectItem>
+                            <SelectItem value="200">200</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
                     </div>
-                    
+
                     {customerPaymentsLoading ? (
                       <div className="flex items-center justify-center py-12">
                         <RefreshCw className="w-6 h-6 animate-spin text-muted-foreground" />
@@ -3157,11 +3822,76 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                         </div>
                       </div>
                     )}
-                    
+
+                    {/* Filter Bar */}
+                    <div className="mb-4 p-4 bg-gray-50 rounded-lg border">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Filter className="w-4 h-4 text-gray-500" />
+                        <span className="text-sm font-medium text-gray-700">Search & Filters</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="ml-auto"
+                          onClick={() => setSalesFilters(f => ({ search: '', startDate: '', endDate: '', pageSize: f.pageSize, page: 1 }))}
+                        >
+                          <X className="w-4 h-4 mr-1" /> Clear
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div>
+                          <Label className="text-xs text-gray-500">Search (customer / inventory / notes)</Label>
+                          <Input
+                            placeholder="Type to filter…"
+                            className="h-9"
+                            value={salesFilters.search}
+                            onChange={(e) => setSalesFilters(f => ({ ...f, search: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">From Date</Label>
+                          <Input type="date" className="h-9"
+                            value={salesFilters.startDate}
+                            onChange={(e) => setSalesFilters(f => ({ ...f, startDate: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">To Date</Label>
+                          <Input type="date" className="h-9"
+                            value={salesFilters.endDate}
+                            onChange={(e) => setSalesFilters(f => ({ ...f, endDate: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                      </div>
+                      {(salesFilters.search || salesFilters.startDate || salesFilters.endDate) && (
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-3 p-3 bg-white rounded border">
+                          <div>
+                            <p className="text-xs text-gray-500">Filtered Final Amount</p>
+                            <p className="text-base font-bold text-blue-700">₹{fmt(salesFilteredTotals.finalAmount)}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-500">Filtered Received</p>
+                            <p className="text-base font-bold text-green-600">₹{fmt(salesFilteredTotals.totalPaid)}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-500">Filtered Balance</p>
+                            <p className="text-base font-bold text-orange-600">₹{fmt(salesFilteredTotals.balance)}</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
                     {sales.length === 0 ? (
                       <p className="text-center text-gray-500 py-8">No sales recorded yet</p>
+                    ) : filteredSales.length === 0 ? (
+                      <p className="text-center text-gray-500 py-8">No sales match your search / filters</p>
                     ) : (
                       <div className="overflow-x-auto">
+                        <div className="flex items-center justify-end mb-2">
+                          <PageSizeSelect
+                            value={salesFilters.pageSize}
+                            onChange={(n) => setSalesFilters(f => ({ ...f, pageSize: n, page: 1 }))}
+                          />
+                        </div>
                         <Table>
                           <TableHeader>
                             <TableRow>
@@ -3177,7 +3907,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {sales.map(sale => (
+                            {salesPage.paged.map(sale => (
                               <TableRow key={sale.id}>
                                 <TableCell>
                                   <span className="font-medium">{sale.inventoryNumber || sale.inventoryName}</span>
@@ -3278,11 +4008,20 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                             ))}
                           </TableBody>
                         </Table>
+                        <TablePager
+                          total={salesPage.total}
+                          totalPages={salesPage.totalPages}
+                          currentPage={salesPage.currentPage}
+                          start={salesPage.start}
+                          end={salesPage.end}
+                          label="sales"
+                          onChange={(p) => setSalesFilters(f => ({ ...f, page: p }))}
+                        />
                       </div>
                     )}
                   </CardContent>
                 </Card>
-                
+
                 {/* View Sale Dialog */}
                 <Dialog open={!!viewSaleId} onOpenChange={(open) => { if (!open) { setViewSaleId(null); setViewSaleData(null); } }}>
                   <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
@@ -3387,11 +4126,12 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                             <DialogTitle>Add Resale Deal</DialogTitle>
                             <DialogDescription>Transfer flat ownership from seller (investor) to new buyer</DialogDescription>
                           </DialogHeader>
-                          <ResaleDealForm 
-                            inventory={inventory.filter(i => i.status === 'Sold')} 
+                          <ResaleDealForm
+                            inventory={inventory.filter(i => i.status === 'Sold' || i.status === 'Resold')}
                             sales={sales}
                             customers={customers}
-                            onSubmit={handleCreateResaleDeal} 
+                            resaleDeals={resaleDeals}
+                            onSubmit={handleCreateResaleDeal}
                             onCancel={() => setIsDialogOpen(false)}
                             onCreateCustomer={async (customerData) => {
                               const newCustomer = await apiCall('/customers', 'POST', { ...customerData, societyId: selectedSociety })
@@ -3426,14 +4166,63 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                       </div>
                     )}
                     
+                    {/* Filter Bar */}
+                    <div className="mb-4 p-4 bg-gray-50 rounded-lg border">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Filter className="w-4 h-4 text-gray-500" />
+                        <span className="text-sm font-medium text-gray-700">Search & Filters</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="ml-auto"
+                          onClick={() => setResalesFilters(f => ({ search: '', startDate: '', endDate: '', pageSize: f.pageSize, page: 1 }))}
+                        >
+                          <X className="w-4 h-4 mr-1" /> Clear
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div>
+                          <Label className="text-xs text-gray-500">Search (seller / buyer / inventory / notes)</Label>
+                          <Input
+                            placeholder="Type to filter…"
+                            className="h-9"
+                            value={resalesFilters.search}
+                            onChange={(e) => setResalesFilters(f => ({ ...f, search: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">From Date</Label>
+                          <Input type="date" className="h-9"
+                            value={resalesFilters.startDate}
+                            onChange={(e) => setResalesFilters(f => ({ ...f, startDate: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">To Date</Label>
+                          <Input type="date" className="h-9"
+                            value={resalesFilters.endDate}
+                            onChange={(e) => setResalesFilters(f => ({ ...f, endDate: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
                     {resaleDeals.length === 0 ? (
                       <div className="text-center py-8">
                         <ArrowRightLeft className="w-12 h-12 mx-auto text-gray-300 mb-2" />
                         <p className="text-gray-500">No resale deals recorded yet</p>
                         <p className="text-sm text-gray-400">Create a resale deal when an existing owner sells to a new buyer</p>
                       </div>
+                    ) : filteredResales.length === 0 ? (
+                      <p className="text-center text-gray-500 py-8">No resale deals match your search / filters</p>
                     ) : (
                       <div className="overflow-x-auto">
+                        <div className="flex items-center justify-end mb-2">
+                          <PageSizeSelect
+                            value={resalesFilters.pageSize}
+                            onChange={(n) => setResalesFilters(f => ({ ...f, pageSize: n, page: 1 }))}
+                          />
+                        </div>
                         <Table>
                           <TableHeader>
                             <TableRow>
@@ -3451,7 +4240,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {resaleDeals.map(deal => (
+                            {resalesPage.paged.map(deal => (
                               <TableRow key={deal.id}>
                                 <TableCell>{new Date(deal.dealDate).toLocaleDateString()}</TableCell>
                                 <TableCell className="font-medium">{deal.inventoryName}</TableCell>
@@ -3544,6 +4333,15 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                             ))}
                           </TableBody>
                         </Table>
+                        <TablePager
+                          total={resalesPage.total}
+                          totalPages={resalesPage.totalPages}
+                          currentPage={resalesPage.currentPage}
+                          start={resalesPage.start}
+                          end={resalesPage.end}
+                          label="deals"
+                          onChange={(p) => setResalesFilters(f => ({ ...f, page: p }))}
+                        />
                       </div>
                     )}
                   </CardContent>
@@ -3687,37 +4485,6 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                   </Dialog>
                 </div>
 
-                {/* Add Work dialog (opened programmatically from a vendor row) */}
-                <Dialog
-                  open={dialogMode === 'createExpenseBill' && isDialogOpen}
-                  onOpenChange={(open) => {
-                    setIsDialogOpen(open)
-                    if (!open) { setDialogMode(''); setAddWorkVendor(null) }
-                  }}
-                >
-                  <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-                    <DialogHeader>
-                      <DialogTitle>
-                        {addWorkVendor ? `Add Work — ${addWorkVendor.name}` : 'Add Work Entry'}
-                      </DialogTitle>
-                    </DialogHeader>
-                    <ExpenseBillForm
-                      vendors={vendors}
-                      categories={expenseCategories}
-                      accounts={accounts}
-                      initialData={addWorkVendor
-                        ? {
-                            vendorId: addWorkVendor.id,
-                            ...(addWorkVendor._preselectLabour ? { category: 'Labour' } : {}),
-                          }
-                        : undefined}
-                      onSubmit={handleCreateExpenseBill}
-                      onCancel={() => { setIsDialogOpen(false); setAddWorkVendor(null) }}
-                      onAddNewCategory={loadMasterData}
-                    />
-                  </DialogContent>
-                </Dialog>
-
                 {/* Summary cards */}
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                   <Card>
@@ -3814,6 +4581,13 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                         <p className="text-gray-500">No vendors match your filters</p>
                       </div>
                     ) : (
+                      <>
+                      <div className="flex items-center justify-end mb-2">
+                        <PageSizeSelect
+                          value={vendorLedgerFilters.pageSize}
+                          onChange={(n) => setVendorLedgerFilters(f => ({ ...f, pageSize: n, page: 1 }))}
+                        />
+                      </div>
                       <Table>
                         <TableHeader>
                           <TableRow>
@@ -3827,7 +4601,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {filteredVendorLedger.map(row => (
+                          {vendorLedgerPage.paged.map(row => (
                             <TableRow key={row.id}>
                               <TableCell className="font-medium">{row.name}</TableCell>
                               <TableCell>
@@ -3900,6 +4674,16 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                           ))}
                         </TableBody>
                       </Table>
+                      <TablePager
+                        total={vendorLedgerPage.total}
+                        totalPages={vendorLedgerPage.totalPages}
+                        currentPage={vendorLedgerPage.currentPage}
+                        start={vendorLedgerPage.start}
+                        end={vendorLedgerPage.end}
+                        label="vendors"
+                        onChange={(p) => setVendorLedgerFilters(f => ({ ...f, page: p }))}
+                      />
+                      </>
                     )}
                   </CardContent>
                 </Card>
@@ -3951,10 +4735,19 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                           <X className="w-4 h-4 mr-1" /> Clear
                         </Button>
                       </div>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                        <div className="md:col-span-2">
+                          <Label className="text-xs text-gray-500">Search</Label>
+                          <Input
+                            placeholder="Broker / customer / inventory / description"
+                            className="h-9"
+                            value={commissionFilters.search}
+                            onChange={(e) => setCommissionFilters(f => ({ ...f, search: e.target.value, page: 1 }))}
+                          />
+                        </div>
                         <div>
                           <Label className="text-xs text-gray-500">Status</Label>
-                          <Select value={commissionFilters.status} onValueChange={(v) => setCommissionFilters(f => ({ ...f, status: v }))}>
+                          <Select value={commissionFilters.status} onValueChange={(v) => setCommissionFilters(f => ({ ...f, status: v, page: 1 }))}>
                             <SelectTrigger className="h-9">
                               <SelectValue placeholder="All Status" />
                             </SelectTrigger>
@@ -3968,7 +4761,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                         </div>
                         <div>
                           <Label className="text-xs text-gray-500">Broker</Label>
-                          <Select value={commissionFilters.brokerId} onValueChange={(v) => setCommissionFilters(f => ({ ...f, brokerId: v }))}>
+                          <Select value={commissionFilters.brokerId} onValueChange={(v) => setCommissionFilters(f => ({ ...f, brokerId: v, page: 1 }))}>
                             <SelectTrigger className="h-9">
                               <SelectValue placeholder="All Brokers" />
                             </SelectTrigger>
@@ -3982,20 +4775,20 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                         </div>
                         <div>
                           <Label className="text-xs text-gray-500">From Date</Label>
-                          <Input 
-                            type="date" 
+                          <Input
+                            type="date"
                             className="h-9"
                             value={commissionFilters.startDate}
-                            onChange={(e) => setCommissionFilters(f => ({ ...f, startDate: e.target.value }))}
+                            onChange={(e) => setCommissionFilters(f => ({ ...f, startDate: e.target.value, page: 1 }))}
                           />
                         </div>
                         <div>
                           <Label className="text-xs text-gray-500">To Date</Label>
-                          <Input 
-                            type="date" 
+                          <Input
+                            type="date"
                             className="h-9"
                             value={commissionFilters.endDate}
-                            onChange={(e) => setCommissionFilters(f => ({ ...f, endDate: e.target.value }))}
+                            onChange={(e) => setCommissionFilters(f => ({ ...f, endDate: e.target.value, page: 1 }))}
                           />
                         </div>
                       </div>
@@ -4031,6 +4824,12 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                             <p className="text-lg font-semibold text-orange-600">₹{fmt(commissionTotals.totalBalance)}</p>
                           </div>
                         </div>
+                        <div className="flex items-center justify-end mb-2">
+                          <PageSizeSelect
+                            value={commissionFilters.pageSize}
+                            onChange={(n) => setCommissionFilters(f => ({ ...f, pageSize: n, page: 1 }))}
+                          />
+                        </div>
                         <Table>
                           <TableHeader>
                             <TableRow>
@@ -4047,7 +4846,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {filteredCommissionBills.map(bill => (
+                            {commissionBillsPage.paged.map(bill => (
                               <TableRow key={bill.id}>
                                 <TableCell>{new Date(bill.commissionDate).toLocaleDateString()}</TableCell>
                                 <TableCell className="font-medium">{bill.brokerName}</TableCell>
@@ -4100,9 +4899,218 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                             ))}
                           </TableBody>
                         </Table>
-                        <div className="mt-2 text-sm text-gray-500 text-right">
-                          Showing {filteredCommissionBills.length} of {commissionBills.length} bills
+                        <TablePager
+                          total={commissionBillsPage.total}
+                          totalPages={commissionBillsPage.totalPages}
+                          currentPage={commissionBillsPage.currentPage}
+                          start={commissionBillsPage.start}
+                          end={commissionBillsPage.end}
+                          label="bills"
+                          onChange={(p) => setCommissionFilters(f => ({ ...f, page: p }))}
+                        />
+                      </>
+                    )}
+                  </CardContent>
+                </Card>
+              </TabsContent>
+
+              {/* Margins Tab */}
+              <TabsContent value="margins" className="space-y-4">
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center justify-between">
+                      <CardTitle className="flex items-center gap-2">
+                        <IndianRupee className="w-5 h-5" />
+                        Margin Ledger
+                      </CardTitle>
+                      <div className="flex items-center gap-2">
+                        <Dialog open={dialogMode === 'createMarginBill' && isDialogOpen} onOpenChange={(open) => { setIsDialogOpen(open); if (!open) setDialogMode('') }}>
+                          <DialogTrigger asChild>
+                            <Button onClick={() => { setDialogMode('createMarginBill'); setCurrentItem(null); }}>
+                              <Plus className="w-4 h-4 mr-2" /> Add Margin Bill
+                            </Button>
+                          </DialogTrigger>
+                          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                            <DialogHeader>
+                              <DialogTitle>Add Margin Bill</DialogTitle>
+                            </DialogHeader>
+                            <MarginBillForm
+                              accounts={accounts}
+                              onSubmit={handleCreateMarginBill}
+                              onCancel={() => setIsDialogOpen(false)}
+                            />
+                          </DialogContent>
+                        </Dialog>
+                      </div>
+                    </div>
+                    {/* Filter Bar */}
+                    <div className="mt-4 p-4 bg-gray-50 rounded-lg border">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Filter className="w-4 h-4 text-gray-500" />
+                        <span className="text-sm font-medium text-gray-700">Filters</span>
+                        <Button variant="ghost" size="sm" onClick={clearMarginFilters} className="ml-auto">
+                          <X className="w-4 h-4 mr-1" /> Clear
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div>
+                          <Label className="text-xs text-gray-500">Search</Label>
+                          <Input
+                            placeholder="Remark"
+                            className="h-9"
+                            value={marginFilters.search}
+                            onChange={(e) => setMarginFilters(f => ({ ...f, search: e.target.value, page: 1 }))}
+                          />
                         </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">Status</Label>
+                          <Select value={marginFilters.status} onValueChange={(v) => setMarginFilters(f => ({ ...f, status: v, page: 1 }))}>
+                            <SelectTrigger className="h-9">
+                              <SelectValue placeholder="All Status" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="all">All Status</SelectItem>
+                              <SelectItem value="PENDING">Pending</SelectItem>
+                              <SelectItem value="PARTIAL">Partial</SelectItem>
+                              <SelectItem value="PAID">Paid</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">From Date</Label>
+                          <Input
+                            type="date"
+                            className="h-9"
+                            value={marginFilters.startDate}
+                            onChange={(e) => setMarginFilters(f => ({ ...f, startDate: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs text-gray-500">To Date</Label>
+                          <Input
+                            type="date"
+                            className="h-9"
+                            value={marginFilters.endDate}
+                            onChange={(e) => setMarginFilters(f => ({ ...f, endDate: e.target.value, page: 1 }))}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    {marginBills.length === 0 ? (
+                      <div className="text-center py-8">
+                        <IndianRupee className="w-12 h-12 mx-auto text-gray-300 mb-2" />
+                        <p className="text-gray-500">No margin bills recorded yet</p>
+                        <p className="text-sm text-gray-400">{resaleDeals.length === 0 ? 'Add a resale deal first' : 'Click Add Margin Bill to record one'}</p>
+                      </div>
+                    ) : filteredMarginBills.length === 0 ? (
+                      <div className="text-center py-8">
+                        <Filter className="w-12 h-12 mx-auto text-gray-300 mb-2" />
+                        <p className="text-gray-500">No bills match your filters</p>
+                        <Button variant="link" onClick={clearMarginFilters}>Clear Filters</Button>
+                      </div>
+                    ) : (
+                      <>
+                        {/* Totals Summary */}
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 p-3 bg-emerald-50 rounded-lg">
+                          <div className="text-center">
+                            <p className="text-xs text-gray-500">Total Margin</p>
+                            <p className="text-lg font-semibold">₹{fmt(marginTotals.totalMargin)}</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-xs text-gray-500">Total Paid</p>
+                            <p className="text-lg font-semibold text-green-600">₹{fmt(marginTotals.totalPaid)}</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-xs text-gray-500">Total Balance</p>
+                            <p className="text-lg font-semibold text-orange-600">₹{fmt(marginTotals.totalBalance)}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-end mb-2">
+                          <PageSizeSelect
+                            value={marginFilters.pageSize}
+                            onChange={(n) => setMarginFilters(f => ({ ...f, pageSize: n, page: 1 }))}
+                          />
+                        </div>
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Date</TableHead>
+                              <TableHead>Remark</TableHead>
+                              <TableHead>Margin</TableHead>
+                              <TableHead>Paid</TableHead>
+                              <TableHead>Balance</TableHead>
+                              <TableHead>Status</TableHead>
+                              <TableHead>Actions</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {marginBillsPage.paged.map(bill => {
+                              const parsedDate = bill.billDate ? new Date(bill.billDate) : null
+                              const dateLabel = parsedDate && !isNaN(parsedDate.getTime())
+                                ? parsedDate.toLocaleDateString()
+                                : '—'
+                              return (
+                                <TableRow key={bill.id}>
+                                  <TableCell>{dateLabel}</TableCell>
+                                  <TableCell>{bill.description || bill.remark || '-'}</TableCell>
+                                  <TableCell>₹{fmt(bill.amount)}</TableCell>
+                                  <TableCell className="text-green-600">₹{fmt(bill.totalPaid)}</TableCell>
+                                  <TableCell className="text-orange-600">₹{fmt(bill.balance)}</TableCell>
+                                  <TableCell>
+                                    <Badge variant={bill.status === 'PAID' ? 'default' : bill.status === 'PARTIAL' ? 'secondary' : 'destructive'}>
+                                      {bill.status}
+                                    </Badge>
+                                  </TableCell>
+                                  <TableCell>
+                                    <div className="flex items-center gap-2">
+                                      <Button variant="outline" size="sm" onClick={() => openBillPayments('margin', bill)}>
+                                        <CreditCard className="w-4 h-4 mr-1" /> Payments
+                                      </Button>
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => setEditingMarginBill(bill)}
+                                        title="Edit bill"
+                                      >
+                                        <Pencil className="w-4 h-4" />
+                                      </Button>
+                                      <AlertDialog>
+                                        <AlertDialogTrigger asChild>
+                                          <Button variant="destructive" size="sm">
+                                            <Trash2 className="w-4 h-4" />
+                                          </Button>
+                                        </AlertDialogTrigger>
+                                        <AlertDialogContent>
+                                          <AlertDialogHeader>
+                                            <AlertDialogTitle>Delete Margin Bill?</AlertDialogTitle>
+                                            <AlertDialogDescription>
+                                              This will delete the bill and all associated payments. This action cannot be undone.
+                                            </AlertDialogDescription>
+                                          </AlertDialogHeader>
+                                          <AlertDialogFooter>
+                                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                            <AlertDialogAction onClick={() => handleDeleteMarginBill(bill.id)}>Delete</AlertDialogAction>
+                                          </AlertDialogFooter>
+                                        </AlertDialogContent>
+                                      </AlertDialog>
+                                    </div>
+                                  </TableCell>
+                                </TableRow>
+                              )
+                            })}
+                          </TableBody>
+                        </Table>
+                        <TablePager
+                          total={marginBillsPage.total}
+                          totalPages={marginBillsPage.totalPages}
+                          currentPage={marginBillsPage.currentPage}
+                          start={marginBillsPage.start}
+                          end={marginBillsPage.end}
+                          label="bills"
+                          onChange={(p) => setMarginFilters(f => ({ ...f, page: p }))}
+                        />
                       </>
                     )}
                   </CardContent>
@@ -4178,11 +5186,9 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
           {editingExpenseBill && (
             <ExpenseBillForm
               vendors={vendors}
-              categories={expenseCategories}
               initialData={editingExpenseBill}
               onSubmit={handleUpdateExpenseBill}
               onCancel={() => setEditingExpenseBill(null)}
-              onAddNewCategory={loadMasterData}
             />
           )}
         </DialogContent>
@@ -4205,6 +5211,25 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
               initialData={editingCommissionBill}
               onSubmit={handleUpdateCommissionBill}
               onCancel={() => setEditingCommissionBill(null)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Margin Bill Dialog */}
+      <Dialog open={!!editingMarginBill} onOpenChange={(open) => !open && setEditingMarginBill(null)}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Margin Bill</DialogTitle>
+            <DialogDescription>
+              Update margin details. Margin amount can&apos;t be reduced below already paid.
+            </DialogDescription>
+          </DialogHeader>
+          {editingMarginBill && (
+            <MarginBillForm
+              initialData={editingMarginBill}
+              onSubmit={handleUpdateMarginBill}
+              onCancel={() => setEditingMarginBill(null)}
             />
           )}
         </DialogContent>
@@ -4241,6 +5266,34 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
         onDeletePayment={handleDeleteBillPayment}
         onUpdatePayment={handleUpdateBillPayment}
       />
+
+      {/* Add Work dialog — mounted at top level so it works from any tab
+          (Dashboard, Vendor Ledger, etc.) when triggered programmatically
+          via setDialogMode('createExpenseBill'). */}
+      <Dialog
+        open={dialogMode === 'createExpenseBill' && isDialogOpen}
+        onOpenChange={(open) => {
+          setIsDialogOpen(open)
+          if (!open) { setDialogMode(''); setAddWorkVendor(null) }
+        }}
+      >
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {addWorkVendor ? `Add Work — ${addWorkVendor.name}` : 'Add Work Entry'}
+            </DialogTitle>
+          </DialogHeader>
+          <ExpenseBillForm
+            vendors={vendors}
+            accounts={accounts}
+            initialData={addWorkVendor
+              ? { vendorId: addWorkVendor.id }
+              : undefined}
+            onSubmit={handleCreateExpenseBill}
+            onCancel={() => { setIsDialogOpen(false); setAddWorkVendor(null) }}
+          />
+        </DialogContent>
+      </Dialog>
 
       {/* Vendor Ledger Drawer */}
       <VendorLedgerDrawer
@@ -4424,18 +5477,42 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            {/* Summary Stats */}
-            <div className="text-sm text-gray-600">
-              Showing last {auditLogsData.logs?.length || 0} activities
+            {/* Search + rows-per-page. Changing page size re-fetches from the
+                server so the requested number of rows is actually loaded. */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
+              <div>
+                <Label className="text-xs text-gray-500">Search (action / entity / user / reason)</Label>
+                <Input
+                  placeholder="Type to filter…"
+                  className="h-9"
+                  value={auditLogsFilters.search}
+                  onChange={(e) => setAuditLogsFilters(f => ({ ...f, search: e.target.value, page: 1 }))}
+                />
+              </div>
+              <div className="flex items-center justify-end gap-2">
+                <PageSizeSelect
+                  value={auditLogsFilters.pageSize}
+                  onChange={(n) => {
+                    setAuditLogsFilters(f => ({ ...f, pageSize: n, page: 1 }))
+                    loadAuditLogs(n)
+                  }}
+                />
+                <Button variant="outline" size="sm" onClick={() => loadAuditLogs()}>
+                  <RefreshCw className="w-4 h-4 mr-1" /> Refresh
+                </Button>
+              </div>
             </div>
-            
+
             {/* Logs Table */}
             {!auditLogsData.logs || auditLogsData.logs.length === 0 ? (
               <div className="text-center py-8 text-gray-500">
                 <BookOpen className="w-12 h-12 mx-auto text-gray-300 mb-2" />
                 <p>No audit logs yet</p>
               </div>
+            ) : filteredAuditLogs.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">No logs match your search</div>
             ) : (
+              <>
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -4447,7 +5524,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {auditLogsData.logs.map((log) => (
+                  {auditLogsPage.paged.map((log) => (
                     <TableRow key={log.id}>
                       <TableCell className="whitespace-nowrap">{new Date(log.timestamp).toLocaleString()}</TableCell>
                       <TableCell>
@@ -4472,6 +5549,16 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                   ))}
                 </TableBody>
               </Table>
+              <TablePager
+                total={auditLogsPage.total}
+                totalPages={auditLogsPage.totalPages}
+                currentPage={auditLogsPage.currentPage}
+                start={auditLogsPage.start}
+                end={auditLogsPage.end}
+                label="logs"
+                onChange={(p) => setAuditLogsFilters(f => ({ ...f, page: p }))}
+              />
+              </>
             )}
           </div>
         </DialogContent>
@@ -4941,12 +6028,21 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
     if (!bill) return ''
     if (billType === 'expense') return `Expense Payments - ${bill.vendorName}`
     if (billType === 'commission') return `Commission Payments - ${bill.brokerName}`
+    if (billType === 'margin') {
+      const flat = bill.inventoryType && bill.inventoryName
+        ? `${bill.inventoryType} ${bill.inventoryName}`
+        : (bill.inventoryName || 'Resale')
+      return `Margin Payments - ${flat}`
+    }
     return ''
   }
 
   const getBillAmount = () => {
     if (!bill) return 0
-    return billType === 'expense' ? bill.billAmount : bill.commissionAmount
+    if (billType === 'expense') return bill.billAmount || 0
+    if (billType === 'commission') return bill.commissionAmount || 0
+    if (billType === 'margin') return bill.amount || 0
+    return 0
   }
 
   const handleSubmit = (e) => {
@@ -4970,7 +6066,7 @@ const BillPaymentDrawer = ({ isOpen, onClose, billType, bill, payments, accounts
         <DrawerHeader>
           <DrawerTitle>{getTitle()}</DrawerTitle>
           <DrawerDescription>
-            Manage payments for this {billType === 'expense' ? 'expense' : 'commission'} bill
+            Manage payments for this {billType === 'expense' ? 'expense' : billType === 'margin' ? 'margin' : 'commission'} bill
           </DrawerDescription>
         </DrawerHeader>
         
@@ -5819,12 +6915,12 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
     }
   }, [editingTransfer])
 
-  // Sales of the same customer (excluding this one and any TRANSFERRED ones)
-  // — destination options for an internal transfer.
-  const sameCustomerSales = (ledgerType === 'sale' && ledgerItem?.customerId)
+  // All live sales except this one — destination options for an internal
+  // transfer. Cross-customer transfers are allowed; the operator decides
+  // whether the move makes sense.
+  const sameCustomerSales = ledgerType === 'sale' && ledgerItem
     ? (sales || []).filter(s =>
         s.id !== ledgerItem.id
-        && s.customerId === ledgerItem.customerId
         && s.status !== 'TRANSFERRED'
         && !s.isDeleted
       )
@@ -6340,7 +7436,17 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                           {ledgerType === 'purchase' && !isCredit(entry) && '-'}
                           ₹{fmt(entry.amount)}
                         </TableCell>
-                        <TableCell><Badge variant="outline">{entry.paymentMode}</Badge></TableCell>
+                        <TableCell>
+                          <div className="flex flex-col gap-1">
+                            <Badge variant="outline">{entry.paymentMode}</Badge>
+                            {(entry.entryType === 'TRANSFER_OUT' || entry.entryType === 'TRANSFER_IN') && entry.otherInventoryLabel && (
+                              <span className="text-xs text-indigo-600 whitespace-nowrap">
+                                {entry.entryType === 'TRANSFER_OUT' ? '→' : '←'} {entry.otherInventoryLabel}
+                                {entry.otherBuyerName ? ` (${entry.otherBuyerName})` : ''}
+                              </span>
+                            )}
+                          </div>
+                        </TableCell>
                         <TableCell>{entry.remark || '-'}</TableCell>
                         <TableCell>
                           <div className="flex items-center gap-1">
@@ -6412,7 +7518,7 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
           <DialogHeader>
             <DialogTitle>Transfer between sales</DialogTitle>
             <DialogDescription>
-              Move a paid amount from <span className="font-medium">this sale</span> to another sale of the same customer. Cash account balance is not affected.
+              Move a paid amount from <span className="font-medium">this sale</span> to any other live sale. Cash account balance is not affected.
             </DialogDescription>
           </DialogHeader>
           <form
@@ -6443,12 +7549,14 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                 value={transferForm.destinationSaleId}
                 onValueChange={(v) => setTransferForm(f => ({ ...f, destinationSaleId: v }))}
               >
-                <SelectTrigger><SelectValue placeholder="Select another sale of this customer" /></SelectTrigger>
+                <SelectTrigger><SelectValue placeholder="Select destination sale" /></SelectTrigger>
                 <SelectContent>
                   {sameCustomerSales.map(s => {
-                    const label = s.inventoryNumber && s.inventoryNumber !== 'N/A'
-                      ? `${s.inventoryType || ''} ${s.inventoryNumber} — ₹${fmt(s.finalAmount || 0)}`
-                      : `Sale ${s.id?.slice(0, 6)} — ₹${fmt(s.finalAmount || 0)}`
+                    const flat = s.inventoryNumber && s.inventoryNumber !== 'N/A'
+                      ? `${s.inventoryType || ''} ${s.inventoryNumber}`
+                      : `Sale ${s.id?.slice(0, 6)}`
+                    const customer = s.customerName ? ` (${s.customerName})` : ''
+                    const label = `${flat}${customer} — ₹${fmt(s.finalAmount || 0)}`
                     return (
                       <SelectItem key={s.id} value={s.id}>{label}</SelectItem>
                     )
@@ -6456,8 +7564,17 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                 </SelectContent>
               </Select>
               {sameCustomerSales.length === 0 && (
-                <p className="text-xs text-orange-600 mt-1">No other live sales found for this customer.</p>
+                <p className="text-xs text-orange-600 mt-1">No other live sales found.</p>
               )}
+              {transferForm.destinationSaleId && (() => {
+                const dest = sameCustomerSales.find(s => s.id === transferForm.destinationSaleId)
+                if (!dest || !ledgerItem?.customerId || dest.customerId === ledgerItem.customerId) return null
+                return (
+                  <p className="text-xs text-amber-700 mt-1">
+                    ⚠ Cross-customer transfer — destination belongs to a different customer ({dest.customerName || 'unknown'}).
+                  </p>
+                )
+              })()}
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
@@ -7827,44 +8944,18 @@ const VendorForm = ({ vendor, onSubmit, onCancel, vendorTypes = [], onAddNewType
 }
 
 // Expense Bill Form Component
-const ExpenseBillForm = ({ vendors, categories = [], accounts = [], onSubmit, onCancel, onAddNewCategory, initialData }) => {
+const ExpenseBillForm = ({ vendors, accounts = [], onSubmit, onCancel, initialData }) => {
   const { toast } = useToast()
   const isEdit = Boolean(initialData?.id)
-  // Use dynamic categories if available, fallback to hardcoded
-  const categoryOptions = categories.length > 0 ? categories : [
-    { id: 'Civil', name: 'Civil' },
-    { id: 'Tiles', name: 'Tiles' },
-    { id: 'Electrical', name: 'Electrical' },
-    { id: 'Plumbing', name: 'Plumbing' },
-    { id: 'Paint', name: 'Paint' },
-    { id: 'Labour', name: 'Labour' },
-    { id: 'Legal', name: 'Legal' },
-    { id: 'Marketing', name: 'Marketing' },
-    { id: 'Office', name: 'Office' },
-    { id: 'Other', name: 'Other' }
-  ]
-
-  // For edit, prefer the bill's stored categoryId; fall back to category-name
-  // lookup for legacy rows that only saved the human label.
-  const initialCategoryId = initialData
-    ? (initialData.categoryId
-        || categoryOptions.find(c => c.name === initialData.category)?.id
-        || categoryOptions[0]?.id
-        || '')
-    : (categoryOptions[0]?.id || '')
 
   const initialDate = (initialData?.billDate || '').toString().split('T')[0]
 
   const [formData, setFormData] = useState({
     vendorId: initialData?.vendorId || '',
-    categoryId: initialCategoryId,
     billAmount: (initialData?.billAmount ?? initialData?.amount ?? '').toString(),
     billDate: initialDate,
     description: initialData?.description || ''
   })
-  const [showAddCategory, setShowAddCategory] = useState(false)
-  const [newCategoryName, setNewCategoryName] = useState('')
-  const [isAddingCategory, setIsAddingCategory] = useState(false)
 
   // Inline first-payment capture (only for new bills). Lets the user record
   // an advance/partial payment in the same submit instead of opening the
@@ -7902,9 +8993,13 @@ const ExpenseBillForm = ({ vendors, categories = [], accounts = [], onSubmit, on
       toast({ title: 'Invalid payment', description: 'Paid amount cannot exceed work value', variant: 'destructive' })
       return
     }
+    // Vendor's type doubles as the category — keeps the bill classified
+    // without making the user pick a second time.
+    const selectedVendor = vendors.find(v => v.id === formData.vendorId)
     const payload = {
       ...formData,
       billAmount: workValue,
+      category: selectedVendor?.type || '',
     }
     if (!isEdit && paymentMadeNow && paidNow > 0) {
       payload.initialPayment = {
@@ -7917,33 +9012,6 @@ const ExpenseBillForm = ({ vendors, categories = [], accounts = [], onSubmit, on
       }
     }
     onSubmit(payload)
-  }
-
-  const handleAddNewCategory = async () => {
-    if (!newCategoryName.trim()) return
-    setIsAddingCategory(true)
-    try {
-      const token = localStorage.getItem('token')
-      const res = await fetch('/api/expense-categories', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ name: newCategoryName.trim() })
-      })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.error || 'Failed to add category')
-      }
-      const newCat = await res.json()
-      toast({ title: 'Success', description: 'New category added' })
-      setFormData({ ...formData, categoryId: newCat.id })
-      setNewCategoryName('')
-      setShowAddCategory(false)
-      if (onAddNewCategory) onAddNewCategory() // Refresh the list
-    } catch (error) {
-      toast({ title: 'Error', description: error.message, variant: 'destructive' })
-    } finally {
-      setIsAddingCategory(false)
-    }
   }
 
   return (
@@ -7964,45 +9032,6 @@ const ExpenseBillForm = ({ vendors, categories = [], accounts = [], onSubmit, on
         </Select>
         {vendors.length === 0 && (
           <p className="text-sm text-orange-600 mt-1">Please add vendors first from the Vendors tab</p>
-        )}
-      </div>
-      <div>
-        <Label>Category *</Label>
-        {showAddCategory ? (
-          <div className="flex gap-2">
-            <Input 
-              value={newCategoryName} 
-              onChange={e => setNewCategoryName(e.target.value)} 
-              placeholder="New category name"
-              autoFocus
-            />
-            <Button type="button" size="sm" onClick={handleAddNewCategory} disabled={isAddingCategory || !newCategoryName.trim()}>
-              {isAddingCategory ? 'Adding...' : 'Add'}
-            </Button>
-            <Button type="button" size="sm" variant="outline" onClick={() => { setShowAddCategory(false); setNewCategoryName(''); }}>
-              Cancel
-            </Button>
-          </div>
-        ) : (
-          <Select value={formData.categoryId} onValueChange={v => {
-            if (v === '__add_new__') {
-              setShowAddCategory(true)
-            } else {
-              setFormData({...formData, categoryId: v})
-            }
-          }} required>
-            <SelectTrigger>
-              <SelectValue placeholder="Select category" />
-            </SelectTrigger>
-            <SelectContent>
-              {categoryOptions.map(cat => (
-                <SelectItem key={cat.id} value={cat.id || cat.name}>{cat.name}</SelectItem>
-              ))}
-              <SelectItem value="__add_new__" className="text-blue-600 font-medium">
-                + Add New Category
-              </SelectItem>
-            </SelectContent>
-          </Select>
         )}
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -8257,8 +9286,220 @@ const CommissionBillForm = ({ brokers, sales, inventory, onSubmit, onCancel, ini
   )
 }
 
+// Margin Bill Form — like CommissionBillForm but the recipient is implicit
+// (the resale flat). Pick a ResaleDeal, enter amount, date, description.
+const MarginBillForm = ({ accounts = [], onSubmit, onCancel, initialData }) => {
+  const { toast } = useToast()
+  const isEdit = Boolean(initialData?.id)
+  const initialDate = (initialData?.billDate || '').toString().split('T')[0]
+  const [formData, setFormData] = useState({
+    amount: (initialData?.amount ?? '').toString(),
+    billDate: initialDate,
+    remark: initialData?.description || initialData?.remark || ''
+  })
+
+  // Inline first-payment capture — mirrors ExpenseBillForm so the user can
+  // record advance/full payment in the same submit instead of opening the
+  // payment drawer after creating the bill.
+  const [paymentMadeNow, setPaymentMadeNow] = useState(false)
+  const [paymentData, setPaymentData] = useState({
+    paidAmount: '',
+    paymentMode: 'Cash',
+    accountId: '',
+    referenceNo: '',
+    paymentRemark: '',
+  })
+
+  useEffect(() => {
+    if (!paymentMadeNow) return
+    const wantType = paymentData.paymentMode === 'Cash' ? 'CASH' : 'BANK'
+    const eligible = (accounts || []).filter(a => a.type === wantType)
+    if (!eligible.length) return
+    const stillValid = eligible.find(a => a.id === paymentData.accountId)
+    if (stillValid) return
+    const def = eligible.find(a => a.isDefault) || eligible[0]
+    setPaymentData(prev => ({ ...prev, accountId: def.id }))
+  }, [paymentMadeNow, paymentData.paymentMode, accounts])
+
+  const marginValue = parseFloat(formData.amount) || 0
+  const paidNow = paymentMadeNow ? (parseFloat(paymentData.paidAmount) || 0) : 0
+  const pendingAfterSave = Math.max(0, marginValue - paidNow)
+  const paymentExceeds = paymentMadeNow && paidNow > marginValue
+
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    if (paymentExceeds) {
+      toast({ title: 'Invalid payment', description: 'Paid amount cannot exceed margin amount', variant: 'destructive' })
+      return
+    }
+    const payload = {
+      amount: marginValue,
+      billDate: formData.billDate,
+      remark: formData.remark,
+      description: formData.remark,
+    }
+    if (!isEdit && paymentMadeNow && paidNow > 0) {
+      payload.initialPayment = {
+        amount: paidNow,
+        paymentDate: formData.billDate,
+        paymentMode: paymentData.paymentMode,
+        accountId: paymentData.accountId,
+        referenceNo: paymentData.referenceNo,
+        remark: paymentData.paymentRemark,
+      }
+    }
+    onSubmit(payload)
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <Label>Margin Amount *</Label>
+          <Input
+            type="number"
+            value={formData.amount}
+            onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+            required
+          />
+        </div>
+        <div>
+          <Label>Date *</Label>
+          <Input
+            type="date"
+            value={formData.billDate}
+            onChange={(e) => setFormData({ ...formData, billDate: e.target.value })}
+            required
+          />
+        </div>
+      </div>
+
+      <div>
+        <Label>Remark</Label>
+        <Textarea
+          value={formData.remark}
+          onChange={(e) => setFormData({ ...formData, remark: e.target.value })}
+          placeholder="Add a remark for this margin entry"
+        />
+      </div>
+
+      {!isEdit && (
+        <div className={`rounded-md border ${paymentMadeNow ? 'border-emerald-300 bg-emerald-50/50' : 'border-slate-200'} p-3 space-y-3`}>
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="h-4 w-4 accent-emerald-600"
+              checked={paymentMadeNow}
+              onChange={(e) => setPaymentMadeNow(e.target.checked)}
+            />
+            <span className="font-medium">Payment Made Now</span>
+            <span className="text-sm text-slate-500">— record advance/full payment along with this margin</span>
+          </label>
+          {paymentMadeNow && (
+            <div className="space-y-3 pt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <Label>Paid Amount (₹) *</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={paymentData.paidAmount}
+                    onChange={(e) => setPaymentData({ ...paymentData, paidAmount: e.target.value })}
+                    required
+                  />
+                  {paymentExceeds && (
+                    <p className="text-xs text-red-600 mt-1">Paid amount cannot exceed margin amount</p>
+                  )}
+                </div>
+                <div>
+                  <Label>Payment Mode *</Label>
+                  <Select
+                    value={paymentData.paymentMode}
+                    onValueChange={(v) => setPaymentData({ ...paymentData, paymentMode: v, accountId: '' })}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {PAYMENT_MODES.map(m => (
+                        <SelectItem key={m} value={m}>{m}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <Label>From Account</Label>
+                  <Select
+                    value={paymentData.accountId}
+                    onValueChange={(v) => setPaymentData({ ...paymentData, accountId: v })}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
+                    <SelectContent>
+                      {(accounts || [])
+                        .filter(a => paymentData.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK')
+                        .map(a => (
+                          <SelectItem key={a.id} value={a.id}>{a.name} ({a.type})</SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label>Reference / Cheque No <span className="text-xs text-slate-500">recommended</span></Label>
+                  <Input
+                    placeholder="Txn / Ref"
+                    value={paymentData.referenceNo}
+                    onChange={(e) => setPaymentData({ ...paymentData, referenceNo: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div>
+                <Label>Payment Remark</Label>
+                <Input
+                  value={paymentData.paymentRemark}
+                  onChange={(e) => setPaymentData({ ...paymentData, paymentRemark: e.target.value })}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!isEdit && (
+        <div className="grid grid-cols-3 gap-3 rounded-md border bg-slate-50 p-3 text-center">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-slate-500">Margin</p>
+            <p className="text-lg font-bold text-blue-700">₹{fmt(marginValue)}</p>
+          </div>
+          <div>
+            <p className="text-xs uppercase tracking-wide text-slate-500">Paid Now</p>
+            <p className="text-lg font-bold text-emerald-700">₹{fmt(paidNow)}</p>
+          </div>
+          <div>
+            <p className="text-xs uppercase tracking-wide text-slate-500">Pending After Save</p>
+            <p className={`text-lg font-bold ${pendingAfterSave > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{fmt(pendingAfterSave)}</p>
+          </div>
+        </div>
+      )}
+
+      {isEdit && (initialData?.totalPaid ?? initialData?.paidAmount ?? 0) > 0 && (
+        <p className="text-sm text-orange-700 bg-orange-50 p-3 rounded">
+          ₹{((initialData.totalPaid ?? initialData.paidAmount) || 0).toLocaleString('en-IN')} already paid against this bill — margin amount can&apos;t be reduced below that.
+        </p>
+      )}
+
+      <div className="flex justify-end space-x-2">
+        <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button type="submit" disabled={paymentExceeds}>
+          {isEdit ? 'Update Margin Bill' : (paymentMadeNow && paidNow > 0 ? 'Save Margin + Payment' : 'Create Margin Bill')}
+        </Button>
+      </div>
+    </form>
+  )
+}
+
 // Resale Deal Form Component
-const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCancel, onCreateCustomer }) => {
+const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [], onSubmit, onCancel, onCreateCustomer }) => {
   const [formData, setFormData] = useState({
     inventoryId: '',
     sellerCustomerId: '',
@@ -8277,16 +9518,30 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
   })
   
   const [selectedSale, setSelectedSale] = useState(null)
+  // Picks the previous-owner ResaleDeal when this inventory has already been
+  // resold once (Bhanu→Monu→Sonu chain). When present, the new deal records
+  // `previousResaleDealId` so its "original" price/paid come from the prior
+  // resale instead of the long-gone Bhanu→company Sale row.
+  const [selectedPreviousDeal, setSelectedPreviousDeal] = useState(null)
   const [showNewBuyer, setShowNewBuyer] = useState(false)
   const [newBuyerData, setNewBuyerData] = useState({ name: '', phone: '' })
   const [isCreatingBuyer, setIsCreatingBuyer] = useState(false)
   const { toast } = useToast()
 
-  // When inventory is selected, auto-populate seller info
+  // When inventory is selected, auto-populate seller info. Prefer an active
+  // Sale (first-hop resale); if none exists, fall back to the most recent
+  // Active ResaleDeal for that inventory (chained resale).
   const handleInventoryChange = (inventoryId) => {
-    setFormData({ ...formData, inventoryId })
-    
-    // Find the sale for this inventory
+    setFormData(prev => ({
+      ...prev,
+      inventoryId,
+      sellerCustomerId: '',
+      sellerName: '',
+      sellerPhone: '',
+    }))
+    setSelectedSale(null)
+    setSelectedPreviousDeal(null)
+
     const sale = sales.find(s => s.inventoryId === inventoryId && ['Booked', 'Agreement', 'Completed'].includes(s.status))
     if (sale) {
       setSelectedSale(sale)
@@ -8296,6 +9551,31 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
         sellerCustomerId: sale.customerId || '',
         sellerName: sale.customerName || '',
         sellerPhone: sale.customerPhone || ''
+      }))
+      return
+    }
+
+    // Chained resale: find the most recent ResaleDeal that's the current
+    // "head" of the chain for this inventory — not yet chained forward
+    // (no nextResaleDealId) and not deleted. Status may be 'Active' or
+    // 'TRANSFERRED' (closed via closeDeal); both represent a real owner
+    // who can still resell again.
+    const candidateDeals = (resaleDeals || [])
+      .filter(d =>
+        d.inventoryId === inventoryId
+        && !d.isDeleted
+        && !d.nextResaleDealId
+      )
+      .sort((a, b) => new Date(b.dealDate || b.createdAt || 0) - new Date(a.dealDate || a.createdAt || 0))
+    const lastDeal = candidateDeals[0]
+    if (lastDeal) {
+      setSelectedPreviousDeal(lastDeal)
+      setFormData(prev => ({
+        ...prev,
+        inventoryId,
+        sellerCustomerId: lastDeal.buyerCustomerId || '',
+        sellerName: lastDeal.buyerName || '',
+        sellerPhone: lastDeal.buyerPhone || ''
       }))
     }
   }
@@ -8347,19 +9627,27 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
   // Calculate profit preview
   const calculateProfit = () => {
     const resalePrice = parseFloat(formData.resalePrice) || 0
-    const originalPrice = selectedSale?.finalAmount || 0
+    // For a first-hop resale, "original" comes from the Sale row. For a
+    // chained resale (Monu→Sonu), it comes from the previous ResaleDeal:
+    // the seller (Monu) bought at lastDeal.resalePrice and has paid in
+    // lastDeal.collectedFromBuyer (sum of ResaleBuyerPayments).
+    const originalPrice = selectedSale
+      ? (selectedSale.finalAmount || 0)
+      : (selectedPreviousDeal?.resalePrice || 0)
+    const sellerPrincipal = selectedSale
+      ? (selectedSale.totalPaid || 0)
+      : (selectedPreviousDeal?.buyerPaid ?? selectedPreviousDeal?.originalSalePaid ?? 0)
     const transferCharges = parseFloat(formData.transferCharges) || 0
     const brokerage = parseFloat(formData.brokerage) || 0
     const otherCharges = parseFloat(formData.otherCharges) || 0
     const totalCharges = transferCharges + brokerage + otherCharges
-    
+
     const grossProfit = resalePrice - originalPrice
     const netProfit = grossProfit - totalCharges
-    
+
     // Seller payout = what seller paid + profit (minus charges)
-    const sellerPrincipal = selectedSale?.totalPaid || 0  // From allocations
     const sellerPayout = sellerPrincipal + netProfit
-    
+
     return {
       originalPrice,
       grossProfit,
@@ -8378,15 +9666,31 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
       toast({ title: 'Error', description: 'Please select or create a buyer', variant: 'destructive' })
       return
     }
+    if (!selectedSale && !selectedPreviousDeal) {
+      toast({ title: 'Error', description: 'No active owner found for this inventory', variant: 'destructive' })
+      return
+    }
+
+    // Chained resale (Monu→Sonu): backend will derive originalSalePrice from
+    // the previous deal's resalePrice and originalSalePaid from the
+    // ResaleBuyerPayments collected against that deal. We still send
+    // `previousResaleDealId` so the backend knows it's a chained deal and
+    // can mark the previous deal TRANSFERRED.
+    const sourceLink = selectedPreviousDeal
+      ? { previousResaleDealId: selectedPreviousDeal.id }
+      : {
+          originalSaleId: selectedSale?.id,
+          originalSalePrice: selectedSale?.finalAmount,
+          originalSalePaid: selectedSale?.totalPaid || 0,
+        }
+
     onSubmit({
       ...formData,
       resalePrice: parseFloat(formData.resalePrice),
       transferCharges: parseFloat(formData.transferCharges || 0),
       brokerage: parseFloat(formData.brokerage || 0),
       otherCharges: parseFloat(formData.otherCharges || 0),
-      originalSaleId: selectedSale?.id,
-      originalSalePrice: selectedSale?.finalAmount,
-      originalSalePaid: selectedSale?.totalPaid || 0,
+      ...sourceLink,
     })
   }
 
@@ -8401,10 +9705,18 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
           </SelectTrigger>
           <SelectContent>
             {inventory.map(item => {
-              const sale = sales.find(s => s.inventoryId === item.id)
+              const activeSale = sales.find(s => s.inventoryId === item.id && ['Booked', 'Agreement', 'Completed'].includes(s.status))
+              const lastDeal = !activeSale
+                ? (resaleDeals || [])
+                    .filter(d => d.inventoryId === item.id && !d.isDeleted && !d.nextResaleDealId)
+                    .sort((a, b) => new Date(b.dealDate || b.createdAt || 0) - new Date(a.dealDate || a.createdAt || 0))[0]
+                : null
+              const ownerLabel = activeSale
+                ? `Owner: ${activeSale.customerName}`
+                : (lastDeal ? `Owner: ${lastDeal.buyerName} (from resale)` : '')
               return (
                 <SelectItem key={item.id} value={item.id}>
-                  {item.type} - {item.inventoryNumber} {sale ? `(Owner: ${sale.customerName})` : ''}
+                  {item.type} - {item.inventoryNumber} {ownerLabel ? `(${ownerLabel})` : ''}
                 </SelectItem>
               )
             })}
@@ -8434,6 +9746,36 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
               </div>
               <div>
                 <span className="text-gray-500">Amount Paid:</span> <strong className="text-green-600">₹{(selectedSale.totalPaid || 0).toLocaleString('en-IN')}</strong>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Chained resale: seller is the buyer from a previous ResaleDeal */}
+      {!selectedSale && selectedPreviousDeal && (
+        <Card className="bg-indigo-50/60 border-indigo-200">
+          <CardContent className="pt-4">
+            <h4 className="font-medium mb-2 flex items-center gap-2 text-indigo-800">
+              <ArrowRightLeft className="w-4 h-4" /> Current Owner (from previous resale)
+            </h4>
+            <p className="text-xs text-indigo-700 mb-2">
+              This property was previously resold. The seller here is that resale&apos;s buyer.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+              <div>
+                <span className="text-gray-500">Name:</span> <strong>{formData.sellerName}</strong>
+              </div>
+              <div>
+                <span className="text-gray-500">Phone:</span> {formData.sellerPhone || 'N/A'}
+              </div>
+              <div>
+                <span className="text-gray-500">Bought at (prev. resale price):</span>{' '}
+                <strong className="text-blue-600">₹{(selectedPreviousDeal.resalePrice || 0).toLocaleString('en-IN')}</strong>
+              </div>
+              <div>
+                <span className="text-gray-500">Paid against prev. resale:</span>{' '}
+                <strong className="text-green-600">₹{((selectedPreviousDeal.buyerPaid ?? selectedPreviousDeal.originalSalePaid) || 0).toLocaleString('en-IN')}</strong>
               </div>
             </div>
           </CardContent>
@@ -8515,7 +9857,7 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
           <Input type="number" value={formData.brokerage} onChange={e => setFormData({...formData, brokerage: e.target.value})} />
         </div>
         <div>
-          <Label>Other Charges</Label>
+          <Label>Margin</Label>
           <Input type="number" value={formData.otherCharges} onChange={e => setFormData({...formData, otherCharges: e.target.value})} />
         </div>
       </div>
@@ -8529,14 +9871,14 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], onSubmit, onCan
       )}
       
       {/* Profit Preview */}
-      {formData.resalePrice && selectedSale && (
+      {formData.resalePrice && (selectedSale || selectedPreviousDeal) && (
         <Card className="bg-gradient-to-r from-green-50 to-blue-50 border-green-200">
           <CardContent className="pt-4">
             <h4 className="font-medium mb-3">💰 Deal Summary</h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
               <div className="space-y-2">
                 <div className="flex justify-between">
-                  <span className="text-gray-600">Original Sale Price:</span>
+                  <span className="text-gray-600">{selectedSale ? 'Original Sale Price:' : 'Prev. Resale Price:'}</span>
                   <span>₹{profit.originalPrice.toLocaleString('en-IN')}</span>
                 </div>
                 <div className="flex justify-between">
@@ -9081,13 +10423,20 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {sellerPayouts.map(payout => (
+                        {sellerPayouts.map(payout => {
+                          const dateStr = payout.payoutDate || payout.paymentDate
+                          const parsedDate = dateStr ? new Date(dateStr) : null
+                          const dateLabel = parsedDate && !isNaN(parsedDate.getTime())
+                            ? parsedDate.toLocaleDateString()
+                            : '—'
+                          const modeLabel = payout.payoutMode || payout.paymentMode || '—'
+                          return (
                           <TableRow key={payout.id}>
-                            <TableCell>{new Date(payout.payoutDate).toLocaleDateString()}</TableCell>
+                            <TableCell>{dateLabel}</TableCell>
                             <TableCell className="text-blue-600">₹{fmt(payout.principalAmount || 0)}</TableCell>
                             <TableCell className="text-green-600">₹{fmt(payout.profitAmount || 0)}</TableCell>
                             <TableCell className="text-orange-600 font-medium">₹{fmt(payout.amount)}</TableCell>
-                            <TableCell><Badge variant="outline">{payout.payoutMode}</Badge></TableCell>
+                            <TableCell><Badge variant="outline">{modeLabel}</Badge></TableCell>
                             <TableCell>
                               <AlertDialog>
                                 <AlertDialogTrigger asChild>
@@ -9110,7 +10459,8 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                               </AlertDialog>
                             </TableCell>
                           </TableRow>
-                        ))}
+                          )
+                        })}
                       </TableBody>
                     </Table>
                   )}

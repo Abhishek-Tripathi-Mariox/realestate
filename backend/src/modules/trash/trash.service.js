@@ -1,7 +1,8 @@
 const {
   Sale, Inventory, ExpenseBill, Partner, Customer, Loan,
-  Purchase, Vendor, CommissionBill, ResaleDeal, CustomerPayment,
+  Purchase, Vendor, CommissionBill, MarginBill, ResaleDeal, CustomerPayment,
   SalePaymentEntry, PurchasePaymentEntry, ExpensePayment, CommissionPayment,
+  MarginPayment,
   PartnerLedgerEntry, ResaleBuyerPayment, ResaleSellerPayout, LoanRepayment,
   Party, Society, SocietyPhase, Transaction,
 } = require('../../models');
@@ -30,6 +31,8 @@ const TRASH_BUCKETS = [
   { slug: 'expensePayments',       collection: 'expense_payments',         label: 'Expense Payment',      model: ExpensePayment },
   { slug: 'commissionBills',       collection: 'commission_bills',         label: 'Commission Bill',      model: CommissionBill },
   { slug: 'commissionPayments',    collection: 'commission_payments',      label: 'Commission Payment',   model: CommissionPayment },
+  { slug: 'marginBills',           collection: 'margin_bills',             label: 'Margin Bill',          model: MarginBill },
+  { slug: 'marginPayments',        collection: 'margin_payments',          label: 'Margin Payment',       model: MarginPayment },
   { slug: 'resaleDeals',           collection: 'resale_deals',             label: 'Resale Deal',          model: ResaleDeal },
   { slug: 'resaleBuyerPayments',   collection: 'resale_buyer_payments',    label: 'Resale Buyer Payment', model: ResaleBuyerPayment },
   { slug: 'resaleSellerPayouts',   collection: 'resale_seller_payouts',    label: 'Resale Seller Payout', model: ResaleSellerPayout },
@@ -68,6 +71,8 @@ const PARENT_REFS = {
   purchasePayments:     [{ field: 'purchaseId',   parent: 'purchases',       label: 'Purchase' }],
   expensePayments:      [{ field: 'billId',       parent: 'expenseBills',    label: 'Expense Bill' }],
   commissionPayments:   [{ field: 'billId',       parent: 'commissionBills', label: 'Commission Bill' }],
+  marginPayments:       [{ field: 'billId',       parent: 'marginBills',     label: 'Margin Bill' }],
+  marginBills:          [{ field: 'resaleDealId', parent: 'resaleDeals',     label: 'Resale Deal' }],
   customerPayments:     [{ field: 'customerId',   parent: 'customers',       label: 'Customer' }],
   partnerLedgerEntries: [{ field: 'partnerId',    parent: 'partners',        label: 'Partner' }],
   loans:                [{ field: 'partyId',      parent: 'parties',         label: 'Party' }],

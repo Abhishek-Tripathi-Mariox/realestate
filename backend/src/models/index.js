@@ -17,6 +17,8 @@ module.exports = {
   ExpensePayment: require('./ExpensePayment'),
   CommissionBill: require('./CommissionBill'),
   CommissionPayment: require('./CommissionPayment'),
+  MarginBill: require('./MarginBill'),
+  MarginPayment: require('./MarginPayment'),
   ResaleDeal: require('./ResaleDeal'),
   ResaleBuyerPayment: require('./ResaleBuyerPayment'),
   ResaleSellerPayout: require('./ResaleSellerPayout'),

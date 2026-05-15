@@ -66,11 +66,29 @@ const create = async (body) => {
   const companyCommission = Number(body.companyCommission ?? (transferCharges + brokerage + otherCharges)) || 0;
 
   // Derive seller/buyer amounts so the resale-payments drawer can read them
-  // directly without recomputing. Falls back to the original Sale record if
-  // the client didn't supply originalSalePrice / originalSalePaid.
+  // directly without recomputing. Three sources, in priority order:
+  //   1. Caller-supplied originalSalePrice/originalSalePaid (legacy path)
+  //   2. previousResaleDealId — chained resale (Bhanu→Monu→Sonu): the seller
+  //      is the previous deal's buyer, "original" price = that deal's
+  //      resalePrice, "original" paid = how much that buyer has already paid
+  //      against the previous deal.
+  //   3. originalSaleId — first-hop resale off a Sale record.
   let originalSalePrice = Number(body.originalSalePrice) || 0;
   let originalSalePaid = Number(body.originalSalePaid) || 0;
-  if (body.originalSaleId && (!originalSalePrice || !originalSalePaid)) {
+  let previousDeal = null;
+  if (body.previousResaleDealId) {
+    previousDeal = await ResaleDeal.findOne({ id: body.previousResaleDealId }).lean();
+    if (!previousDeal || previousDeal.isDeleted) {
+      return { error: 'Previous resale deal not found', status: 404 };
+    }
+    if (!originalSalePrice) originalSalePrice = Number(previousDeal.resalePrice) || 0;
+    if (!originalSalePaid) {
+      const buyerPayments = await ResaleBuyerPayment
+        .find(notDeleted({ dealId: previousDeal.id }))
+        .lean();
+      originalSalePaid = buyerPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+    }
+  } else if (body.originalSaleId && (!originalSalePrice || !originalSalePaid)) {
     const originalSale = await Sale.findOne({ id: body.originalSaleId }).lean();
     if (originalSale) {
       if (!originalSalePrice) originalSalePrice = Number(originalSale.finalAmount) || 0;
@@ -102,6 +120,7 @@ const create = async (body) => {
     chargesNotes: body.chargesNotes || '',
     companyCommission,
     originalSaleId: body.originalSaleId || null,
+    previousResaleDealId: body.previousResaleDealId || null,
     originalSalePrice,
     originalSalePaid,
     buyerPurchaseAmount,
@@ -129,6 +148,23 @@ const create = async (body) => {
           resaleDealId: deal.id,
           transferredTo: deal.buyerName,
           transferredAt: new Date(),
+          updatedAt: new Date(),
+        },
+      },
+    );
+  }
+
+  // Chained resale: mark the previous deal as TRANSFERRED so it stops being
+  // the "current" deal for this inventory. Its buyer (this deal's seller)
+  // has now exited the chain.
+  if (deal.previousResaleDealId) {
+    await ResaleDeal.updateOne(
+      { id: deal.previousResaleDealId },
+      {
+        $set: {
+          status: 'TRANSFERRED',
+          closedAt: new Date(),
+          nextResaleDealId: deal.id,
           updatedAt: new Date(),
         },
       },
@@ -174,6 +210,19 @@ const remove = async (dealId, userId) => {
       {
         $set: { status: 'Booked', updatedAt: new Date() },
         $unset: { resaleDealId: '', transferredTo: '', transferredAt: '' },
+      },
+    );
+  }
+
+  // Chained delete: if this deal was a continuation of another resale, flip
+  // the previous deal back to Active so it once again represents the
+  // current ownership of the unit.
+  if (deal.previousResaleDealId) {
+    await ResaleDeal.updateOne(
+      { id: deal.previousResaleDealId },
+      {
+        $set: { status: 'Active', updatedAt: new Date() },
+        $unset: { closedAt: '', nextResaleDealId: '' },
       },
     );
   }
@@ -295,16 +344,34 @@ const addSellerPayout = async (dealId, body, userId) => {
     accountId = defaultAccount?.id;
   }
 
+  // Frontend form sends payoutDate/payoutMode/reference/principalAmount/
+  // profitAmount/chargesDeducted; older callers may send the legacy
+  // paymentDate/paymentMode/referenceNo. Accept both and store every field
+  // so the Seller Payout Breakdown (Principal Paid / Profit Paid) and the
+  // history table can read them back correctly.
   const amount = parseFloat(body.amount) || 0;
+  const principalAmount = parseFloat(body.principalAmount) || 0;
+  const profitAmount = parseFloat(body.profitAmount) || 0;
+  const chargesDeducted = parseFloat(body.chargesDeducted) || 0;
+  const paymentDate = body.payoutDate || body.paymentDate || null;
+  const paymentMode = body.payoutMode || body.paymentMode || 'Cash';
+  const referenceNo = body.reference ?? body.referenceNo ?? '';
+
   const payout = {
     id: uuidv4(),
     dealId,
     societyId: deal.societyId,
     accountId,
     amount,
-    paymentDate: body.paymentDate,
-    paymentMode: body.paymentMode || 'Cash',
-    referenceNo: body.referenceNo || '',
+    principalAmount,
+    profitAmount,
+    chargesDeducted,
+    paymentDate,
+    payoutDate: paymentDate,            // alias so legacy FE reads still work
+    paymentMode,
+    payoutMode: paymentMode,            // alias for the same reason
+    referenceNo,
+    reference: referenceNo,
     remark: body.remark || '',
     createdBy: userId,
     createdAt: new Date(),

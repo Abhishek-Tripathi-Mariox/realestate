@@ -203,14 +203,14 @@ const listExpenses = async (query) => {
     filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] };
     filter.$or = [{ societyId: null }, { societyId: { $exists: false } }];
   } else if (scope === 'SOCIETY') {
-    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'COMMISSION_PAYMENT'] };
+    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'COMMISSION_PAYMENT', 'MARGIN_PAYMENT'] };
     if (query.societyId && query.societyId !== 'all') {
       filter.societyId = query.societyId;
     } else {
       filter.societyId = { $ne: null };
     }
   } else {
-    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'COMMISSION_PAYMENT'] };
+    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'COMMISSION_PAYMENT', 'MARGIN_PAYMENT'] };
     if (query.societyId && query.societyId !== 'all') {
       filter.societyId = query.societyId;
     }

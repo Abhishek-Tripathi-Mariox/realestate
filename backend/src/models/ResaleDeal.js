@@ -8,6 +8,7 @@ const schema = buildSchema({
   buyerName: String,
   resalePrice: Number,
   companyCommission: Number,
+  previousResaleDealId: String,
   status: String,
   closedAt: Date,
   closedBy: String,

@@ -396,8 +396,63 @@ const listLedger = async (saleId) => {
     };
   });
 
-  const merged = [...entries.map(stripId), ...allocationEntries]
-    .sort((a, b) => new Date(b.paymentDate || b.createdAt) - new Date(a.paymentDate || a.createdAt));
+  // For TRANSFER_OUT / TRANSFER_IN entries, attach a human-readable label of
+  // the OTHER side (counterpart sale's inventory + customer/buyer) so the FE
+  // can show "Internal → Flat 102" instead of just "Internal" — important
+  // when there are several transfers and the table can't tell them apart.
+  const transferGroupIds = entries
+    .filter(e => e.transferGroupId && (e.entryType === 'TRANSFER_OUT' || e.entryType === 'TRANSFER_IN'))
+    .map(e => e.transferGroupId);
+  let counterpartLabelByEntryId = {};
+  if (transferGroupIds.length > 0) {
+    const siblings = await SalePaymentEntry
+      .find({ transferGroupId: { $in: transferGroupIds }, saleId: { $ne: saleId }, isDeleted: { $ne: true } })
+      .lean();
+    const counterpartSaleIds = [...new Set(siblings.map(s => s.saleId).filter(Boolean))];
+    const counterpartSales = counterpartSaleIds.length
+      ? await Sale.find({ id: { $in: counterpartSaleIds } }).lean()
+      : [];
+    const inventoryIds = [...new Set(counterpartSales.map(s => s.inventoryId).filter(Boolean))];
+    const inventories = inventoryIds.length
+      ? await Inventory.find({ id: { $in: inventoryIds } }).lean()
+      : [];
+    const saleById = Object.fromEntries(counterpartSales.map(s => [s.id, s]));
+    const invById = Object.fromEntries(inventories.map(i => [i.id, i]));
+    const labelByGroup = {};
+    for (const sib of siblings) {
+      const cSale = saleById[sib.saleId];
+      if (!cSale) continue;
+      const inv = invById[cSale.inventoryId];
+      const flat = inv ? `${inv.type || ''} ${inv.inventoryNumber || ''}`.trim() : null;
+      const buyer = cSale.buyerName || '';
+      labelByGroup[sib.transferGroupId] = {
+        otherSaleId: cSale.id,
+        otherInventoryLabel: flat || `Sale ${cSale.id.slice(0, 6)}`,
+        otherBuyerName: buyer,
+      };
+    }
+    for (const e of entries) {
+      if (e.transferGroupId && labelByGroup[e.transferGroupId]) {
+        counterpartLabelByEntryId[e.id] = labelByGroup[e.transferGroupId];
+      }
+    }
+  }
+
+  const merged = [
+    ...entries.map(e => {
+      const stripped = stripId(e);
+      const cp = counterpartLabelByEntryId[e.id];
+      return cp ? { ...stripped, ...cp } : stripped;
+    }),
+    ...allocationEntries,
+  ].sort((a, b) => {
+    // Primary: paymentDate DESC. Tie-break by createdAt DESC so two entries
+    // on the same date show the latest-recorded one first (e.g. a transfer
+    // recorded after a same-day payment appears above the payment).
+    const dateDiff = new Date(b.paymentDate || b.createdAt) - new Date(a.paymentDate || a.createdAt);
+    if (dateDiff !== 0) return dateDiff;
+    return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+  });
 
   return { entries: merged };
 };
@@ -524,9 +579,8 @@ const transferBetweenSales = async (sourceSaleId, body, userId) => {
   if (source.status === 'TRANSFERRED' || destination.status === 'TRANSFERRED') {
     return { error: 'Transferred sales can\'t participate in internal transfers', status: 400 };
   }
-  if (!source.customerId || source.customerId !== destination.customerId) {
-    return { error: 'Both sales must belong to the same customer', status: 400 };
-  }
+  // Cross-customer transfers are allowed — the operator decides whether the
+  // move makes sense. Daybook stays untouched either way (no cash movement).
 
   // Source must have enough net paid balance to hand over.
   const sourceEntries = await SalePaymentEntry.find(notDeleted({ saleId: sourceSaleId })).lean();
