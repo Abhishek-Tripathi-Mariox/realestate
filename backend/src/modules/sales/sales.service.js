@@ -12,6 +12,7 @@ const {
 // amountPaid, paymentStatus, isDeleted, status (TRANSFERRED tag), etc.
 const SALE_UPDATABLE = [
   'customerId', 'buyerName', 'buyerContact', 'saleDate',
+  'sqft', 'ratePerSqft', 'discountPercent',
   'dealPrice', 'agreedPrice', 'discount', 'notes',
 ];
 
@@ -118,6 +119,9 @@ const create = async (societyId, body, userId) => {
   // Frontend uses `dealPrice`; older callers may send `agreedPrice`. Accept both.
   const dealPrice = Number(body.dealPrice ?? body.agreedPrice) || 0;
   const discount = Number(body.discount) || 0;
+  const sqft = Number(body.sqft) || 0;
+  const ratePerSqft = Number(body.ratePerSqft) || 0;
+  const discountPercent = Number(body.discountPercent) || 0;
 
   const sale = {
     id: uuidv4(),
@@ -127,6 +131,9 @@ const create = async (societyId, body, userId) => {
     buyerName: body.buyerName,
     buyerContact: body.buyerContact,
     saleDate: body.saleDate,
+    sqft,
+    ratePerSqft,
+    discountPercent,
     dealPrice,
     discount,
     finalAmount: dealPrice - discount,

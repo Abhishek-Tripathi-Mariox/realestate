@@ -8492,13 +8492,30 @@ const PurchaseForm = ({ onSubmit, onCancel, initialData }) => {
 }
 
 const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, hasPayments, onCreateCustomer, onUpdateCustomer }) => {
+  // Back-derive sqft/rate/discount% from any saved numbers so editing an
+  // existing sale shows the same calculator-driven view it was created with.
+  const initialSqft = initialData?.sqft?.toString()
+    || (initialData?.inventoryId && inventory.find(i => i.id === initialData.inventoryId)?.area?.toString())
+    || ''
+  const initialRate = initialData?.ratePerSqft?.toString()
+    || (initialSqft && initialData?.dealPrice
+        ? (Number(initialData.dealPrice) / Number(initialSqft)).toString()
+        : '')
+  const initialDiscountPercent = initialData?.discountPercent?.toString()
+    || (initialData?.dealPrice && initialData?.discount
+        ? ((Number(initialData.discount) / Number(initialData.dealPrice)) * 100).toFixed(2)
+        : '')
+
   const [formData, setFormData] = useState({
     inventoryId: initialData?.inventoryId || '',
     customerId: initialData?.customerId || '',
     customerName: initialData?.customerName || '',
     customerPhone: initialData?.customerPhone || '',
     customerAddress: initialData?.customerAddress || '',
+    sqft: initialSqft,
+    ratePerSqft: initialRate,
     dealPrice: initialData?.dealPrice?.toString() || '',
+    discountPercent: initialDiscountPercent,
     discount: initialData?.discount?.toString() || '0',
     saleDate: initialData?.saleDate?.split('T')[0] || '',
     status: initialData?.status || 'Booked',
@@ -8611,7 +8628,10 @@ const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, 
     }
     onSubmit({
       ...formData,
+      sqft: parseFloat(formData.sqft) || 0,
+      ratePerSqft: parseFloat(formData.ratePerSqft) || 0,
       dealPrice: parseFloat(formData.dealPrice),
+      discountPercent: parseFloat(formData.discountPercent) || 0,
       discount: parseFloat(formData.discount)
     })
   }
@@ -8620,9 +8640,24 @@ const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, 
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
         <Label>Select Inventory *</Label>
-        <Select 
-          value={formData.inventoryId} 
-          onValueChange={v => setFormData({...formData, inventoryId: v})} 
+        <Select
+          value={formData.inventoryId}
+          onValueChange={v => {
+            const inv = inventory.find(i => i.id === v)
+            // Auto-fill area + rate from the inventory record; recalc deal
+            // price so the user sees a default they can override.
+            const sqft = inv?.area ? inv.area.toString() : ''
+            const rate = inv?.pricePerSqft ? inv.pricePerSqft.toString() : ''
+            const sqftN = parseFloat(sqft) || 0
+            const rateN = parseFloat(rate) || 0
+            const dealPrice = sqftN > 0 && rateN > 0 ? (sqftN * rateN).toString() : ''
+            const discountPct = parseFloat(formData.discountPercent) || 0
+            const dealPriceN = parseFloat(dealPrice) || 0
+            const discount = dealPriceN > 0 && discountPct > 0
+              ? ((dealPriceN * discountPct) / 100).toString()
+              : formData.discount
+            setFormData({ ...formData, inventoryId: v, sqft, ratePerSqft: rate, dealPrice, discount })
+          }}
           disabled={initialData && hasPayments}
           required
         >
@@ -8789,16 +8824,98 @@ const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, 
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
-          <Label>Deal Price *</Label>
-          <Input type="number" value={formData.dealPrice} onChange={e => setFormData({...formData, dealPrice: e.target.value})} required />
+          <Label>Square Feet</Label>
+          <Input
+            type="number"
+            value={formData.sqft}
+            onChange={e => {
+              const sqft = e.target.value
+              const sqftN = parseFloat(sqft) || 0
+              const rateN = parseFloat(formData.ratePerSqft) || 0
+              const dealPrice = sqftN > 0 && rateN > 0 ? (sqftN * rateN).toString() : formData.dealPrice
+              const dealPriceN = parseFloat(dealPrice) || 0
+              const discountPct = parseFloat(formData.discountPercent) || 0
+              const discount = dealPriceN > 0 && discountPct > 0
+                ? ((dealPriceN * discountPct) / 100).toString()
+                : formData.discount
+              setFormData({ ...formData, sqft, dealPrice, discount })
+            }}
+          />
         </div>
         <div>
-          <Label>Discount</Label>
-          <Input type="number" value={formData.discount} onChange={e => setFormData({...formData, discount: e.target.value})} />
+          <Label>Rate (₹ per sq ft)</Label>
+          <Input
+            type="number"
+            value={formData.ratePerSqft}
+            onChange={e => {
+              const ratePerSqft = e.target.value
+              const sqftN = parseFloat(formData.sqft) || 0
+              const rateN = parseFloat(ratePerSqft) || 0
+              const dealPrice = sqftN > 0 && rateN > 0 ? (sqftN * rateN).toString() : formData.dealPrice
+              const dealPriceN = parseFloat(dealPrice) || 0
+              const discountPct = parseFloat(formData.discountPercent) || 0
+              const discount = dealPriceN > 0 && discountPct > 0
+                ? ((dealPriceN * discountPct) / 100).toString()
+                : formData.discount
+              setFormData({ ...formData, ratePerSqft, dealPrice, discount })
+            }}
+          />
         </div>
       </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <Label>Deal Price *</Label>
+          <Input
+            type="number"
+            value={formData.dealPrice}
+            onChange={e => {
+              const dealPrice = e.target.value
+              const dealPriceN = parseFloat(dealPrice) || 0
+              const discountPct = parseFloat(formData.discountPercent) || 0
+              const discount = dealPriceN > 0 && discountPct > 0
+                ? ((dealPriceN * discountPct) / 100).toString()
+                : formData.discount
+              setFormData({ ...formData, dealPrice, discount })
+            }}
+            required
+          />
+          <p className="text-xs text-gray-500 mt-1">Auto = Sqft × Rate (override allowed)</p>
+        </div>
+        <div>
+          <Label>Discount (%)</Label>
+          <Input
+            type="number"
+            value={formData.discountPercent}
+            onChange={e => {
+              const discountPercent = e.target.value
+              const dealPriceN = parseFloat(formData.dealPrice) || 0
+              const pctN = parseFloat(discountPercent) || 0
+              const discount = dealPriceN > 0 && pctN > 0
+                ? ((dealPriceN * pctN) / 100).toString()
+                : '0'
+              setFormData({ ...formData, discountPercent, discount })
+            }}
+          />
+        </div>
+      </div>
+      <div>
+        <Label>Discount (₹)</Label>
+        <Input
+          type="number"
+          value={formData.discount}
+          onChange={e => {
+            const discount = e.target.value
+            const dealPriceN = parseFloat(formData.dealPrice) || 0
+            const discN = parseFloat(discount) || 0
+            const discountPercent = dealPriceN > 0
+              ? ((discN / dealPriceN) * 100).toFixed(2)
+              : ''
+            setFormData({ ...formData, discount, discountPercent })
+          }}
+        />
+      </div>
       {formData.dealPrice && (
-        <p className="text-sm font-medium">Final Amount: ₹{((parseFloat(formData.dealPrice) || 0) - (parseFloat(formData.discount) || 0)).toLocaleString()}</p>
+        <p className="text-sm font-medium">Final Amount: ₹{((parseFloat(formData.dealPrice) || 0) - (parseFloat(formData.discount) || 0)).toLocaleString('en-IN')}</p>
       )}
       <div>
         <Label>Sale Date *</Label>
