@@ -1536,12 +1536,63 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
 
   const handleCreateSale = async (formData) => {
     try {
+      // Multi-flat form sends `items[]`. Sequentially POST one Sale per item
+      // so inventory `Sold` flips and any per-sale daybook entries happen in
+      // the same order as the list. Single-flat callers still work — they
+      // either omit `items` or send legacy top-level fields.
+      const { items, ...shared } = formData
+      if (Array.isArray(items) && items.length > 0) {
+        const errors = []
+        for (const it of items) {
+          try {
+            await apiCall(`/societies/${selectedSociety}/sales`, 'POST', { ...shared, ...it })
+          } catch (perItemErr) {
+            const inv = inventory.find(i => i.id === it.inventoryId)
+            const label = inv ? `${inv.type} ${inv.inventoryNumber}` : 'flat'
+            errors.push(`${label}: ${perItemErr.message || 'failed'}`)
+          }
+        }
+        await refreshAfterSaleChange()
+        setIsDialogOpen(false)
+        if (errors.length) {
+          toast({
+            title: errors.length === items.length ? 'All sales failed' : 'Some sales failed',
+            description: errors.join('\n'),
+            variant: 'destructive',
+          })
+        } else {
+          toast({
+            title: 'Success',
+            description: items.length > 1 ? `${items.length} sales created` : 'Sale created successfully',
+          })
+        }
+        return
+      }
+
       await apiCall(`/societies/${selectedSociety}/sales`, 'POST', formData)
-      await loadSocietyData()
+      await refreshAfterSaleChange()
       setIsDialogOpen(false)
       toast({ title: 'Success', description: 'Sale created successfully' })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  // Force-refresh the sales list after create/edit/delete. loadSocietyData
+  // is gated by the visited-tabs cache — if the user reached the sale form
+  // via a flow that didn't mark 'sales' as visited (e.g. dashboard quick
+  // action) the list stays stale. Calling the loader directly sidesteps
+  // that and also reloads inventory so Sold flags update in real time.
+  const refreshAfterSaleChange = async () => {
+    if (!selectedSociety) return
+    try {
+      await Promise.all([
+        loadSalesTab(),
+        loadSocietySummary(),
+      ])
+      loadedTabsRef.current.add('sales')
+    } catch (err) {
+      console.error('refreshAfterSaleChange failed', err)
     }
   }
 
@@ -1582,7 +1633,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
   const handleEditSale = async (formData) => {
     try {
       await apiCall(`/sales/${editingSale.id}`, 'PUT', formData)
-      await loadSocietyData()
+      await refreshAfterSaleChange()
       setEditingSale(null)
       setIsDialogOpen(false)
       toast({ title: 'Success', description: 'Sale updated successfully' })
@@ -1594,7 +1645,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
   const handleDeleteSale = async (saleId) => {
     try {
       await apiCall(`/sales/${saleId}`, 'DELETE')
-      await loadSocietyData()
+      await refreshAfterSaleChange()
       toast({ title: 'Success', description: 'Sale and related entries deleted successfully' })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
@@ -8492,35 +8543,102 @@ const PurchaseForm = ({ onSubmit, onCancel, initialData }) => {
 }
 
 const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, hasPayments, onCreateCustomer, onUpdateCustomer }) => {
-  // Back-derive sqft/rate/discount% from any saved numbers so editing an
-  // existing sale shows the same calculator-driven view it was created with.
-  const initialSqft = initialData?.sqft?.toString()
-    || (initialData?.inventoryId && inventory.find(i => i.id === initialData.inventoryId)?.area?.toString())
-    || ''
-  const initialRate = initialData?.ratePerSqft?.toString()
-    || (initialSqft && initialData?.dealPrice
-        ? (Number(initialData.dealPrice) / Number(initialSqft)).toString()
-        : '')
-  const initialDiscountPercent = initialData?.discountPercent?.toString()
-    || (initialData?.dealPrice && initialData?.discount
-        ? ((Number(initialData.discount) / Number(initialData.dealPrice)) * 100).toFixed(2)
-        : '')
+  const isEdit = Boolean(initialData?.id)
 
+  // Build the seed item — in edit mode this is the single sale being edited;
+  // in new mode it's the first row of the multi-flat picker.
+  const buildItemFromInitial = () => {
+    const sqft = initialData?.sqft?.toString()
+      || (initialData?.inventoryId && inventory.find(i => i.id === initialData.inventoryId)?.area?.toString())
+      || ''
+    const ratePerSqft = initialData?.ratePerSqft?.toString()
+      || (sqft && initialData?.dealPrice
+          ? (Number(initialData.dealPrice) / Number(sqft)).toString()
+          : '')
+    const discountPercent = initialData?.discountPercent?.toString()
+      || (initialData?.dealPrice && initialData?.discount
+          ? ((Number(initialData.discount) / Number(initialData.dealPrice)) * 100).toFixed(2)
+          : '')
+    return {
+      inventoryId: initialData?.inventoryId || '',
+      sqft,
+      ratePerSqft,
+      dealPrice: initialData?.dealPrice?.toString() || '',
+      discountPercent,
+      discount: initialData?.discount?.toString() || '0',
+    }
+  }
+
+  const [items, setItems] = useState(isEdit ? [buildItemFromInitial()] : [])
   const [formData, setFormData] = useState({
-    inventoryId: initialData?.inventoryId || '',
     customerId: initialData?.customerId || '',
     customerName: initialData?.customerName || '',
     customerPhone: initialData?.customerPhone || '',
     customerAddress: initialData?.customerAddress || '',
-    sqft: initialSqft,
-    ratePerSqft: initialRate,
-    dealPrice: initialData?.dealPrice?.toString() || '',
-    discountPercent: initialDiscountPercent,
-    discount: initialData?.discount?.toString() || '0',
     saleDate: initialData?.saleDate?.split('T')[0] || '',
     status: initialData?.status || 'Booked',
     notes: initialData?.notes || ''
   })
+
+  // Inventory available for the "Add Flat" picker — hide the ones already
+  // sitting in `items` so the user can't double-add the same flat.
+  const usedInventoryIds = new Set(items.map(it => it.inventoryId).filter(Boolean))
+  const pickableInventory = inventory.filter(item => {
+    if (isEdit && item.id === initialData?.inventoryId) return true
+    if (usedInventoryIds.has(item.id)) return false
+    return !item.status || item.status === 'Available'
+  })
+
+  const addItem = (invId) => {
+    const inv = inventory.find(i => i.id === invId)
+    const sqft = inv?.area ? inv.area.toString() : ''
+    const rate = inv?.pricePerSqft ? inv.pricePerSqft.toString() : ''
+    const sqftN = parseFloat(sqft) || 0
+    const rateN = parseFloat(rate) || 0
+    const dealPrice = sqftN > 0 && rateN > 0 ? (sqftN * rateN).toString() : ''
+    setItems(prev => [...prev, {
+      inventoryId: invId,
+      sqft,
+      ratePerSqft: rate,
+      dealPrice,
+      discountPercent: '',
+      discount: '0',
+    }])
+  }
+
+  const removeItem = (idx) => {
+    setItems(prev => prev.filter((_, i) => i !== idx))
+  }
+
+  // Merge a patch into a single item row and recompute the derived fields
+  // (dealPrice from sqft×rate, discount from %). Manual overrides on
+  // dealPrice/discount are respected — those updaters skip the auto-recalc.
+  const updateItem = (idx, patch, opts = {}) => {
+    setItems(prev => prev.map((it, i) => {
+      if (i !== idx) return it
+      const next = { ...it, ...patch }
+      if (opts.recalcDealPrice) {
+        const sqftN = parseFloat(next.sqft) || 0
+        const rateN = parseFloat(next.ratePerSqft) || 0
+        if (sqftN > 0 && rateN > 0) next.dealPrice = (sqftN * rateN).toString()
+      }
+      if (opts.recalcDiscountFromPct || opts.recalcDealPrice) {
+        const dealPriceN = parseFloat(next.dealPrice) || 0
+        const pctN = parseFloat(next.discountPercent) || 0
+        if (dealPriceN > 0 && pctN > 0) {
+          next.discount = ((dealPriceN * pctN) / 100).toString()
+        }
+      }
+      if (opts.recalcPctFromDiscount) {
+        const dealPriceN = parseFloat(next.dealPrice) || 0
+        const discN = parseFloat(next.discount) || 0
+        next.discountPercent = dealPriceN > 0
+          ? ((discN / dealPriceN) * 100).toFixed(2)
+          : ''
+      }
+      return next
+    }))
+  }
   const [showNewCustomer, setShowNewCustomer] = useState(false)
   const [newCustomerData, setNewCustomerData] = useState({ name: '', phone: '', address: '' })
   const [isCreatingCustomer, setIsCreatingCustomer] = useState(false)
@@ -8626,59 +8744,37 @@ const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, 
       toast({ title: 'Error', description: 'Please select a customer', variant: 'destructive' })
       return
     }
-    onSubmit({
-      ...formData,
-      sqft: parseFloat(formData.sqft) || 0,
-      ratePerSqft: parseFloat(formData.ratePerSqft) || 0,
-      dealPrice: parseFloat(formData.dealPrice),
-      discountPercent: parseFloat(formData.discountPercent) || 0,
-      discount: parseFloat(formData.discount)
-    })
+    if (items.length === 0) {
+      toast({ title: 'Error', description: 'Add at least one flat', variant: 'destructive' })
+      return
+    }
+    const normalized = items.map(it => ({
+      inventoryId: it.inventoryId,
+      sqft: parseFloat(it.sqft) || 0,
+      ratePerSqft: parseFloat(it.ratePerSqft) || 0,
+      dealPrice: parseFloat(it.dealPrice) || 0,
+      discountPercent: parseFloat(it.discountPercent) || 0,
+      discount: parseFloat(it.discount) || 0,
+    }))
+    if (normalized.some(it => !it.inventoryId || !(it.dealPrice > 0))) {
+      toast({ title: 'Error', description: 'Each flat needs a valid deal price', variant: 'destructive' })
+      return
+    }
+    if (isEdit) {
+      // Backend still expects a single-flat shape on update — flatten back.
+      onSubmit({ ...formData, ...normalized[0] })
+    } else {
+      onSubmit({ ...formData, items: normalized })
+    }
   }
+
+  const grandTotal = items.reduce(
+    (sum, it) => sum + ((parseFloat(it.dealPrice) || 0) - (parseFloat(it.discount) || 0)),
+    0
+  )
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
-      <div>
-        <Label>Select Inventory *</Label>
-        <Select
-          value={formData.inventoryId}
-          onValueChange={v => {
-            const inv = inventory.find(i => i.id === v)
-            // Auto-fill area + rate from the inventory record; recalc deal
-            // price so the user sees a default they can override.
-            const sqft = inv?.area ? inv.area.toString() : ''
-            const rate = inv?.pricePerSqft ? inv.pricePerSqft.toString() : ''
-            const sqftN = parseFloat(sqft) || 0
-            const rateN = parseFloat(rate) || 0
-            const dealPrice = sqftN > 0 && rateN > 0 ? (sqftN * rateN).toString() : ''
-            const discountPct = parseFloat(formData.discountPercent) || 0
-            const dealPriceN = parseFloat(dealPrice) || 0
-            const discount = dealPriceN > 0 && discountPct > 0
-              ? ((dealPriceN * discountPct) / 100).toString()
-              : formData.discount
-            setFormData({ ...formData, inventoryId: v, sqft, ratePerSqft: rate, dealPrice, discount })
-          }}
-          disabled={initialData && hasPayments}
-          required
-        >
-          <SelectTrigger>
-            <SelectValue placeholder="Choose inventory" />
-          </SelectTrigger>
-          <SelectContent>
-            {inventory
-              .filter(item => !item.status || item.status === 'Available' || item.id === formData.inventoryId)
-              .map(item => (
-                <SelectItem key={item.id} value={item.id}>
-                  {item.type} - {item.inventoryNumber}{item.area > 0 ? ` (${item.area} sq ft)` : ''}
-                </SelectItem>
-              ))}
-          </SelectContent>
-        </Select>
-        {initialData && hasPayments && (
-          <p className="text-xs text-orange-600 mt-1">Cannot change inventory after payments have been made</p>
-        )}
-      </div>
-      
       {/* Customer Selection - Required */}
       <div>
         <Label>Customer * <span className="text-xs text-gray-500">(Required for payment allocation)</span></Label>
@@ -8822,101 +8918,115 @@ const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, 
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div>
-          <Label>Square Feet</Label>
-          <Input
-            type="number"
-            value={formData.sqft}
-            onChange={e => {
-              const sqft = e.target.value
-              const sqftN = parseFloat(sqft) || 0
-              const rateN = parseFloat(formData.ratePerSqft) || 0
-              const dealPrice = sqftN > 0 && rateN > 0 ? (sqftN * rateN).toString() : formData.dealPrice
-              const dealPriceN = parseFloat(dealPrice) || 0
-              const discountPct = parseFloat(formData.discountPercent) || 0
-              const discount = dealPriceN > 0 && discountPct > 0
-                ? ((dealPriceN * discountPct) / 100).toString()
-                : formData.discount
-              setFormData({ ...formData, sqft, dealPrice, discount })
-            }}
-          />
+      {/* Flats picker — multi-select for new sale, single locked row for edit. */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <Label>Flats *{isEdit ? '' : ' (select one or more)'}</Label>
+          {!isEdit && (
+            <Select
+              value=""
+              onValueChange={v => { if (v) addItem(v) }}
+            >
+              <SelectTrigger className="w-56 h-9">
+                <SelectValue placeholder={pickableInventory.length === 0 ? 'No flats available' : '+ Add flat'} />
+              </SelectTrigger>
+              <SelectContent>
+                {pickableInventory.map(item => (
+                  <SelectItem key={item.id} value={item.id}>
+                    {item.type} - {item.inventoryNumber}{item.area > 0 ? ` (${item.area} sq ft)` : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </div>
-        <div>
-          <Label>Rate (₹ per sq ft)</Label>
-          <Input
-            type="number"
-            value={formData.ratePerSqft}
-            onChange={e => {
-              const ratePerSqft = e.target.value
-              const sqftN = parseFloat(formData.sqft) || 0
-              const rateN = parseFloat(ratePerSqft) || 0
-              const dealPrice = sqftN > 0 && rateN > 0 ? (sqftN * rateN).toString() : formData.dealPrice
-              const dealPriceN = parseFloat(dealPrice) || 0
-              const discountPct = parseFloat(formData.discountPercent) || 0
-              const discount = dealPriceN > 0 && discountPct > 0
-                ? ((dealPriceN * discountPct) / 100).toString()
-                : formData.discount
-              setFormData({ ...formData, ratePerSqft, dealPrice, discount })
-            }}
-          />
-        </div>
+
+        {items.length === 0 && (
+          <p className="text-sm text-gray-500 bg-blue-50 p-3 rounded">
+            Pick one or more flats from the dropdown above. Each flat gets its own sale record.
+          </p>
+        )}
+
+        {items.map((it, idx) => {
+          const inv = inventory.find(i => i.id === it.inventoryId)
+          const finalAmt = (parseFloat(it.dealPrice) || 0) - (parseFloat(it.discount) || 0)
+          const flatLabel = inv
+            ? `${inv.type} - ${inv.inventoryNumber}${inv.area > 0 ? ` (${inv.area} sq ft)` : ''}`
+            : 'Flat'
+          return (
+            <div key={`${it.inventoryId}-${idx}`} className="border rounded-lg p-3 space-y-3 bg-slate-50/40">
+              <div className="flex items-center justify-between">
+                <p className="font-medium text-sm">{flatLabel}</p>
+                {!isEdit && (
+                  <Button type="button" variant="ghost" size="sm" onClick={() => removeItem(idx)}>
+                    <X className="w-4 h-4" />
+                  </Button>
+                )}
+                {isEdit && hasPayments && (
+                  <span className="text-xs text-orange-600">Inventory locked (payments made)</span>
+                )}
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <Label>Square Feet</Label>
+                  <Input
+                    type="number"
+                    value={it.sqft}
+                    onChange={e => updateItem(idx, { sqft: e.target.value }, { recalcDealPrice: true })}
+                  />
+                </div>
+                <div>
+                  <Label>Rate (₹ per sq ft)</Label>
+                  <Input
+                    type="number"
+                    value={it.ratePerSqft}
+                    onChange={e => updateItem(idx, { ratePerSqft: e.target.value }, { recalcDealPrice: true })}
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <Label>Deal Price *</Label>
+                  <Input
+                    type="number"
+                    value={it.dealPrice}
+                    onChange={e => updateItem(idx, { dealPrice: e.target.value }, { recalcDiscountFromPct: true })}
+                    required
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Auto = Sqft × Rate (override allowed)</p>
+                </div>
+                <div>
+                  <Label>Discount (%)</Label>
+                  <Input
+                    type="number"
+                    value={it.discountPercent}
+                    onChange={e => updateItem(idx, { discountPercent: e.target.value }, { recalcDiscountFromPct: true })}
+                  />
+                </div>
+              </div>
+              <div>
+                <Label>Discount (₹)</Label>
+                <Input
+                  type="number"
+                  value={it.discount}
+                  onChange={e => updateItem(idx, { discount: e.target.value }, { recalcPctFromDiscount: true })}
+                />
+              </div>
+              <p className="text-sm font-medium text-right">
+                Final: ₹{finalAmt.toLocaleString('en-IN')}
+              </p>
+            </div>
+          )
+        })}
+
+        {items.length > 1 && (
+          <div className="flex items-center justify-end gap-2 px-2 py-2 rounded-md bg-emerald-50 border border-emerald-100">
+            <span className="text-sm text-slate-600">Total ({items.length} flats):</span>
+            <span className="text-base font-semibold text-emerald-700">₹{grandTotal.toLocaleString('en-IN')}</span>
+          </div>
+        )}
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div>
-          <Label>Deal Price *</Label>
-          <Input
-            type="number"
-            value={formData.dealPrice}
-            onChange={e => {
-              const dealPrice = e.target.value
-              const dealPriceN = parseFloat(dealPrice) || 0
-              const discountPct = parseFloat(formData.discountPercent) || 0
-              const discount = dealPriceN > 0 && discountPct > 0
-                ? ((dealPriceN * discountPct) / 100).toString()
-                : formData.discount
-              setFormData({ ...formData, dealPrice, discount })
-            }}
-            required
-          />
-          <p className="text-xs text-gray-500 mt-1">Auto = Sqft × Rate (override allowed)</p>
-        </div>
-        <div>
-          <Label>Discount (%)</Label>
-          <Input
-            type="number"
-            value={formData.discountPercent}
-            onChange={e => {
-              const discountPercent = e.target.value
-              const dealPriceN = parseFloat(formData.dealPrice) || 0
-              const pctN = parseFloat(discountPercent) || 0
-              const discount = dealPriceN > 0 && pctN > 0
-                ? ((dealPriceN * pctN) / 100).toString()
-                : '0'
-              setFormData({ ...formData, discountPercent, discount })
-            }}
-          />
-        </div>
-      </div>
-      <div>
-        <Label>Discount (₹)</Label>
-        <Input
-          type="number"
-          value={formData.discount}
-          onChange={e => {
-            const discount = e.target.value
-            const dealPriceN = parseFloat(formData.dealPrice) || 0
-            const discN = parseFloat(discount) || 0
-            const discountPercent = dealPriceN > 0
-              ? ((discN / dealPriceN) * 100).toFixed(2)
-              : ''
-            setFormData({ ...formData, discount, discountPercent })
-          }}
-        />
-      </div>
-      {formData.dealPrice && (
-        <p className="text-sm font-medium">Final Amount: ₹{((parseFloat(formData.dealPrice) || 0) - (parseFloat(formData.discount) || 0)).toLocaleString('en-IN')}</p>
-      )}
+
       <div>
         <Label>Sale Date *</Label>
         <Input type="date" value={formData.saleDate} onChange={e => setFormData({...formData, saleDate: e.target.value})} required />
@@ -8946,7 +9056,9 @@ const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, 
       )}
       <div className="flex justify-end space-x-2">
         <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button type="submit" disabled={!formData.customerId || !formData.inventoryId}>{initialData ? 'Update Sale' : 'Add Sale'}</Button>
+        <Button type="submit" disabled={!formData.customerId || items.length === 0}>
+          {isEdit ? 'Update Sale' : (items.length > 1 ? `Add ${items.length} Sales` : 'Add Sale')}
+        </Button>
       </div>
     </form>
   )
