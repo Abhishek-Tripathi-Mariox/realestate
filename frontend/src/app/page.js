@@ -176,6 +176,9 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
   const [activeTab, setActiveTab] = useState(initialTab)
   const [societies, setSocieties] = useState([])
   const [selectedSociety, setSelectedSociety] = useState(null)
+  const [showSocietyGate, setShowSocietyGate] = useState(false)
+  const [pendingSocietyTab, setPendingSocietyTab] = useState('')
+  const [hasShownProtectedTabGate, setHasShownProtectedTabGate] = useState(false)
   const [partners, setPartners] = useState([])
   const [partnerSummary, setPartnerSummary] = useState(null)
   const [inventory, setInventory] = useState([])
@@ -224,6 +227,15 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
   const [recycleBinFilter, setRecycleBinFilter] = useState('')
   const [showUnassignedSales, setShowUnassignedSales] = useState(false)
   const [unassignedSales, setUnassignedSales] = useState([])
+
+  const handleTabChange = (nextTab) => {
+    if (nextTab === 'expenses' || nextTab === 'margins') {
+      setPendingSocietyTab(nextTab)
+      setShowSocietyGate(true)
+      return
+    }
+    setActiveTab(nextTab)
+  }
   
   // Quick Add Expense state
   const [showQuickExpense, setShowQuickExpense] = useState(false)
@@ -417,6 +429,18 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
       loadAccounts() // Reload accounts when society changes (for scope filtering)
     }
   }, [selectedSociety])
+
+  useEffect(() => {
+    if (activeTab !== 'expenses' && activeTab !== 'margins') {
+      setHasShownProtectedTabGate(false)
+      return
+    }
+    if (!hasShownProtectedTabGate) {
+      setPendingSocietyTab(activeTab)
+      setShowSocietyGate(true)
+      setHasShownProtectedTabGate(true)
+    }
+  }, [activeTab, hasShownProtectedTabGate])
 
   useEffect(() => {
     if (selectedSociety) ensureTabLoaded(activeTab)
@@ -2901,7 +2925,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
             )}
 
             {/* Tabs for different modules */}
-            <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+            <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-4">
               {!singleTabMode && (
                 <TabsList className="flex w-full flex-nowrap overflow-x-auto whitespace-nowrap lg:grid lg:grid-cols-8 h-11 p-1 bg-slate-100/80 border border-slate-200/70 rounded-xl">
                   <TabsTrigger value="partners" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Partners</TabsTrigger>
@@ -2914,6 +2938,66 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                   <TabsTrigger value="commissions" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Commissions</TabsTrigger>
                 </TabsList>
               )}
+
+              <Dialog
+                open={showSocietyGate}
+                onOpenChange={(open) => {
+                  setShowSocietyGate(open)
+                  if (!open) setPendingSocietyTab('')
+                }}
+              >
+                <DialogContent className="max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Select Society First</DialogTitle>
+                    <DialogDescription>
+                      Vendor Ledger and Margin Ledger need a society selected before they can load data.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-4">
+                    <div>
+                      <Label>Society</Label>
+                      <Select value={selectedSociety || ''} onValueChange={setSelectedSociety}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Choose a society" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {societies.map(society => (
+                            <SelectItem key={society.id} value={society.id}>
+                              {society.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => {
+                          setShowSocietyGate(false)
+                          setPendingSocietyTab('')
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        type="button"
+                        onClick={() => {
+                          if (!selectedSociety) return
+                          const nextTab = pendingSocietyTab || activeTab
+                          setShowSocietyGate(false)
+                          setPendingSocietyTab('')
+                          setHasShownProtectedTabGate(true)
+                          setActiveTab(nextTab)
+                        }}
+                        disabled={!selectedSociety}
+                      >
+                        Continue
+                      </Button>
+                    </div>
+                  </div>
+                </DialogContent>
+              </Dialog>
 
               {/* Partners Tab */}
               <TabsContent value="partners" className="space-y-4">

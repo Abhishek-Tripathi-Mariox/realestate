@@ -10,6 +10,11 @@ const {
 const CUSTOMER_UPDATABLE = ['name', 'phone', 'email', 'address', 'notes'];
 
 const stripId = ({ _id, ...rest }) => rest;
+const isSaleCreditEntryType = (t) => t === 'SALE_PAYMENT' || t === 'TRANSFER_IN';
+const signedSaleDelta = (entry) => {
+  const t = entry?.entryType || 'SALE_PAYMENT';
+  return isSaleCreditEntryType(t) ? (entry.amount || 0) : -(entry.amount || 0);
+};
 
 const list = async (query) => {
   const filter = notDeleted();
@@ -58,12 +63,9 @@ const list = async (query) => {
   const saleEntryCreditBySale = {};
   const saleEntryDebitBySale = {};
   for (const e of allSaleEntries) {
-    const type = e.entryType || 'SALE_PAYMENT';
-    if (type === 'SALE_PAYMENT') {
-      saleEntryCreditBySale[e.saleId] = (saleEntryCreditBySale[e.saleId] || 0) + (e.amount || 0);
-    } else {
-      saleEntryDebitBySale[e.saleId] = (saleEntryDebitBySale[e.saleId] || 0) + (e.amount || 0);
-    }
+    const delta = signedSaleDelta(e);
+    if (delta > 0) saleEntryCreditBySale[e.saleId] = (saleEntryCreditBySale[e.saleId] || 0) + delta;
+    else saleEntryDebitBySale[e.saleId] = (saleEntryDebitBySale[e.saleId] || 0) + Math.abs(delta);
   }
 
   return customers.map((c) => {
@@ -173,15 +175,11 @@ const listSales = async (customerId) => {
     const inventory = s.inventoryId ? await Inventory.findOne({ id: s.inventoryId }).lean() : null;
     const [allocations, saleEntries] = await Promise.all([
       PaymentAllocation.find({ saleId: s.id }).lean(),
-      SalePaymentEntry.find(notDeleted({
-        saleId: s.id,
-        // $nin instead of $or — see list() for why (notDeleted's $or would
-        // overwrite this one and let withdrawals leak in as payments).
-        entryType: { $nin: ['WITHDRAWAL', 'PROFIT_PAYOUT'] },
-      })).lean(),
+      SalePaymentEntry.find(notDeleted({ saleId: s.id })).lean(),
     ]);
+    const ledgerNet = saleEntries.reduce((sum, e) => sum + signedSaleDelta(e), 0);
     const allocatedAmount = allocations.reduce((sum, a) => sum + (a.amount || 0), 0)
-      + saleEntries.reduce((sum, e) => sum + (e.amount || 0), 0);
+      + ledgerNet;
     return {
       ...s,
       inventoryNumber: inventory?.inventoryNumber || 'N/A',
@@ -210,10 +208,10 @@ const ledger = async (customerId) => {
   // no entryType) vs debits (WITHDRAWAL / PROFIT_PAYOUT). Both need to surface
   // on the customer's ledger so the running balance matches the Sale Ledger.
   const saleLedgerEntries = allLedgerEntries.filter(
-    e => (e.entryType || 'SALE_PAYMENT') === 'SALE_PAYMENT',
+    e => (e.entryType || 'SALE_PAYMENT') === 'SALE_PAYMENT' || e.entryType === 'TRANSFER_IN',
   );
   const saleLedgerDebitEntries = allLedgerEntries.filter(
-    e => e.entryType === 'WITHDRAWAL' || e.entryType === 'PROFIT_PAYOUT',
+    e => e.entryType === 'WITHDRAWAL' || e.entryType === 'PROFIT_PAYOUT' || e.entryType === 'TRANSFER_OUT',
   );
 
   const inventoryIds = [...new Set(sales.map(s => s.inventoryId).filter(Boolean))];
@@ -274,12 +272,14 @@ const ledger = async (customerId) => {
   const saleLedgerPaymentEntries = saleLedgerEntries.map(e => {
     const sale = saleById[e.saleId];
     const inv = sale?.inventoryId ? inventoryById[sale.inventoryId] : null;
+    const isTransferIn = e.entryType === 'TRANSFER_IN';
+    const label = isTransferIn ? 'Transfer In' : 'Payment';
     return {
       id: `sale-pay-${e.id}`,
       date: e.paymentDate || e.createdAt,
       createdAt: e.createdAt,
       type: 'PAYMENT',
-      description: `Payment via ${e.paymentMode || 'Cash'}${e.referenceNo ? ` (${e.referenceNo})` : ''} — ${inv?.inventoryNumber || 'Unit'}`,
+      description: `${label} via ${e.paymentMode || 'Cash'}${e.referenceNo ? ` (${e.referenceNo})` : ''} — ${inv?.inventoryNumber || 'Unit'}`,
       debit: 0,
       credit: e.amount || 0,
       allocationDetails: [{ inventoryNumber: inv?.inventoryNumber || 'N/A', amount: e.amount || 0 }],
@@ -293,7 +293,11 @@ const ledger = async (customerId) => {
   const saleLedgerDebitRows = saleLedgerDebitEntries.map(e => {
     const sale = saleById[e.saleId];
     const inv = sale?.inventoryId ? inventoryById[sale.inventoryId] : null;
-    const label = e.entryType === 'PROFIT_PAYOUT' ? 'Profit Payout' : 'Withdrawal';
+    const label = e.entryType === 'PROFIT_PAYOUT'
+      ? 'Profit Payout'
+      : e.entryType === 'TRANSFER_OUT'
+      ? 'Transfer Out'
+      : 'Withdrawal';
     return {
       id: `sale-debit-${e.id}`,
       date: e.paymentDate || e.createdAt,
