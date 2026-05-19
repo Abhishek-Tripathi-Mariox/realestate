@@ -6,6 +6,9 @@ const schema = buildSchema({
   societyId: String,
   accountId: String,
   amount: Number,
+  // 'PAYMENT' (default) or 'WITHDRAWAL' — withdrawals return money from
+  // vendor back to the account (IN transaction, paidAmount decrement).
+  type: { type: String, default: 'PAYMENT' },
   paymentDate: String,
   paymentMode: String,
   referenceNo: String,

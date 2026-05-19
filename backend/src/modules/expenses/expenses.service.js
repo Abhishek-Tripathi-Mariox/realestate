@@ -4,7 +4,7 @@ const { roundPaise, addMoney, subMoney, gteMoney, eqMoney } = require('../../uti
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   ExpenseBill, ExpensePayment, Account, Transaction, Vendor, ExpenseCategory,
-  CommissionBill,
+  CommissionBill, CommissionPayment, MarginPayment,
 } = require('../../models');
 
 const stripId = ({ _id, ...rest }) => rest;
@@ -193,37 +193,53 @@ const listExpenses = async (query) => {
   //   SOCIETY tab → society expenses + broker COMMISSION_PAYMENTs that belong
   //     to that society (a commission is tied to a sale, and the sale lives
   //     under a society — so the cost is a society expense, not a company one).
-  const filter = {
+  // Summary filter — keeps ALL outgoing transactions (incl. bill payments) so
+  // the "Total Paid" / Cash / Bank cards reflect real money out. Row filter
+  // below narrows to standalone Quick Expenses, since each expense bill is
+  // shown as a single virtual row with its payments collapsed into the drawer.
+  const summaryFilter = {
     direction: 'OUT',
     isVoided: { $ne: true },
     isReversal: { $ne: true },
     isReversed: { $ne: true },
   };
+  // Commission flows have their own ledger now, so we drop them from the
+  // Expense Ledger summary too — otherwise commission payments would inflate
+  // the "Total Paid" and "Bank/Other" cards on this page.
   if (scope === 'COMPANY') {
-    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] };
-    filter.$or = [{ societyId: null }, { societyId: { $exists: false } }];
+    summaryFilter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] };
+    summaryFilter.$or = [{ societyId: null }, { societyId: { $exists: false } }];
   } else if (scope === 'SOCIETY') {
-    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'COMMISSION_PAYMENT', 'MARGIN_PAYMENT'] };
+    summaryFilter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'MARGIN_PAYMENT'] };
     if (query.societyId && query.societyId !== 'all') {
-      filter.societyId = query.societyId;
+      summaryFilter.societyId = query.societyId;
     } else {
-      filter.societyId = { $ne: null };
+      summaryFilter.societyId = { $ne: null };
     }
   } else {
-    filter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'COMMISSION_PAYMENT', 'MARGIN_PAYMENT'] };
+    summaryFilter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'MARGIN_PAYMENT'] };
     if (query.societyId && query.societyId !== 'all') {
-      filter.societyId = query.societyId;
+      summaryFilter.societyId = query.societyId;
     }
   }
 
-  if (query.accountId && query.accountId !== 'all') filter.accountId = query.accountId;
-  if (query.paymentMode && query.paymentMode !== 'all') filter.paymentMode = query.paymentMode;
+  if (query.accountId && query.accountId !== 'all') summaryFilter.accountId = query.accountId;
+  if (query.paymentMode && query.paymentMode !== 'all') summaryFilter.paymentMode = query.paymentMode;
 
   if (query.startDate || query.endDate) {
-    filter.txnDate = {};
-    if (query.startDate) filter.txnDate.$gte = query.startDate;
-    if (query.endDate) filter.txnDate.$lte = query.endDate;
+    summaryFilter.txnDate = {};
+    if (query.startDate) summaryFilter.txnDate.$gte = query.startDate;
+    if (query.endDate) summaryFilter.txnDate.$lte = query.endDate;
   }
+
+  // Row filter — keep only QUICK_EXPENSE and MARGIN_PAYMENT here. Commission
+  // bills/payments live on their own Commission Ledger page; surfacing them
+  // here would just duplicate that view. Expense bill payments are collapsed
+  // into virtual bill rows below (one bill = one row), so we drop the raw
+  // EXPENSE_PAYMENT txns from this listing too.
+  const excludedFromRows = ['EXPENSE_PAYMENT', 'COMMISSION_PAYMENT'];
+  const rowSourceTypes = (summaryFilter.sourceType.$in || []).filter(t => !excludedFromRows.includes(t));
+  const filter = { ...summaryFilter, sourceType: { $in: rowSourceTypes } };
 
   const total = await Transaction.countDocuments(filter);
 
@@ -234,10 +250,28 @@ const listExpenses = async (query) => {
     .limit(limit)
     .lean();
 
-  const transactions = txns.map(t => ({ ...stripId(t), status: 'PAID' }));
+  // For MARGIN_PAYMENT / COMMISSION_PAYMENT rows, `sourceId` is the payment
+  // record id — resolve to parent billId so the FE can open the Payments
+  // drawer and show "this much was billed / this much paid" context.
+  const marginPaymentIds = txns.filter(t => t.sourceType === 'MARGIN_PAYMENT' && t.sourceId).map(t => t.sourceId);
+  const commissionPaymentIds = txns.filter(t => t.sourceType === 'COMMISSION_PAYMENT' && t.sourceId).map(t => t.sourceId);
+  const [marginPayDocs, commissionPayDocs] = await Promise.all([
+    marginPaymentIds.length ? MarginPayment.find({ id: { $in: marginPaymentIds } }).lean() : [],
+    commissionPaymentIds.length ? CommissionPayment.find({ id: { $in: commissionPaymentIds } }).lean() : [],
+  ]);
+  const paymentToBill = new Map();
+  marginPayDocs.forEach(p => paymentToBill.set(p.id, p.billId));
+  commissionPayDocs.forEach(p => paymentToBill.set(p.id, p.billId));
+
+  const transactions = txns.map(t => {
+    const base = { ...stripId(t), status: 'PAID' };
+    const billId = paymentToBill.get(t.sourceId);
+    if (billId) base.billId = billId;
+    return base;
+  });
 
   const summaryAgg = await Transaction.aggregate([
-    { $match: filter },
+    { $match: summaryFilter },
     {
       $group: {
         _id: null,
@@ -274,96 +308,96 @@ const listExpenses = async (query) => {
     if (query.endDate) billFilter.billDate.$lte = query.endDate;
   }
 
-  const expenseBillQuery = { ...billFilter, status: { $ne: 'Paid' } };
-  const openExpenseBills = await ExpenseBill.find(expenseBillQuery).lean();
+  // Show ALL expense bills (paid + unpaid) as single virtual rows — the
+  // drawer collapses each bill's payments inside it, so the table stays
+  // "one bill = one row". The amount shown is the full bill amount; the
+  // FE uses billAmount/totalPaid/balance to render the status badge.
+  let allExpenseBills = await ExpenseBill.find(billFilter).lean();
 
-  // Commission bills surface under SOCIETY scope (the sale they're tied to
-  // belongs to a society, so the cost is a society expense). COMPANY scope
-  // never carries them.
-  let openCommissionBills = [];
-  if (scope === 'SOCIETY' || scope === '') {
-    const commissionFilter = notDeleted({ status: { $ne: 'Paid' } });
-    if (query.societyId && query.societyId !== 'all') {
-      commissionFilter.societyId = query.societyId;
-    } else if (scope === 'SOCIETY') {
-      commissionFilter.societyId = { $ne: null };
-    }
-    if (query.startDate || query.endDate) {
-      commissionFilter.billDate = {};
-      if (query.startDate) commissionFilter.billDate.$gte = query.startDate;
-      if (query.endDate) commissionFilter.billDate.$lte = query.endDate;
-    }
-    openCommissionBills = await CommissionBill.find(commissionFilter).lean();
+  // The Commission Ledger reuses the ExpenseBill model — bills it creates
+  // have vendor.type='Commission' (and category='Commission' since vendor
+  // type doubles as the bill category). Filter those out so they don't
+  // double-up on this Expense Ledger page.
+  if (allExpenseBills.length) {
+    const vendorIds = [...new Set(allExpenseBills.map(b => b.vendorId).filter(Boolean))];
+    const commissionVendorIds = new Set(
+      vendorIds.length
+        ? (await Vendor.find({ id: { $in: vendorIds }, type: 'Commission' }).lean()).map(v => v.id)
+        : []
+    );
+    allExpenseBills = allExpenseBills.filter(b => {
+      if (b.vendorId && commissionVendorIds.has(b.vendorId)) return false;
+      if ((b.category || '').toLowerCase() === 'commission') return false;
+      return true;
+    });
   }
 
-  const pendingRows = [
-    ...openExpenseBills.map((b) => {
-      const amount = b.amount ?? b.billAmount ?? 0;
-      const balance = Math.max(0, amount - (b.paidAmount || 0));
-      return {
-        id: `bill-${b.id}`,
-        _isBill: true,
-        sourceType: 'EXPENSE_BILL',
-        sourceId: b.id,
-        txnDate: b.billDate || null,
-        societyId: b.societyId || null,
-        scope: b.scope || (b.societyId ? 'SOCIETY' : 'COMPANY'),
-        accountId: null,
-        direction: 'OUT',
-        amount: balance,
-        paymentMode: '-',
-        partyType: 'Vendor',
-        partyName: b.vendorName || '',
-        referenceNo: b.category || '',
-        remark: b.description || b.remark || '',
-        status: ((b.status || 'Pending').toUpperCase() === 'PARTIAL') ? 'PARTIAL' : 'PENDING',
-      };
-    }),
-    ...openCommissionBills.map((b) => {
-      const amount = b.amount ?? b.commissionAmount ?? 0;
-      const balance = Math.max(0, amount - (b.paidAmount || 0));
-      return {
-        id: `bill-${b.id}`,
-        _isBill: true,
-        sourceType: 'COMMISSION_BILL',
-        sourceId: b.id,
-        txnDate: b.billDate || b.commissionDate || null,
-        societyId: b.societyId || null,
-        scope: 'SOCIETY',
-        accountId: null,
-        direction: 'OUT',
-        amount: balance,
-        paymentMode: '-',
-        partyType: 'Vendor',
-        partyName: b.brokerName || '',
-        referenceNo: 'Commission',
-        remark: b.description || b.remark || '',
-        status: ((b.status || 'Pending').toUpperCase() === 'PARTIAL') ? 'PARTIAL' : 'PENDING',
-      };
-    }),
-  ].filter(r => r.amount > 0);
+  // (Old) CommissionBill virtual rows are no longer surfaced here — those
+  // live on the Commission Ledger / Commissions tab.
 
-  if (query.paymentMode && query.paymentMode !== 'all') {
-    // pending rows have no payment mode yet — drop them when the user filters by mode
-    pendingRows.length = 0;
-  }
-  if (query.accountId && query.accountId !== 'all') {
-    pendingRows.length = 0;
-  }
+  const buildBillRow = (b) => {
+    const amount = b.amount ?? b.billAmount ?? 0;
+    const paid = b.paidAmount || 0;
+    const balance = Math.max(0, amount - paid);
+    const rawStatus = (b.status || 'Pending').toUpperCase();
+    let status;
+    if (rawStatus === 'PAID' || balance === 0) status = 'PAID';
+    else if (rawStatus === 'PARTIAL' || paid > 0) status = 'PARTIAL';
+    else status = 'PENDING';
 
-  const totalPending = roundPaise(pendingRows.reduce((s, r) => s + r.amount, 0));
+    return {
+      id: `bill-${b.id}`,
+      _isBill: true,
+      sourceType: 'EXPENSE_BILL',
+      sourceId: b.id,
+      billId: b.id,
+      txnDate: b.billDate || null,
+      societyId: b.societyId || null,
+      scope: b.scope || (b.societyId ? 'SOCIETY' : 'COMPANY'),
+      accountId: null,
+      direction: 'OUT',
+      amount,
+      billAmount: amount,
+      totalPaid: paid,
+      balance,
+      paymentMode: '-',
+      partyType: 'Vendor',
+      partyName: b.vendorName || '',
+      referenceNo: b.category || '',
+      remark: b.description || b.remark || '',
+      status,
+    };
+  };
+
+  let billRows = allExpenseBills.map(buildBillRow).filter(r => r.amount > 0);
+
+  // Account / payment-mode filters can't be evaluated against bills (they
+  // describe the payment, not the bill) — drop bill rows when those filters
+  // are active so the table doesn't mix filter scopes.
+  if (query.paymentMode && query.paymentMode !== 'all') billRows = [];
+  if (query.accountId && query.accountId !== 'all') billRows = [];
+
+  // Pending totals from outstanding bill balances (PENDING + PARTIAL).
+  const totalPending = roundPaise(billRows.reduce((s, r) => s + r.balance, 0));
   summary.totalPending = totalPending;
-  summary.pendingCount = pendingRows.length;
+  summary.pendingCount = billRows.filter(r => r.balance > 0).length;
+  // Total rows visible = bills + quick expenses (overrides the txn-only count
+  // computed above so the "# Transactions" card matches what the user sees).
+  summary.transactionCount = billRows.length + transactions.length;
 
-  // Surface pending rows on page 1 so the user sees them without paginating.
-  // Real transactions still drive the `total`/pagination.
-  const merged = page === 1 ? [...pendingRows, ...transactions] : transactions;
+  // Sort by date desc so bills + quick expenses interleave naturally.
+  const merged = [...billRows, ...transactions].sort((a, b) => {
+    const da = a.txnDate || ''
+    const db = b.txnDate || ''
+    if (da === db) return 0;
+    return db.localeCompare(da);
+  });
 
   return {
     transactions: merged,
     summary,
-    total,
-    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    total: merged.length,
+    pagination: { page, limit, total: merged.length, totalPages: 1 },
   };
 };
 
@@ -451,27 +485,50 @@ const addBillPayment = async (billId, body, userId) => {
   const bill = await ExpenseBill.findOne({ id: billId }).lean();
   if (!bill) return { error: 'Bill not found', status: 404 };
 
+  // Account is required so we never silently write a txn with no account —
+  // that produces "Unknown" rows in the daybook and breaks balance reports.
   let accountId = body.accountId;
   if (!accountId) {
     const defaultAccount = await Account.findOne({ isDefault: true }).lean();
     accountId = defaultAccount?.id;
   }
+  if (!accountId) {
+    return { error: 'Account is required', status: 400 };
+  }
+  // Verify the account exists — guards against stale/typoed ids on the FE.
+  const accountDoc = await Account.findOne({ id: accountId }).lean();
+  if (!accountDoc) {
+    return { error: 'Selected account not found', status: 400 };
+  }
 
   const amount = parseFloat(body.amount) || 0;
   if (!(amount > 0)) {
-    return { error: 'Payment amount must be greater than zero', status: 400 };
+    return { error: 'Amount must be greater than zero', status: 400 };
   }
 
-  // Over-payment guard — without this, typing an extra zero on a 1L bill
-  // creates a 10L OUT transaction with no warning. addMoney/gteMoney use
-  // integer-paise math so this doesn't false-positive on float drift.
+  // `type=WITHDRAWAL` lets the vendor return money already paid — useful when
+  // a payment was excessive or work was cancelled. Stored as a normal
+  // ExpensePayment row with type=WITHDRAWAL; bill.paidAmount is decremented
+  // and the daybook transaction flips to IN so the account balance recovers.
+  const isWithdrawal = body.type === 'WITHDRAWAL';
   const billAmount = bill.amount ?? bill.billAmount ?? 0;
-  const proposedPaid = addMoney(bill.paidAmount || 0, amount);
-  if (!gteMoney(billAmount, proposedPaid)) {
-    return {
-      error: `Payment exceeds bill balance (bill ${billAmount}, already paid ${bill.paidAmount || 0}, attempted ${amount})`,
-      status: 400,
-    };
+  const currentPaid = bill.paidAmount || 0;
+
+  if (isWithdrawal) {
+    if (amount > currentPaid + 0.0001) {
+      return {
+        error: `Withdrawal exceeds paid amount (paid ${currentPaid}, attempted ${amount})`,
+        status: 400,
+      };
+    }
+  } else {
+    const proposedPaid = addMoney(currentPaid, amount);
+    if (!gteMoney(billAmount, proposedPaid)) {
+      return {
+        error: `Payment exceeds bill balance (bill ${billAmount}, already paid ${currentPaid}, attempted ${amount})`,
+        status: 400,
+      };
+    }
   }
 
   const payment = {
@@ -479,7 +536,8 @@ const addBillPayment = async (billId, body, userId) => {
     billId,
     societyId: bill.societyId,
     accountId,
-    amount,
+    amount,                                  // always stored positive
+    type: isWithdrawal ? 'WITHDRAWAL' : 'PAYMENT',
     paymentDate: body.paymentDate,
     paymentMode: body.paymentMode || 'Cash',
     referenceNo: body.referenceNo || '',
@@ -490,30 +548,35 @@ const addBillPayment = async (billId, body, userId) => {
 
   await ExpensePayment.create(payment);
 
-  // Atomic increment so two concurrent payments can't lose an update.
-  // Recompute status from the returned doc using paise-safe comparison.
+  // Withdrawals subtract from paid; payments add. Either way the $inc keeps
+  // concurrent writes safe and we recompute the status from the new value.
+  const delta = isWithdrawal ? -amount : amount;
   const updated = await ExpenseBill.findOneAndUpdate(
     { id: billId },
-    { $inc: { paidAmount: amount } },
+    { $inc: { paidAmount: delta } },
     { new: true },
   ).lean();
-  const status = eqMoney(updated.paidAmount || 0, billAmount) || gteMoney(updated.paidAmount || 0, billAmount)
-    ? 'Paid'
-    : 'Partial';
-  await ExpenseBill.updateOne({ id: billId }, { $set: { status } });
+  const newPaid = Math.max(0, updated.paidAmount || 0);
+  let status;
+  if (newPaid <= 0) status = 'Pending';
+  else if (gteMoney(newPaid, billAmount)) status = 'Paid';
+  else status = 'Partial';
+  await ExpenseBill.updateOne({ id: billId }, { $set: { status, paidAmount: newPaid } });
 
   await createTransaction({
     txnDate: payment.paymentDate,
     societyId: bill.societyId,
     accountId,
-    direction: 'OUT',
+    // Withdrawal returns money to the company account, so the daybook
+    // entry is IN (money coming back). Regular payments stay OUT.
+    direction: isWithdrawal ? 'IN' : 'OUT',
     amount,
     paymentMode: payment.paymentMode,
     partyType: 'Vendor',
     partyName: bill.vendorName,
     sourceType: 'EXPENSE_PAYMENT',
     sourceId: payment.id,
-    remark: payment.remark || `${bill.category} - ${bill.vendorName}`,
+    remark: payment.remark || `${isWithdrawal ? 'Withdrawal' : 'Payment'} - ${bill.category || ''} - ${bill.vendorName || ''}`.trim(),
   }, userId);
 
   return payment;
@@ -528,10 +591,14 @@ const deleteBillPayment = async (id, userId) => {
     await createReversalTransaction(originalTxn, userId, 'Expense payment deleted');
   }
 
-  // Atomic decrement; recompute status from the returned document.
+  // Deleting a regular payment decrements paidAmount; deleting a withdrawal
+  // adds the money back to paidAmount (because the withdrawal originally
+  // subtracted it).
+  const wasWithdrawal = payment.type === 'WITHDRAWAL';
+  const delta = wasWithdrawal ? (payment.amount || 0) : -(payment.amount || 0);
   const updated = await ExpenseBill.findOneAndUpdate(
     { id: payment.billId },
-    { $inc: { paidAmount: -(payment.amount || 0) } },
+    { $inc: { paidAmount: delta } },
     { new: true },
   ).lean();
   if (updated) {
@@ -564,7 +631,7 @@ const updateBillPayment = async (id, body, userId) => {
 
   const incomingAmount = body.amount !== undefined ? parseFloat(body.amount) : payment.amount;
   if (!(incomingAmount > 0)) {
-    return { error: 'Payment amount must be greater than zero', status: 400 };
+    return { error: 'Amount must be greater than zero', status: 400 };
   }
   const newAmount = Number(incomingAmount);
   const newPaymentDate = body.paymentDate || body.entryDate || payment.paymentDate;
@@ -573,22 +640,40 @@ const updateBillPayment = async (id, body, userId) => {
   const newReferenceNo = body.referenceNo !== undefined ? body.referenceNo : (payment.referenceNo || '');
   const newRemark = body.remark !== undefined ? body.remark : (payment.remark || '');
 
+  // Type of this row stays put on edit — we don't let a user flip
+  // PAYMENT ↔ WITHDRAWAL via update, since that would invert the direction
+  // and balance semantics. (User can delete + re-add if they really want to.)
+  const isWithdrawal = payment.type === 'WITHDRAWAL';
+
   const totalsAffectingChange =
     !eqMoney(newAmount, payment.amount || 0)
     || newPaymentMode !== payment.paymentMode
     || newAccountId !== payment.accountId
     || newPaymentDate !== payment.paymentDate;
 
-  // Re-validate over-payment when amount changes. Subtract this payment's
-  // OWN current contribution before checking the cap.
+  // Re-validate when amount changes — the cap differs by type:
+  //   • PAYMENT    → total of other payments + new must not exceed bill amount
+  //   • WITHDRAWAL → withdrawal can't exceed what's been paid (excluding self)
   if (!eqMoney(newAmount, payment.amount || 0)) {
     const billAmount = bill.amount ?? bill.billAmount ?? 0;
-    const otherPaid = (bill.paidAmount || 0) - (payment.amount || 0);
-    if (!gteMoney(billAmount, otherPaid + newAmount)) {
-      return {
-        error: `Updated amount exceeds bill balance (bill ${billAmount}, other payments ${otherPaid}, attempted ${newAmount})`,
-        status: 400,
-      };
+    if (isWithdrawal) {
+      // paidAmount currently reflects (other payments − other withdrawals − this withdrawal).
+      // Adding back this withdrawal's own contribution gives us the cap.
+      const paidExcludingSelf = (bill.paidAmount || 0) + (payment.amount || 0);
+      if (newAmount > paidExcludingSelf + 0.0001) {
+        return {
+          error: `Withdrawal exceeds paid amount (paid excluding self ${paidExcludingSelf}, attempted ${newAmount})`,
+          status: 400,
+        };
+      }
+    } else {
+      const otherPaid = (bill.paidAmount || 0) - (payment.amount || 0);
+      if (!gteMoney(billAmount, otherPaid + newAmount)) {
+        return {
+          error: `Updated amount exceeds bill balance (bill ${billAmount}, other payments ${otherPaid}, attempted ${newAmount})`,
+          status: 400,
+        };
+      }
     }
   }
 
@@ -603,10 +688,12 @@ const updateBillPayment = async (id, body, userId) => {
       await createReversalTransaction(originalTxn, userId, 'Expense payment edited');
     }
 
-    const delta = newAmount - (payment.amount || 0);
+    // Withdrawals subtract from paidAmount, so the bill-delta flips sign.
+    const rawDelta = newAmount - (payment.amount || 0);
+    const billDelta = isWithdrawal ? -rawDelta : rawDelta;
     const updatedBill = await ExpenseBill.findOneAndUpdate(
       { id: payment.billId },
-      { $inc: { paidAmount: delta } },
+      { $inc: { paidAmount: billDelta } },
       { new: true },
     ).lean();
 
@@ -633,21 +720,22 @@ const updateBillPayment = async (id, body, userId) => {
         : (gteMoney(newPaid, billAmount) ? 'Paid' : 'Partial');
       await ExpenseBill.updateOne(
         { id: payment.billId },
-        { $set: { status } },
+        { $set: { status, paidAmount: newPaid } },
       );
 
       await createTransaction({
         txnDate: newPaymentDate,
         societyId: updatedBill.societyId,
         accountId: newAccountId,
-        direction: 'OUT',
+        // Withdrawal returns money — replacement txn must mirror that.
+        direction: isWithdrawal ? 'IN' : 'OUT',
         amount: newAmount,
         paymentMode: newPaymentMode,
         partyType: 'Vendor',
         partyName: updatedBill.vendorName,
         sourceType: 'EXPENSE_PAYMENT',
         sourceId: id,
-        remark: newRemark || `${updatedBill.category} - ${updatedBill.vendorName}`,
+        remark: newRemark || `${isWithdrawal ? 'Withdrawal' : 'Payment'} - ${updatedBill.category || ''} - ${updatedBill.vendorName || ''}`.trim(),
       }, userId);
     }
   } else {

@@ -157,7 +157,12 @@ const PageSizeSelect = ({ value, onChange }) => (
   </div>
 )
 
-export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => {
+// `vendorLedgerScope` flips the Vendor Ledger tab between its two modes:
+//   - 'default'   → regular Vendor Ledger; vendor types exclude 'Broker' AND
+//                   'Commission' so commission vendors live on their own page.
+//   - 'commission'→ Commission Ledger; same UI but scoped to vendor type
+//                   'Commission' only, and new vendors default to that type.
+export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedgerScope = 'default' } = {}) => {
   const router = useRouter()
   const { toast } = useToast()
   const [isAuthenticated, setIsAuthenticated] = useState(false)
@@ -208,9 +213,14 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
   // overlay the VendorLedgerDrawer without coupling to BillPaymentDrawer's
   // shared paymentBillType state.
   const [editingVendorPayment, setEditingVendorPayment] = useState(null)
-  // Vendor-level "Add Payment" — opens a dialog that splits the entered
-  // amount FIFO across the vendor's unpaid bills (oldest first).
+  // Vendor-level "Add Payment / Withdrawal" — single dialog whose type
+  // selector switches between FIFO-payment and LIFO-withdrawal flows.
   const [addingVendorPayment, setAddingVendorPayment] = useState(null)
+  // Global Ledger — cross-vendor view of all activity (work + payments +
+  // withdrawals) for the current scope. Read-only, filterable, exportable.
+  const [isGlobalLedgerOpen, setIsGlobalLedgerOpen] = useState(false)
+  const [globalLedgerEntries, setGlobalLedgerEntries] = useState([])
+  const [globalLedgerLoading, setGlobalLedgerLoading] = useState(false)
   const [editingCommissionBill, setEditingCommissionBill] = useState(null)
   const [editingMarginBill, setEditingMarginBill] = useState(null)
   
@@ -1100,22 +1110,27 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
         }
       })
       const paymentEntries = paymentBundles.flatMap(({ billId, payments }) =>
-        payments.map(p => ({
-          id: p.id,
-          sourceId: p.id,            // ExpensePayment.id — correct for DELETE
-          raw: { ...p, billId },     // full payment for edit dialog
-          billId,
-          date: p.paymentDate || p.createdAt,
-          createdAt: p.createdAt || p.paymentDate,
-          type: 'PAYMENT',
-          subType: 'PAYMENT',
-          description: p.remark || 'Payment made',
-          categoryName: '',
-          workValue: 0,
-          paymentAmount: p.amount || 0,
-          paymentMode: p.paymentMode || 'Cash',
-          reference: p.referenceNo || '',
-        }))
+        payments.map(p => {
+          const isWithdrawal = p.type === 'WITHDRAWAL'
+          return {
+            id: p.id,
+            sourceId: p.id,            // ExpensePayment.id — correct for DELETE
+            raw: { ...p, billId },     // full payment for edit dialog
+            billId,
+            date: p.paymentDate || p.createdAt,
+            createdAt: p.createdAt || p.paymentDate,
+            type: isWithdrawal ? 'WITHDRAWAL' : 'PAYMENT',
+            subType: isWithdrawal ? 'WITHDRAWAL' : 'PAYMENT',
+            description: p.remark || (isWithdrawal ? 'Withdrawal' : 'Payment made'),
+            categoryName: '',
+            workValue: 0,
+            // Withdrawals show as negative payment for the running balance
+            // (vendor receives less net, so we owe more).
+            paymentAmount: isWithdrawal ? -(p.amount || 0) : (p.amount || 0),
+            paymentMode: p.paymentMode || 'Cash',
+            reference: p.referenceNo || '',
+          }
+        })
       )
 
       // Chronological order: primary sort by user-facing date, secondary by
@@ -1132,7 +1147,6 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
       let running = 0
       const withBalance = merged.map(e => {
         running += (e.workValue || 0) - (e.paymentAmount || 0)
-        // For legacy fields the drawer's CSV/PDF exports still expect:
         return { ...e, amount: e.paymentAmount, balance: running }
       })
       setVendorLedgerEntries(withBalance.reverse())
@@ -1143,6 +1157,123 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
         variant: 'destructive'
       })
     }
+  }
+
+  // Global Ledger — fetch all bills + payments for the current vendor-ledger
+  // scope (regular vendors OR Commission vendors, depending on the page) and
+  // build a single chronological timeline. Read-only view.
+  const openGlobalLedger = async () => {
+    setIsGlobalLedgerOpen(true)
+    setGlobalLedgerLoading(true)
+    try {
+      // Match the same scope rule used by vendorLedgerRows so the global
+      // view stays consistent with the per-vendor list on this page.
+      const scopedVendors = vendors.filter(v => {
+        if (v.type === 'Broker') return false
+        if (vendorLedgerScope === 'commission') return v.type === 'Commission'
+        return v.type !== 'Commission'
+      })
+      const vendorIds = new Set(scopedVendors.map(v => v.id))
+      const vendorById = new Map(scopedVendors.map(v => [v.id, v]))
+
+      const allBills = await apiCall(`/expense-bills?societyId=${selectedSociety}`)
+      const scopedBills = (allBills || []).filter(b => vendorIds.has(b.vendorId))
+
+      const paymentBundles = await Promise.all(
+        scopedBills.map(b =>
+          apiCall(`/expense-bills/${b.id}/payments`)
+            .then(ps => ({ billId: b.id, payments: ps || [] }))
+            .catch(() => ({ billId: b.id, payments: [] }))
+        )
+      )
+
+      const workEntries = scopedBills.map(b => {
+        const isLabour = /labour/i.test(b.categoryName || '')
+        const vendor = vendorById.get(b.vendorId)
+        return {
+          id: `work-${b.id}`,
+          sourceId: b.id,
+          raw: b,
+          vendorId: b.vendorId,
+          vendorName: vendor?.name || b.vendorName || '—',
+          date: b.billDate || b.createdAt,
+          createdAt: b.createdAt || b.billDate,
+          type: 'WORK',
+          subType: isLabour ? 'LABOUR' : 'WORK',
+          description: b.description || b.categoryName || (isLabour ? 'Labour' : 'Work'),
+          categoryName: b.categoryName || '',
+          workValue: b.billAmount || 0,
+          paymentAmount: 0,
+          reference: '',
+        }
+      })
+      const paymentEntries = paymentBundles.flatMap(({ billId, payments }) => {
+        const bill = scopedBills.find(b => b.id === billId)
+        const vendor = vendorById.get(bill?.vendorId)
+        const vendorName = vendor?.name || bill?.vendorName || '—'
+        return payments.map(p => {
+          const isWithdrawal = p.type === 'WITHDRAWAL'
+          return {
+            id: p.id,
+            sourceId: p.id,
+            raw: { ...p, billId },
+            billId,
+            vendorId: bill?.vendorId,
+            vendorName,
+            date: p.paymentDate || p.createdAt,
+            createdAt: p.createdAt || p.paymentDate,
+            type: isWithdrawal ? 'WITHDRAWAL' : 'PAYMENT',
+            subType: isWithdrawal ? 'WITHDRAWAL' : 'PAYMENT',
+            description: p.remark || (isWithdrawal ? 'Withdrawal' : 'Payment made'),
+            categoryName: bill?.categoryName || '',
+            workValue: 0,
+            paymentAmount: isWithdrawal ? -(p.amount || 0) : (p.amount || 0),
+            paymentMode: p.paymentMode || 'Cash',
+            reference: p.referenceNo || '',
+          }
+        })
+      })
+
+      const merged = [...workEntries, ...paymentEntries].sort((a, b) => {
+        const da = new Date(a.date).getTime() || 0
+        const db = new Date(b.date).getTime() || 0
+        if (da !== db) return da - db
+        return (new Date(a.createdAt).getTime() || 0) - (new Date(b.createdAt).getTime() || 0)
+      })
+      // Newest-first for display; no running balance — across vendors a
+      // single rolling number isn't meaningful, so we just show the row's
+      // own work/payment values.
+      setGlobalLedgerEntries(merged.reverse())
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    } finally {
+      setGlobalLedgerLoading(false)
+    }
+  }
+
+  // Global Ledger CSV — exports the entire (unfiltered) timeline. Filtering
+  // applies in the drawer's UI; export captures everything for archival.
+  const exportGlobalLedgerToCSV = () => {
+    if (!globalLedgerEntries.length) return
+    const headers = ['Date', 'Vendor', 'Type', 'Description', 'Work Value', 'Payment', 'Mode', 'Reference']
+    const rows = globalLedgerEntries.map(e => [
+      e.date || '',
+      e.vendorName || '',
+      e.type === 'WITHDRAWAL' ? 'Withdrawal' : e.subType === 'LABOUR' ? 'Labour' : e.type === 'WORK' ? 'Work' : 'Payment',
+      (e.description || '').replace(/"/g, '""'),
+      e.workValue || 0,
+      e.paymentAmount || 0,
+      e.paymentMode || '',
+      e.reference || '',
+    ])
+    const csv = [headers, ...rows].map(r => r.map(c => `"${c}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${vendorLedgerScope === 'commission' ? 'commission' : 'vendor'}_ledger_global_${new Date().toISOString().split('T')[0]}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   // Vendor Ledger Drawer actions — wired from the drawer back into the
@@ -1162,40 +1293,53 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     setIsDialogOpen(true)
   }
   const handleVendorDetailAddPayment = async (vendor) => {
-    const unpaid = expenseBills
-      .filter(b => b.vendorId === vendor.id && b.status !== 'PAID')
-      .sort((a, b) => new Date(a.billDate) - new Date(b.billDate))
-    if (unpaid.length === 0) {
+    const allBills = expenseBills.filter(b => b.vendorId === vendor.id)
+    const unpaid = allBills
+      .filter(b => b.status !== 'PAID')
+      .sort((a, b) => new Date(a.billDate) - new Date(b.billDate))   // FIFO for payment
+    const paid = allBills
+      .filter(b => (b.totalPaid || 0) > 0)
+      .sort((a, b) => new Date(b.billDate) - new Date(a.billDate))   // LIFO for withdrawal
+    const totalPending = unpaid.reduce((s, b) => s + (b.balance || 0), 0)
+    const totalPaidAll = paid.reduce((s, b) => s + (b.totalPaid || 0), 0)
+    if (totalPending <= 0 && totalPaidAll <= 0) {
       toast({
-        title: 'No outstanding bills',
-        description: `Add a work entry for ${vendor.name} first before recording a payment.`,
+        title: 'No bills to act on',
+        description: `Add a work entry for ${vendor.name} first.`,
         variant: 'destructive'
       })
       return
     }
-    // Open vendor-level FIFO dialog. Max payable = sum of bill balances.
-    const totalPending = unpaid.reduce((s, b) => s + (b.balance || 0), 0)
-    setAddingVendorPayment({ vendor, unpaidBills: unpaid, totalPending })
+    // Single dialog drives both Payment (FIFO across unpaid) and Withdrawal
+    // (LIFO across paid). User picks the entry type inside the dialog.
+    setAddingVendorPayment({ vendor, unpaidBills: unpaid, paidBills: paid, totalPending, totalPaid: totalPaidAll })
   }
 
-  // FIFO allocate the entered amount across unpaid bills (oldest first).
-  // Each chunk hits POST /expense-bills/:id/payments so existing balance
-  // math, status flip, and daybook txns kick in per bill.
+  // Allocate the entered amount across bills, type-aware:
+  //   PAYMENT     → FIFO over unpaidBills (oldest first), capped by balance
+  //   WITHDRAWAL  → LIFO over paidBills (newest first), capped by totalPaid
+  // Each chunk hits POST /expense-bills/:id/payments with the right `type`
+  // so the backend handles the IN/OUT direction and paidAmount delta.
   const handleSubmitVendorAddPayment = async (formData) => {
     const ctx = addingVendorPayment
     if (!ctx) return
     const amount = parseFloat(formData.amount)
     if (!(amount > 0)) return
+    const isWithdrawal = formData.type === 'WITHDRAWAL'
+    const sourceBills = isWithdrawal ? ctx.paidBills : ctx.unpaidBills
     try {
       let remaining = amount
       const allocations = []
-      for (const bill of ctx.unpaidBills) {
+      for (const bill of sourceBills) {
         if (remaining <= 0) break
-        const billRemaining = Math.max(0, bill.balance || 0)
-        if (billRemaining <= 0) continue
-        const portion = Math.min(remaining, billRemaining)
+        const cap = isWithdrawal
+          ? Math.max(0, bill.totalPaid || 0)
+          : Math.max(0, bill.balance || 0)
+        if (cap <= 0) continue
+        const portion = Math.min(remaining, cap)
         await apiCall(`/expense-bills/${bill.id}/payments`, 'POST', {
           amount: portion,
+          type: isWithdrawal ? 'WITHDRAWAL' : 'PAYMENT',
           paymentDate: formData.paymentDate,
           paymentMode: formData.paymentMode,
           accountId: formData.accountId,
@@ -1208,9 +1352,10 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
       setAddingVendorPayment(null)
       if (vendorLedgerItem) await openVendorLedger(vendorLedgerItem)
       await loadSocietyData()
+      const label = isWithdrawal ? 'Withdrawal' : 'Payment'
       toast({
-        title: 'Payment recorded',
-        description: `₹${fmt(amount - remaining)} allocated across ${allocations.length} bill${allocations.length > 1 ? 's' : ''}${remaining > 0 ? ` (₹${fmt(remaining)} not allocated)` : ''}`,
+        title: `${label} recorded`,
+        description: `₹${fmt(amount - remaining)} across ${allocations.length} bill${allocations.length > 1 ? 's' : ''}${remaining > 0 ? ` (₹${fmt(remaining)} not allocated)` : ''}`,
       })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
@@ -1225,15 +1370,17 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     try {
       if (entry.type === 'WORK') {
         await apiCall(`/expense-bills/${entry.sourceId}`, 'DELETE')
-      } else if (entry.type === 'PAYMENT') {
+      } else if (entry.type === 'PAYMENT' || entry.type === 'WITHDRAWAL') {
+        // Both Payment and Withdrawal live in the ExpensePayment collection;
+        // the backend reads the row's `type` and reverses the right way.
         await apiCall(`/expense-payments/${entry.sourceId}`, 'DELETE')
       } else {
         return
       }
-      toast({
-        title: 'Deleted',
-        description: entry.type === 'WORK' ? 'Work entry deleted' : 'Payment deleted',
-      })
+      const label = entry.type === 'WORK'
+        ? 'Work entry'
+        : entry.type === 'WITHDRAWAL' ? 'Withdrawal' : 'Payment'
+      toast({ title: 'Deleted', description: `${label} deleted` })
       await openVendorLedger(vendorLedgerItem)
       await loadSocietyData()
     } catch (error) {
@@ -1845,7 +1992,9 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
     if (!entry || !entry.raw) return
     if (entry.type === 'WORK') {
       setEditingExpenseBill(entry.raw)
-    } else if (entry.type === 'PAYMENT') {
+    } else if (entry.type === 'PAYMENT' || entry.type === 'WITHDRAWAL') {
+      // Same edit dialog for both — the payment row's `type` field on the
+      // backend lets the update handler keep the right IN/OUT semantics.
       setEditingVendorPayment(entry.raw)
     }
   }
@@ -2334,7 +2483,11 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
   // Brokers belong to the Commissions module — exclude them from the
   // Daily-Khata vendor view so Work/Payment math doesn't include broker
   // payouts (which live in commission-bills, not expense-bills).
-  const vendorLedgerRows = vendors.filter(v => v.type !== 'Broker').map(v => {
+  const vendorLedgerRows = vendors.filter(v => {
+    if (v.type === 'Broker') return false  // brokers live on the Commissions tab
+    if (vendorLedgerScope === 'commission') return v.type === 'Commission'
+    return v.type !== 'Commission'         // default Vendor Ledger hides Commission type
+  }).map(v => {
     const bills = expenseBills.filter(b => b.vendorId === v.id)
     const workValue = bills.reduce((s, b) => s + (b.billAmount || 0), 0)
     const amountPaid = bills.reduce((s, b) => s + (b.totalPaid || 0), 0)
@@ -2397,7 +2550,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
 
   const openPaymentForVendor = async (vendor) => {
     // Same flow as the detail-drawer "+ Add Payment": vendor-level dialog
-    // that splits the entered amount FIFO across all unpaid bills.
+    // that lets the user pick Payment (FIFO) or Withdrawal (LIFO) inside.
     await handleVendorDetailAddPayment(vendor)
   }
 
@@ -4584,40 +4737,65 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                 </Card>
               </TabsContent>
 
-              {/* Vendor Ledger Tab (Builder Daily Khata view) */}
+              {/* Vendor Ledger Tab (Builder Daily Khata view).
+                  Same UI for the Commission Ledger — scope flips title +
+                  vendor-type filtering. */}
               <TabsContent value="expenses" className="space-y-4">
                 {/* Header */}
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                   <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-xl bg-orange-100 flex items-center justify-center">
-                      <BookOpen className="w-5 h-5 text-orange-600" />
+                    <div className={`w-11 h-11 rounded-xl flex items-center justify-center ${vendorLedgerScope === 'commission' ? 'bg-purple-100' : 'bg-orange-100'}`}>
+                      <BookOpen className={`w-5 h-5 ${vendorLedgerScope === 'commission' ? 'text-purple-600' : 'text-orange-600'}`} />
                     </div>
                     <div>
-                      <h2 className="text-xl font-bold text-slate-900">Vendor Ledger</h2>
-                      <p className="text-sm text-slate-500">Builder Daily Khata — Work, Material &amp; Payments</p>
+                      <h2 className="text-xl font-bold text-slate-900">
+                        {vendorLedgerScope === 'commission' ? 'Commission Ledger' : 'Vendor Ledger'}
+                      </h2>
+                      <p className="text-sm text-slate-500">
+                        {vendorLedgerScope === 'commission'
+                          ? 'Commission Daily Khata — Bills & Payments'
+                          : 'Builder Daily Khata — Work, Material & Payments'}
+                      </p>
                     </div>
                   </div>
-                  <Dialog
-                    open={dialogMode === 'createVendorLedgerVendor' && isDialogOpen}
-                    onOpenChange={(open) => { setIsDialogOpen(open); if (!open) setDialogMode('') }}
-                  >
+                  <div className="flex items-center gap-2">
+                    <Button variant="outline" onClick={openGlobalLedger}>
+                      <BookOpen className="w-4 h-4 mr-2" /> View All Activity
+                    </Button>
+                    <Dialog
+                      open={dialogMode === 'createVendorLedgerVendor' && isDialogOpen}
+                      onOpenChange={(open) => { setIsDialogOpen(open); if (!open) setDialogMode('') }}
+                    >
                     <DialogTrigger asChild>
                       <Button onClick={() => { setDialogMode('createVendorLedgerVendor'); setCurrentItem(null); }}>
-                        <Plus className="w-4 h-4 mr-2" /> Add Vendor
+                        <Plus className="w-4 h-4 mr-2" /> Add {vendorLedgerScope === 'commission' ? 'Commission Vendor' : 'Vendor'}
                       </Button>
                     </DialogTrigger>
                     <DialogContent className="max-w-lg">
                       <DialogHeader>
-                        <DialogTitle>Add New Vendor</DialogTitle>
+                        <DialogTitle>
+                          {vendorLedgerScope === 'commission' ? 'Add New Commission Vendor' : 'Add New Vendor'}
+                        </DialogTitle>
                       </DialogHeader>
                       <VendorForm
-                        onSubmit={handleCreateVendor}
+                        onSubmit={(data) => handleCreateVendor(
+                          vendorLedgerScope === 'commission'
+                            ? { ...data, type: 'Commission' }
+                            : data
+                        )}
                         onCancel={() => setIsDialogOpen(false)}
-                        vendorTypes={(vendorTypes || []).filter(t => (t.name || t) !== 'Broker')}
+                        vendorTypes={
+                          vendorLedgerScope === 'commission'
+                            ? (vendorTypes || []).filter(t => (t.name || t) === 'Commission')
+                            : (vendorTypes || []).filter(t => (t.name || t) !== 'Broker' && (t.name || t) !== 'Commission')
+                        }
+                        defaultType={vendorLedgerScope === 'commission' ? 'Commission' : undefined}
+                        lockType={vendorLedgerScope === 'commission'}
                         onAddNewType={loadMasterData}
                       />
                     </DialogContent>
                   </Dialog>
+                  </div>
                 </div>
 
                 {/* Summary cards */}
@@ -4646,18 +4824,25 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                       <p className="text-2xl font-bold text-red-700 mt-1">₹{fmt(vendorLedgerTotals.totalPending)}</p>
                     </CardContent>
                   </Card>
-                  <Card className="bg-purple-50/60">
-                    <CardContent className="p-4 text-center">
-                      <p className="text-xs uppercase tracking-wide text-purple-700">Labour Cost</p>
-                      <p className="text-2xl font-bold text-purple-700 mt-1">₹{fmt(vendorLedgerTotals.labourCost)}</p>
-                    </CardContent>
-                  </Card>
-                  <Card className="bg-amber-50/60">
-                    <CardContent className="p-4 text-center">
-                      <p className="text-xs uppercase tracking-wide text-amber-700">Material Cost</p>
-                      <p className="text-2xl font-bold text-amber-700 mt-1">₹{fmt(vendorLedgerTotals.materialCost)}</p>
-                    </CardContent>
-                  </Card>
+                  {/* Labour / Material breakdown only applies to the regular
+                      Vendor Ledger — commission vendors don't have work
+                      categories, so we hide these two cards in that scope. */}
+                  {vendorLedgerScope !== 'commission' && (
+                    <>
+                      <Card className="bg-purple-50/60">
+                        <CardContent className="p-4 text-center">
+                          <p className="text-xs uppercase tracking-wide text-purple-700">Labour Cost</p>
+                          <p className="text-2xl font-bold text-purple-700 mt-1">₹{fmt(vendorLedgerTotals.labourCost)}</p>
+                        </CardContent>
+                      </Card>
+                      <Card className="bg-amber-50/60">
+                        <CardContent className="p-4 text-center">
+                          <p className="text-xs uppercase tracking-wide text-amber-700">Material Cost</p>
+                          <p className="text-2xl font-bold text-amber-700 mt-1">₹{fmt(vendorLedgerTotals.materialCost)}</p>
+                        </CardContent>
+                      </Card>
+                    </>
+                  )}
                 </div>
 
                 {/* Filters */}
@@ -4781,7 +4966,19 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
                                       <DialogHeader>
                                         <DialogTitle>Edit Vendor</DialogTitle>
                                       </DialogHeader>
-                                      <VendorForm vendor={row} onSubmit={(data) => handleUpdateVendor(row.id, data)} onCancel={() => setIsDialogOpen(false)} vendorTypes={vendorTypes} onAddNewType={loadMasterData} />
+                                      <VendorForm
+                                        vendor={row}
+                                        onSubmit={(data) => handleUpdateVendor(row.id, vendorLedgerScope === 'commission' ? { ...data, type: 'Commission' } : data)}
+                                        onCancel={() => setIsDialogOpen(false)}
+                                        vendorTypes={
+                                          vendorLedgerScope === 'commission'
+                                            ? (vendorTypes || []).filter(t => (t.name || t) === 'Commission')
+                                            : vendorTypes
+                                        }
+                                        defaultType={vendorLedgerScope === 'commission' ? 'Commission' : undefined}
+                                        lockType={vendorLedgerScope === 'commission'}
+                                        onAddNewType={loadMasterData}
+                                      />
                                     </DialogContent>
                                   </Dialog>
                                   <AlertDialog>
@@ -5445,6 +5642,17 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
         onEditEntry={handleVendorLedgerEdit}
       />
 
+      {/* Global Ledger — cross-vendor read-only view, opened from the
+          "View All Activity" button on the vendor/commission ledger page. */}
+      <GlobalLedgerDrawer
+        isOpen={isGlobalLedgerOpen}
+        onClose={() => setIsGlobalLedgerOpen(false)}
+        scope={vendorLedgerScope}
+        entries={globalLedgerEntries}
+        loading={globalLedgerLoading}
+        onExportCSV={exportGlobalLedgerToCSV}
+      />
+
       {/* Vendor Ledger — Edit Payment dialog (overlays VendorLedgerDrawer) */}
       <VendorPaymentEditDialog
         payment={editingVendorPayment}
@@ -5453,7 +5661,8 @@ export const App = ({ initialTab = 'partners', singleTabMode = false } = {}) => 
         onSubmit={handleSubmitVendorPaymentEdit}
       />
 
-      {/* Vendor Ledger — Add Payment (vendor-level, FIFO across unpaid bills) */}
+      {/* Vendor Ledger — Add Payment / Withdrawal (vendor-level).
+          Both flows live in this one dialog now (type selector inside). */}
       <VendorAddPaymentDialog
         context={addingVendorPayment}
         accounts={accounts}
@@ -6562,11 +6771,13 @@ const VendorPaymentEditDialog = ({ payment, accounts, onClose, onSubmit }) => {
   )
 }
 
-// Vendor-level "Add Payment" dialog. User enters one amount; on save it
-// splits FIFO across the vendor's unpaid bills (oldest first). Shows a
-// live allocation preview so the breakdown is visible before submit.
+// Vendor-level "Add Payment" dialog. User picks entry type:
+//   • Payment    → FIFO across unpaid bills (oldest first)
+//   • Withdrawal → LIFO across paid bills (newest first, refund flow)
+// Live allocation preview reflects whichever type is selected.
 const VendorAddPaymentDialog = ({ context, accounts, onClose, onSubmit }) => {
   const [form, setForm] = useState({
+    entryType: 'PAYMENT',          // 'PAYMENT' | 'WITHDRAWAL'
     amount: '',
     paymentDate: new Date().toISOString().split('T')[0],
     paymentMode: 'Cash',
@@ -6578,6 +6789,7 @@ const VendorAddPaymentDialog = ({ context, accounts, onClose, onSubmit }) => {
   useEffect(() => {
     if (context) {
       setForm({
+        entryType: 'PAYMENT',
         amount: '',
         paymentDate: new Date().toISOString().split('T')[0],
         paymentMode: 'Cash',
@@ -6588,31 +6800,49 @@ const VendorAddPaymentDialog = ({ context, accounts, onClose, onSubmit }) => {
     }
   }, [context])
 
-  if (!context) return null
-  const { vendor, unpaidBills, totalPending } = context
-
   const eligibleAccounts = (accounts || []).filter(a =>
     form.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK'
   )
 
-  // Live FIFO preview — same algorithm as the submit handler.
+  // Auto-select first eligible account — without this, a blank submit ends
+  // up writing accountId='' to the txn and shows "Unknown" in the daybook.
+  useEffect(() => {
+    if (!context) return
+    if (form.accountId && eligibleAccounts.some(a => a.id === form.accountId)) return
+    if (!eligibleAccounts.length) return
+    const def = eligibleAccounts.find(a => a.isDefault) || eligibleAccounts[0]
+    setForm(f => ({ ...f, accountId: def.id }))
+  }, [context, form.paymentMode, accounts])
+
+  if (!context) return null
+  const { vendor, unpaidBills, paidBills, totalPending, totalPaid } = context
+
+  const isWithdrawal = form.entryType === 'WITHDRAWAL'
+  const sourceBills = isWithdrawal ? (paidBills || []) : (unpaidBills || [])
+  const maxAmount = isWithdrawal ? (totalPaid || 0) : (totalPending || 0)
+
+  // Live allocation preview — same algorithm as the submit handler.
   const amountNum = parseFloat(form.amount) || 0
   const preview = []
   let remaining = amountNum
-  for (const bill of unpaidBills) {
+  for (const bill of sourceBills) {
     if (remaining <= 0) break
-    const billRem = Math.max(0, bill.balance || 0)
-    if (billRem <= 0) continue
-    const portion = Math.min(remaining, billRem)
+    const cap = isWithdrawal
+      ? Math.max(0, bill.totalPaid || 0)
+      : Math.max(0, bill.balance || 0)
+    if (cap <= 0) continue
+    const portion = Math.min(remaining, cap)
     preview.push({ bill, portion })
     remaining -= portion
   }
-  const exceedsPending = amountNum > totalPending
+  const exceedsCap = amountNum > maxAmount
 
   const handleSave = (e) => {
     e.preventDefault()
     if (!(amountNum > 0)) return
+    if (!form.accountId) return
     onSubmit({
+      type: form.entryType,
       amount: amountNum,
       paymentDate: form.paymentDate,
       paymentMode: form.paymentMode,
@@ -6626,19 +6856,54 @@ const VendorAddPaymentDialog = ({ context, accounts, onClose, onSubmit }) => {
     <Dialog open={!!context} onOpenChange={(open) => { if (!open) onClose() }}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Add Payment — {vendor?.name}</DialogTitle>
+          <DialogTitle>
+            {isWithdrawal ? 'Withdraw' : 'Add Payment'} — {vendor?.name}
+          </DialogTitle>
           <DialogDescription>
-            Pending ₹{fmt(totalPending)} across {unpaidBills.length} bill{unpaidBills.length > 1 ? 's' : ''}. Payment will be split oldest-first.
+            {isWithdrawal
+              ? `Already paid ₹${fmt(totalPaid)} across ${paidBills?.length || 0} bill${(paidBills?.length || 0) !== 1 ? 's' : ''}. Withdrawal will reverse newest-first.`
+              : `Pending ₹${fmt(totalPending)} across ${unpaidBills?.length || 0} bill${(unpaidBills?.length || 0) !== 1 ? 's' : ''}. Payment will be split oldest-first.`}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSave} className="space-y-3">
+          {/* Entry type — Payment vs Withdrawal */}
+          <div>
+            <Label>Entry Type *</Label>
+            <div className="grid grid-cols-2 gap-2 mt-1">
+              <button
+                type="button"
+                onClick={() => setForm(f => ({ ...f, entryType: 'PAYMENT', amount: '' }))}
+                className={`px-3 py-2 rounded-md border text-sm font-medium transition ${
+                  form.entryType === 'PAYMENT'
+                    ? 'border-emerald-600 bg-emerald-50 text-emerald-700'
+                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                Payment <span className="text-xs opacity-70">(pay vendor)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setForm(f => ({ ...f, entryType: 'WITHDRAWAL', amount: '' }))}
+                disabled={(totalPaid || 0) <= 0}
+                className={`px-3 py-2 rounded-md border text-sm font-medium transition disabled:opacity-40 disabled:cursor-not-allowed ${
+                  form.entryType === 'WITHDRAWAL'
+                    ? 'border-orange-600 bg-orange-50 text-orange-700'
+                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                }`}
+                title={(totalPaid || 0) <= 0 ? 'Nothing paid to vendor yet — withdrawal not possible' : 'Take money back from vendor'}
+              >
+                Withdrawal <span className="text-xs opacity-70">(take back)</span>
+              </button>
+            </div>
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <Label>Amount (₹) *</Label>
               <Input type="number" step="0.01" required
                 value={form.amount}
                 onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
-                placeholder={`Max ${fmt(totalPending)}`}
+                placeholder={`Max ${fmt(maxAmount)}`}
               />
             </div>
             <div>
@@ -6663,15 +6928,18 @@ const VendorAddPaymentDialog = ({ context, accounts, onClose, onSubmit }) => {
               </Select>
             </div>
             <div>
-              <Label>Account</Label>
+              <Label>Account *</Label>
               <Select value={form.accountId} onValueChange={v => setForm(f => ({ ...f, accountId: v }))}>
-                <SelectTrigger><SelectValue placeholder="Default" /></SelectTrigger>
+                <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
                 <SelectContent>
                   {eligibleAccounts.map(a => (
                     <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {!form.accountId && eligibleAccounts.length === 0 && (
+                <p className="text-xs text-red-600 mt-1">No {form.paymentMode === 'Cash' ? 'cash' : 'bank'} account available</p>
+              )}
             </div>
           </div>
           <div>
@@ -6685,13 +6953,21 @@ const VendorAddPaymentDialog = ({ context, accounts, onClose, onSubmit }) => {
 
           {/* Allocation preview */}
           {amountNum > 0 && (
-            <div className={`p-3 rounded-lg border text-sm ${exceedsPending ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'}`}>
+            <div className={`p-3 rounded-lg border text-sm ${
+              exceedsCap
+                ? 'bg-red-50 border-red-200'
+                : isWithdrawal
+                  ? 'bg-orange-50 border-orange-200'
+                  : 'bg-blue-50 border-blue-200'
+            }`}>
               <p className="font-medium mb-2">
-                {exceedsPending
-                  ? `Amount exceeds pending by ₹${fmt(amountNum - totalPending)}. Reduce to ₹${fmt(totalPending)}.`
-                  : 'Allocation preview:'}
+                {exceedsCap
+                  ? `Amount exceeds ${isWithdrawal ? 'paid' : 'pending'} by ₹${fmt(amountNum - maxAmount)}. Reduce to ₹${fmt(maxAmount)}.`
+                  : isWithdrawal
+                    ? 'Reversal preview (newest-first):'
+                    : 'Allocation preview (oldest-first):'}
               </p>
-              {!exceedsPending && (
+              {!exceedsCap && (
                 <ul className="space-y-1">
                   {preview.map(({ bill, portion }) => (
                     <li key={bill.id} className="flex justify-between text-xs">
@@ -6699,7 +6975,9 @@ const VendorAddPaymentDialog = ({ context, accounts, onClose, onSubmit }) => {
                         {new Date(bill.billDate).toLocaleDateString()} · {bill.categoryName || 'Work'}
                         {bill.description ? ` — ${bill.description}` : ''}
                       </span>
-                      <span className="font-medium text-blue-700">₹{fmt(portion)}</span>
+                      <span className={`font-medium ${isWithdrawal ? 'text-orange-700' : 'text-blue-700'}`}>
+                        {isWithdrawal ? '−' : ''}₹{fmt(portion)}
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -6709,11 +6987,284 @@ const VendorAddPaymentDialog = ({ context, accounts, onClose, onSubmit }) => {
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-            <Button type="submit" disabled={!(amountNum > 0) || exceedsPending}>Save Payment</Button>
+            <Button
+              type="submit"
+              disabled={!(amountNum > 0) || exceedsCap || !form.accountId}
+              className={isWithdrawal ? 'bg-orange-600 hover:bg-orange-700 text-white' : ''}
+            >
+              {isWithdrawal ? 'Confirm Withdrawal' : 'Save Payment'}
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// Global Ledger Drawer — cross-vendor read-only timeline. Filters: date
+// preset chips + custom range + vendor + type + search. Exports to CSV.
+const GlobalLedgerDrawer = ({ isOpen, onClose, scope, entries, loading, onExportCSV }) => {
+  const [filterType, setFilterType] = useState('all')
+  const [filterVendor, setFilterVendor] = useState('all')
+  const [filterFrom, setFilterFrom] = useState('')
+  const [filterTo, setFilterTo] = useState('')
+  const [search, setSearch] = useState('')
+
+  // Distinct vendor list derived from the entries themselves so the filter
+  // dropdown stays in sync with what's actually visible.
+  const vendorOptions = Array.from(
+    new Map(entries.map(e => [e.vendorId, { id: e.vendorId, name: e.vendorName }])).values()
+  ).filter(v => v.id).sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+
+  // Totals across the whole timeline (unfiltered) — these reflect the
+  // ledger as a whole; filtered counts appear on the table footer.
+  const totalWork = entries.filter(e => e.type === 'WORK').reduce((s, e) => s + (e.workValue || 0), 0)
+  const totalPaid = entries.filter(e => e.type === 'PAYMENT' || e.type === 'WITHDRAWAL')
+    .reduce((s, e) => s + (e.paymentAmount || 0), 0)
+  const totalPending = Math.max(0, totalWork - totalPaid)
+
+  const filteredEntries = entries.filter(e => {
+    if (filterType !== 'all') {
+      if (filterType === 'LABOUR') {
+        if (e.subType !== 'LABOUR') return false
+      } else if (filterType === 'WORK') {
+        if (e.type !== 'WORK' || e.subType === 'LABOUR') return false
+      } else if (e.type !== filterType) {
+        return false
+      }
+    }
+    if (filterVendor !== 'all' && e.vendorId !== filterVendor) return false
+    if (filterFrom && new Date(e.date) < new Date(filterFrom)) return false
+    if (filterTo && new Date(e.date) > new Date(filterTo)) return false
+    if (search) {
+      const q = search.toLowerCase()
+      const hay = `${e.description || ''} ${e.vendorName || ''} ${e.categoryName || ''} ${e.reference || ''} ${e.paymentMode || ''}`.toLowerCase()
+      if (!hay.includes(q)) return false
+    }
+    return true
+  })
+
+  const title = scope === 'commission' ? 'Commission Ledger — All Activity' : 'Vendor Ledger — All Activity'
+
+  return (
+    <Drawer open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
+      <DrawerContent className="max-h-[95vh]">
+        <DrawerHeader className="pb-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Button variant="ghost" size="sm" onClick={onClose}>
+                <X className="w-4 h-4" />
+              </Button>
+              <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${scope === 'commission' ? 'bg-purple-100' : 'bg-orange-100'}`}>
+                <BookOpen className={`w-4 h-4 ${scope === 'commission' ? 'text-purple-600' : 'text-orange-600'}`} />
+              </div>
+              <div className="text-left">
+                <DrawerTitle className="text-lg">{title}</DrawerTitle>
+                <DrawerDescription>
+                  {entries.length} entries · {vendorOptions.length} vendors
+                </DrawerDescription>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={onExportCSV} disabled={entries.length === 0}>
+                <FileSpreadsheet className="w-4 h-4 mr-1" /> CSV
+              </Button>
+            </div>
+          </div>
+        </DrawerHeader>
+
+        <div className="px-4 pb-6 overflow-y-auto space-y-4 max-w-7xl mx-auto w-full">
+          {/* Totals strip */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Card className="bg-blue-50/60">
+              <CardContent className="p-4 text-center">
+                <p className="text-xs uppercase tracking-wide text-blue-700">Total Work</p>
+                <p className="text-xl font-bold text-blue-700 mt-1">₹{fmt(totalWork)}</p>
+              </CardContent>
+            </Card>
+            <Card className="bg-green-50/60">
+              <CardContent className="p-4 text-center">
+                <p className="text-xs uppercase tracking-wide text-green-700">Net Paid</p>
+                <p className="text-xl font-bold text-green-700 mt-1">₹{fmt(totalPaid)}</p>
+              </CardContent>
+            </Card>
+            <Card className="bg-red-50/60">
+              <CardContent className="p-4 text-center">
+                <p className="text-xs uppercase tracking-wide text-red-700">Pending</p>
+                <p className="text-xl font-bold text-red-700 mt-1">₹{fmt(totalPending)}</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4 text-center">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Showing</p>
+                <p className="text-xl font-bold text-slate-900 mt-1">{filteredEntries.length} / {entries.length}</p>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Filters */}
+          <Card>
+            <CardContent className="p-3 space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-slate-500 mr-1">Quick range:</span>
+                {(() => {
+                  const today = new Date()
+                  const iso = (d) => d.toISOString().split('T')[0]
+                  const startOfWeek = new Date(today); startOfWeek.setDate(today.getDate() - today.getDay())
+                  const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1)
+                  const startOfLastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1)
+                  const endOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 0)
+                  const startOfYear = new Date(today.getFullYear(), 0, 1)
+                  const presets = [
+                    { label: 'Today', from: iso(today), to: iso(today) },
+                    { label: 'This Week', from: iso(startOfWeek), to: iso(today) },
+                    { label: 'This Month', from: iso(startOfMonth), to: iso(today) },
+                    { label: 'Last Month', from: iso(startOfLastMonth), to: iso(endOfLastMonth) },
+                    { label: 'This Year', from: iso(startOfYear), to: iso(today) },
+                  ]
+                  const isActive = (p) => filterFrom === p.from && filterTo === p.to
+                  return (
+                    <>
+                      {presets.map(p => (
+                        <Button
+                          key={p.label}
+                          type="button"
+                          variant={isActive(p) ? 'default' : 'outline'}
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => { setFilterFrom(p.from); setFilterTo(p.to) }}
+                        >
+                          {p.label}
+                        </Button>
+                      ))}
+                      <Button
+                        type="button"
+                        variant={!filterFrom && !filterTo ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => { setFilterFrom(''); setFilterTo('') }}
+                      >
+                        All Time
+                      </Button>
+                      {(filterFrom || filterTo || filterType !== 'all' || filterVendor !== 'all' || search) && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs text-slate-500"
+                          onClick={() => { setFilterFrom(''); setFilterTo(''); setFilterType('all'); setFilterVendor('all'); setSearch('') }}
+                        >
+                          <X className="w-3 h-3 mr-1" /> Clear all
+                        </Button>
+                      )}
+                    </>
+                  )
+                })()}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+                <Select value={filterType} onValueChange={setFilterType}>
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="All Activities" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Activities</SelectItem>
+                    <SelectItem value="WORK">Work</SelectItem>
+                    <SelectItem value="LABOUR">Labour</SelectItem>
+                    <SelectItem value="PAYMENT">Payment</SelectItem>
+                    <SelectItem value="WITHDRAWAL">Withdrawal</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Select value={filterVendor} onValueChange={setFilterVendor}>
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="All Vendors" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Vendors</SelectItem>
+                    {vendorOptions.map(v => (
+                      <SelectItem key={v.id} value={v.id}>{v.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Input type="date" className="h-9" value={filterFrom} onChange={e => setFilterFrom(e.target.value)} />
+                <Input type="date" className="h-9" value={filterTo} onChange={e => setFilterTo(e.target.value)} />
+                <Input className="h-9" placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)} />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Timeline */}
+          <Card>
+            <CardContent className="p-0">
+              {loading ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                </div>
+              ) : filteredEntries.length === 0 ? (
+                <p className="text-center text-gray-500 py-8">No activity to show</p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Date</TableHead>
+                      <TableHead>Vendor</TableHead>
+                      <TableHead>Type</TableHead>
+                      <TableHead>Description</TableHead>
+                      <TableHead className="text-right">Work Value</TableHead>
+                      <TableHead className="text-right">Payment</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredEntries.map(entry => (
+                      <TableRow key={entry.id} className={entry.type === 'WITHDRAWAL' ? 'bg-orange-50/40' : ''}>
+                        <TableCell className="whitespace-nowrap">{new Date(entry.date).toLocaleDateString()}</TableCell>
+                        <TableCell className="font-medium">{entry.vendorName}</TableCell>
+                        <TableCell>
+                          {entry.type === 'WITHDRAWAL' ? (
+                            <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100">Withdrawal</Badge>
+                          ) : entry.subType === 'LABOUR' ? (
+                            <Badge className="bg-purple-100 text-purple-700 hover:bg-purple-100">Labour</Badge>
+                          ) : entry.type === 'WORK' ? (
+                            <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100">Work</Badge>
+                          ) : (
+                            <Badge className="bg-green-100 text-green-700 hover:bg-green-100">Payment</Badge>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="text-sm">{entry.description}</div>
+                          {entry.categoryName && entry.type === 'WORK' && (
+                            <div className="text-xs text-slate-500">{entry.categoryName}</div>
+                          )}
+                          {(entry.type === 'PAYMENT' || entry.type === 'WITHDRAWAL') && entry.paymentMode && (
+                            <div className="text-xs text-slate-500">via {entry.paymentMode}</div>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {entry.workValue > 0 ? (
+                            <span className="text-blue-700 font-medium">₹{fmt(entry.workValue)}</span>
+                          ) : (
+                            <span className="text-slate-300">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {entry.type === 'WITHDRAWAL' ? (
+                            <span className="text-orange-700 font-medium">−₹{fmt(Math.abs(entry.paymentAmount || 0))}</span>
+                          ) : entry.paymentAmount > 0 ? (
+                            <span className="text-green-700 font-medium">₹{fmt(entry.paymentAmount)}</span>
+                          ) : (
+                            <span className="text-slate-300">—</span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </DrawerContent>
+    </Drawer>
   )
 }
 
@@ -6726,8 +7277,13 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
   // Aggregates derived from the merged work + payment timeline.
   const workEntries = entries.filter(e => e.type === 'WORK')
   const paymentEntries = entries.filter(e => e.type === 'PAYMENT')
+  const withdrawalEntries = entries.filter(e => e.type === 'WITHDRAWAL')
   const totalWork = workEntries.reduce((s, e) => s + (e.workValue || 0), 0)
-  const totalPaid = paymentEntries.reduce((s, e) => s + (e.paymentAmount || 0), 0)
+  const totalWithdrawn = withdrawalEntries.reduce((s, e) => s + Math.abs(e.paymentAmount || 0), 0)
+  // Net paid = payments - withdrawals (payment entries already use positive
+  // amounts; withdrawal entries store paymentAmount as negative, so summing
+  // both alongside works out, but we keep them split for the headline cards).
+  const totalPaid = paymentEntries.reduce((s, e) => s + (e.paymentAmount || 0), 0) - totalWithdrawn
   const labourValue = workEntries
     .filter(e => /labour/i.test(e.categoryName || ''))
     .reduce((s, e) => s + (e.workValue || 0), 0)
@@ -6856,7 +7412,8 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
             </div>
           </div>
 
-          {/* Action buttons */}
+          {/* Action buttons — Withdrawal lives inside Add Payment's type
+              selector now, so we're back to three primary actions. */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <Button className="bg-blue-600 hover:bg-blue-700 text-white h-14 text-base" onClick={() => onAddWork && onAddWork(vendor)}>
               <Plus className="w-5 h-5 mr-2" /> Add Work
@@ -6871,7 +7428,67 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
 
           {/* Filters */}
           <Card>
-            <CardContent className="p-3">
+            <CardContent className="p-3 space-y-3">
+              {/* Quick date presets — each chip rewrites filterFrom/filterTo
+                  to the requested window. "All" clears the range entirely. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-slate-500 mr-1">Quick range:</span>
+                {(() => {
+                  const today = new Date()
+                  const iso = (d) => d.toISOString().split('T')[0]
+                  const startOfWeek = new Date(today); startOfWeek.setDate(today.getDate() - today.getDay())
+                  const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1)
+                  const startOfLastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1)
+                  const endOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 0)
+                  const startOfYear = new Date(today.getFullYear(), 0, 1)
+                  const presets = [
+                    { label: 'Today', from: iso(today), to: iso(today) },
+                    { label: 'This Week', from: iso(startOfWeek), to: iso(today) },
+                    { label: 'This Month', from: iso(startOfMonth), to: iso(today) },
+                    { label: 'Last Month', from: iso(startOfLastMonth), to: iso(endOfLastMonth) },
+                    { label: 'This Year', from: iso(startOfYear), to: iso(today) },
+                  ]
+                  const isActive = (p) => filterFrom === p.from && filterTo === p.to
+                  return (
+                    <>
+                      {presets.map(p => (
+                        <Button
+                          key={p.label}
+                          type="button"
+                          variant={isActive(p) ? 'default' : 'outline'}
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => { setFilterFrom(p.from); setFilterTo(p.to) }}
+                        >
+                          {p.label}
+                        </Button>
+                      ))}
+                      <Button
+                        type="button"
+                        variant={!filterFrom && !filterTo ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => { setFilterFrom(''); setFilterTo('') }}
+                      >
+                        All Time
+                      </Button>
+                      {(filterFrom || filterTo || filterType !== 'all' || search) && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs text-slate-500"
+                          onClick={() => { setFilterFrom(''); setFilterTo(''); setFilterType('all'); setSearch('') }}
+                        >
+                          <X className="w-3 h-3 mr-1" /> Clear all
+                        </Button>
+                      )}
+                    </>
+                  )
+                })()}
+              </div>
+
+              {/* Existing filter inputs */}
               <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
                 <Select value={filterType} onValueChange={setFilterType}>
                   <SelectTrigger className="h-9">
@@ -6882,10 +7499,15 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
                     <SelectItem value="WORK">Work</SelectItem>
                     <SelectItem value="LABOUR">Labour</SelectItem>
                     <SelectItem value="PAYMENT">Payment</SelectItem>
+                    <SelectItem value="WITHDRAWAL">Withdrawal</SelectItem>
                   </SelectContent>
                 </Select>
-                <Input type="date" className="h-9" value={filterFrom} onChange={e => setFilterFrom(e.target.value)} />
-                <Input type="date" className="h-9" value={filterTo} onChange={e => setFilterTo(e.target.value)} />
+                <div>
+                  <Input type="date" className="h-9" value={filterFrom} onChange={e => setFilterFrom(e.target.value)} placeholder="From" />
+                </div>
+                <div>
+                  <Input type="date" className="h-9" value={filterTo} onChange={e => setFilterTo(e.target.value)} placeholder="To" />
+                </div>
                 <Input className="h-9" placeholder="Search description, ref, material…" value={search} onChange={e => setSearch(e.target.value)} />
               </div>
             </CardContent>
@@ -6911,10 +7533,12 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
                   </TableHeader>
                   <TableBody>
                     {filteredEntries.map(entry => (
-                      <TableRow key={entry.id}>
+                      <TableRow key={entry.id} className={entry.type === 'WITHDRAWAL' ? 'bg-orange-50/40' : ''}>
                         <TableCell className="whitespace-nowrap">{new Date(entry.date).toLocaleDateString()}</TableCell>
                         <TableCell>
-                          {entry.subType === 'LABOUR' ? (
+                          {entry.type === 'WITHDRAWAL' ? (
+                            <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100">Withdrawal</Badge>
+                          ) : entry.subType === 'LABOUR' ? (
                             <Badge className="bg-purple-100 text-purple-700 hover:bg-purple-100">Labour</Badge>
                           ) : entry.type === 'WORK' ? (
                             <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100">Work</Badge>
@@ -6927,7 +7551,7 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
                           {entry.type === 'WORK' && entry.categoryName && (
                             <div className="text-xs text-slate-500">{entry.categoryName}</div>
                           )}
-                          {entry.type === 'PAYMENT' && entry.paymentMode && (
+                          {(entry.type === 'PAYMENT' || entry.type === 'WITHDRAWAL') && entry.paymentMode && (
                             <div className="text-xs text-slate-500">via {entry.paymentMode}</div>
                           )}
                         </TableCell>
@@ -6939,7 +7563,9 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
                           )}
                         </TableCell>
                         <TableCell className="text-right">
-                          {entry.paymentAmount > 0 ? (
+                          {entry.type === 'WITHDRAWAL' ? (
+                            <span className="text-orange-700 font-medium">−₹{fmt(Math.abs(entry.paymentAmount || 0))}</span>
+                          ) : entry.paymentAmount > 0 ? (
                             <span className="text-green-700 font-medium">₹{fmt(entry.paymentAmount)}</span>
                           ) : (
                             <span className="text-slate-300">—</span>
@@ -9149,11 +9775,11 @@ const SaleForm = ({ inventory, customers = [], onSubmit, onCancel, initialData, 
 }
 
 // Vendor Form Component
-const VendorForm = ({ vendor, onSubmit, onCancel, vendorTypes = [], onAddNewType }) => {
+const VendorForm = ({ vendor, onSubmit, onCancel, vendorTypes = [], onAddNewType, defaultType, lockType = false }) => {
   const { toast } = useToast()
   const [formData, setFormData] = useState({
     name: vendor?.name || '',
-    type: vendor?.type || 'Other',
+    type: vendor?.type || defaultType || 'Other',
     phone: vendor?.phone || '',
     notes: vendor?.notes || ''
   })
@@ -9203,11 +9829,18 @@ const VendorForm = ({ vendor, onSubmit, onCancel, vendorTypes = [], onAddNewType
       </div>
       <div>
         <Label>Vendor Type *</Label>
-        {showAddType ? (
+        {lockType ? (
+          // Locked-type mode (Commission Ledger): show the fixed type as a
+          // read-only chip so the user can't change it but still sees it.
+          <div className="flex items-center gap-2 mt-1 px-3 py-2 rounded-md border bg-slate-50 text-slate-700">
+            <Badge variant="secondary">{formData.type}</Badge>
+            <span className="text-xs text-slate-500">Locked for this ledger</span>
+          </div>
+        ) : showAddType ? (
           <div className="flex gap-2">
-            <Input 
-              value={newTypeName} 
-              onChange={e => setNewTypeName(e.target.value)} 
+            <Input
+              value={newTypeName}
+              onChange={e => setNewTypeName(e.target.value)}
               placeholder="New type name"
               autoFocus
             />
