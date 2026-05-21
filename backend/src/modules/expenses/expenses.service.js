@@ -352,6 +352,11 @@ const listExpenses = async (query) => {
       sourceId: b.id,
       billId: b.id,
       txnDate: b.billDate || null,
+      // Freshness signal — used as a tiebreaker when merging with quick
+      // expenses so a bill touched today (e.g. "Add to Bill") bubbles up
+      // above bills with the same billDate but no recent activity.
+      updatedAt: b.updatedAt || b.createdAt || null,
+      createdAt: b.createdAt || null,
       societyId: b.societyId || null,
       scope: b.scope || (b.societyId ? 'SOCIETY' : 'COMPANY'),
       accountId: null,
@@ -385,12 +390,18 @@ const listExpenses = async (query) => {
   // computed above so the "# Transactions" card matches what the user sees).
   summary.transactionCount = billRows.length + transactions.length;
 
-  // Sort by date desc so bills + quick expenses interleave naturally.
+  // Sort by date desc so bills + quick expenses interleave naturally. When
+  // two rows share the same date, fall back to the most recent activity
+  // timestamp (updatedAt for bills — captures "Add to Bill" mutations —
+  // createdAt for quick-expense transactions) so the row the user just
+  // touched lands at the top of its date group.
   const merged = [...billRows, ...transactions].sort((a, b) => {
     const da = a.txnDate || ''
     const db = b.txnDate || ''
-    if (da === db) return 0;
-    return db.localeCompare(da);
+    if (da !== db) return db.localeCompare(da);
+    const ta = new Date(a.updatedAt || a.createdAt || 0).getTime();
+    const tb = new Date(b.updatedAt || b.createdAt || 0).getTime();
+    return tb - ta;
   });
 
   return {
@@ -474,9 +485,12 @@ const quickExpense = async (body, userId) => {
 // ============ Expense bill payments ============
 
 const listBillPayments = async (billId) => {
+  // Newest first by paymentDate, then by createdAt so same-day entries show
+  // the most recently created row at the top (additions logged after the
+  // fact land above earlier payments on the same date).
   const payments = await ExpensePayment
     .find(notDeleted({ billId }))
-    .sort({ paymentDate: -1 })
+    .sort({ paymentDate: -1, createdAt: -1 })
     .lean();
   return payments.map(stripId);
 };
@@ -485,20 +499,27 @@ const addBillPayment = async (billId, body, userId) => {
   const bill = await ExpenseBill.findOne({ id: billId }).lean();
   if (!bill) return { error: 'Bill not found', status: 404 };
 
+  const isAddition = body.type === 'ADDITION';
+
   // Account is required so we never silently write a txn with no account —
   // that produces "Unknown" rows in the daybook and breaks balance reports.
+  // ADDITION rows don't move money, so they don't need an account.
   let accountId = body.accountId;
-  if (!accountId) {
-    const defaultAccount = await Account.findOne({ isDefault: true }).lean();
-    accountId = defaultAccount?.id;
-  }
-  if (!accountId) {
-    return { error: 'Account is required', status: 400 };
-  }
-  // Verify the account exists — guards against stale/typoed ids on the FE.
-  const accountDoc = await Account.findOne({ id: accountId }).lean();
-  if (!accountDoc) {
-    return { error: 'Selected account not found', status: 400 };
+  if (!isAddition) {
+    if (!accountId) {
+      const defaultAccount = await Account.findOne({ isDefault: true }).lean();
+      accountId = defaultAccount?.id;
+    }
+    if (!accountId) {
+      return { error: 'Account is required', status: 400 };
+    }
+    // Verify the account exists — guards against stale/typoed ids on the FE.
+    const accountDoc = await Account.findOne({ id: accountId }).lean();
+    if (!accountDoc) {
+      return { error: 'Selected account not found', status: 400 };
+    }
+  } else {
+    accountId = null;
   }
 
   const amount = parseFloat(body.amount) || 0;
@@ -510,11 +531,16 @@ const addBillPayment = async (billId, body, userId) => {
   // a payment was excessive or work was cancelled. Stored as a normal
   // ExpensePayment row with type=WITHDRAWAL; bill.paidAmount is decremented
   // and the daybook transaction flips to IN so the account balance recovers.
+  // `type=ADDITION` bumps the bill's billAmount (no money moves, no daybook
+  // entry) so each "Add to Bill" action is its own ledger row.
   const isWithdrawal = body.type === 'WITHDRAWAL';
   const billAmount = bill.amount ?? bill.billAmount ?? 0;
   const currentPaid = bill.paidAmount || 0;
 
-  if (isWithdrawal) {
+  if (isAddition) {
+    // Additions just grow the bill — no upper cap, only a positivity check
+    // (already enforced above).
+  } else if (isWithdrawal) {
     if (amount > currentPaid + 0.0001) {
       return {
         error: `Withdrawal exceeds paid amount (paid ${currentPaid}, attempted ${amount})`,
@@ -537,9 +563,9 @@ const addBillPayment = async (billId, body, userId) => {
     societyId: bill.societyId,
     accountId,
     amount,                                  // always stored positive
-    type: isWithdrawal ? 'WITHDRAWAL' : 'PAYMENT',
+    type: isAddition ? 'ADDITION' : (isWithdrawal ? 'WITHDRAWAL' : 'PAYMENT'),
     paymentDate: body.paymentDate,
-    paymentMode: body.paymentMode || 'Cash',
+    paymentMode: isAddition ? '' : (body.paymentMode || 'Cash'),
     referenceNo: body.referenceNo || '',
     remark: body.remark || '',
     createdBy: userId,
@@ -547,6 +573,28 @@ const addBillPayment = async (billId, body, userId) => {
   };
 
   await ExpensePayment.create(payment);
+
+  if (isAddition) {
+    // Bump the bill's amount; paid stays where it is. Re-derive status from
+    // the new (larger) bill so a previously PAID bill flips to PARTIAL when
+    // a fresh addition outpaces what's been paid so far.
+    const updated = await ExpenseBill.findOneAndUpdate(
+      { id: billId },
+      { $inc: { billAmount: amount, amount: amount } },
+      { new: true },
+    ).lean();
+    if (updated) {
+      const newBillAmount = updated.amount ?? updated.billAmount ?? 0;
+      const paid = Math.max(0, updated.paidAmount || 0);
+      let status;
+      if (paid <= 0) status = 'Pending';
+      else if (gteMoney(paid, newBillAmount)) status = 'Paid';
+      else status = 'Partial';
+      await ExpenseBill.updateOne({ id: billId }, { $set: { status } });
+    }
+    // No daybook transaction — no money moved. Return the ledger row.
+    return payment;
+  }
 
   // Withdrawals subtract from paid; payments add. Either way the $inc keeps
   // concurrent writes safe and we recompute the status from the new value.
@@ -586,35 +634,62 @@ const deleteBillPayment = async (id, userId) => {
   const payment = await ExpensePayment.findOne({ id }).lean();
   if (!payment) return { error: 'Payment not found', status: 404 };
 
-  const originalTxn = await Transaction.findOne({ sourceType: 'EXPENSE_PAYMENT', sourceId: id }).lean();
-  if (originalTxn) {
-    await createReversalTransaction(originalTxn, userId, 'Expense payment deleted');
+  const wasAddition = payment.type === 'ADDITION';
+  const wasWithdrawal = payment.type === 'WITHDRAWAL';
+
+  // Additions never produced a daybook entry, so there's nothing to reverse
+  // there — just shrink the bill amount back. Payments / withdrawals reverse
+  // their original txn first.
+  if (!wasAddition) {
+    const originalTxn = await Transaction.findOne({ sourceType: 'EXPENSE_PAYMENT', sourceId: id }).lean();
+    if (originalTxn) {
+      await createReversalTransaction(originalTxn, userId, 'Expense payment deleted');
+    }
   }
 
-  // Deleting a regular payment decrements paidAmount; deleting a withdrawal
-  // adds the money back to paidAmount (because the withdrawal originally
-  // subtracted it).
-  const wasWithdrawal = payment.type === 'WITHDRAWAL';
-  const delta = wasWithdrawal ? (payment.amount || 0) : -(payment.amount || 0);
-  const updated = await ExpenseBill.findOneAndUpdate(
-    { id: payment.billId },
-    { $inc: { paidAmount: delta } },
-    { new: true },
-  ).lean();
-  if (updated) {
-    const billAmount = updated.amount ?? updated.billAmount ?? 0;
-    const newPaid = Math.max(0, updated.paidAmount || 0);
-    const status = newPaid <= 0
-      ? 'Pending'
-      : (gteMoney(newPaid, billAmount) ? 'Paid' : 'Partial');
-    await ExpenseBill.updateOne(
+  if (wasAddition) {
+    // Pull the bill amount back down by the addition amount; paid stays put.
+    const updated = await ExpenseBill.findOneAndUpdate(
       { id: payment.billId },
-      { $set: { status, paidAmount: newPaid } },
-    );
+      { $inc: { billAmount: -(payment.amount || 0), amount: -(payment.amount || 0) } },
+      { new: true },
+    ).lean();
+    if (updated) {
+      const newBillAmount = Math.max(0, updated.amount ?? updated.billAmount ?? 0);
+      const paid = Math.max(0, updated.paidAmount || 0);
+      const status = paid <= 0
+        ? 'Pending'
+        : (gteMoney(paid, newBillAmount) ? 'Paid' : 'Partial');
+      await ExpenseBill.updateOne(
+        { id: payment.billId },
+        { $set: { status, billAmount: newBillAmount, amount: newBillAmount } },
+      );
+    }
+  } else {
+    // Deleting a regular payment decrements paidAmount; deleting a withdrawal
+    // adds the money back to paidAmount (because the withdrawal originally
+    // subtracted it).
+    const delta = wasWithdrawal ? (payment.amount || 0) : -(payment.amount || 0);
+    const updated = await ExpenseBill.findOneAndUpdate(
+      { id: payment.billId },
+      { $inc: { paidAmount: delta } },
+      { new: true },
+    ).lean();
+    if (updated) {
+      const billAmount = updated.amount ?? updated.billAmount ?? 0;
+      const newPaid = Math.max(0, updated.paidAmount || 0);
+      const status = newPaid <= 0
+        ? 'Pending'
+        : (gteMoney(newPaid, billAmount) ? 'Paid' : 'Partial');
+      await ExpenseBill.updateOne(
+        { id: payment.billId },
+        { $set: { status, paidAmount: newPaid } },
+      );
+    }
   }
 
   await ExpensePayment.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
-  return { message: 'Expense payment deleted with reversal' };
+  return { message: wasAddition ? 'Bill addition removed' : 'Expense payment deleted with reversal' };
 };
 
 // Edit an existing expense bill payment. For totals-affecting changes

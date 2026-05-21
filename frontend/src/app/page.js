@@ -15,7 +15,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog'
-import { Building2, Users, Package, ShoppingCart, TrendingUp, TrendingDown, LogOut, Plus, Edit, Trash2, Home, Eye, EyeOff, Receipt, UserCheck, CreditCard, Percent, RefreshCw, ArrowRightLeft, CheckCircle, XCircle, BookOpen, Wallet, ArrowDownCircle, ArrowUpCircle, Filter, X, Download, FileText, FileSpreadsheet, Lock, Settings, AlertTriangle, Pencil, IndianRupee, UserCircle, MinusCircle, Globe } from 'lucide-react'
+import { Building2, Users, Package, ShoppingCart, TrendingUp, TrendingDown, LogOut, Plus, Edit, Trash2, Home, Eye, EyeOff, Receipt, UserCheck, CreditCard, Percent, RefreshCw, ArrowRightLeft, CheckCircle, XCircle, BookOpen, Wallet, ArrowDownCircle, ArrowUpCircle, Filter, X, Download, FileText, FileSpreadsheet, Lock, Settings, AlertTriangle, Pencil, IndianRupee, UserCircle, MinusCircle, Globe, Zap } from 'lucide-react'
 import { AppShell } from '@/components/dashboard/AppShell'
 import { StatCard } from '@/components/dashboard/StatCard'
 import { getDeleteOtp, refreshDeleteOtp } from '@/lib/deleteOtp'
@@ -1288,6 +1288,11 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
       // initialData.category to find the matching id.
       // (Falls back to first category if "Labour" doesn't exist.)
       setAddWorkVendor({ ...vendor, _preselectLabour: true })
+    } else if (opts.preselectQuickPay) {
+      // Quick Pay shortcut: same Add-Work dialog, but with "Payment Made Now"
+      // pre-checked and paid amount auto-synced to the bill amount (full pay
+      // in one shot — work + payment recorded together).
+      setAddWorkVendor({ ...vendor, _preselectQuickPay: true })
     }
     setDialogMode('createExpenseBill')
     setIsDialogOpen(true)
@@ -5612,14 +5617,18 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
-              {addWorkVendor ? `Add Work — ${addWorkVendor.name}` : 'Add Work Entry'}
+              {addWorkVendor
+                ? (addWorkVendor._preselectQuickPay
+                    ? `Quick Pay — ${addWorkVendor.name}`
+                    : `Add Work — ${addWorkVendor.name}`)
+                : 'Add Work Entry'}
             </DialogTitle>
           </DialogHeader>
           <ExpenseBillForm
             vendors={vendors}
             accounts={accounts}
             initialData={addWorkVendor
-              ? { vendorId: addWorkVendor.id }
+              ? { vendorId: addWorkVendor.id, quickPay: !!addWorkVendor._preselectQuickPay }
               : undefined}
             onSubmit={handleCreateExpenseBill}
             onCancel={() => { setIsDialogOpen(false); setAddWorkVendor(null) }}
@@ -5638,6 +5647,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
         onAddWork={(v) => handleVendorDetailAddWork(v)}
         onAddPayment={(v) => handleVendorDetailAddPayment(v)}
         onAddLabour={(v) => handleVendorDetailAddWork(v, { preselectLabour: true })}
+        onQuickPay={(v) => handleVendorDetailAddWork(v, { preselectQuickPay: true })}
         onDeleteEntry={handleVendorLedgerDelete}
         onEditEntry={handleVendorLedgerEdit}
       />
@@ -7009,6 +7019,9 @@ const GlobalLedgerDrawer = ({ isOpen, onClose, scope, entries, loading, onExport
   const [filterFrom, setFilterFrom] = useState('')
   const [filterTo, setFilterTo] = useState('')
   const [search, setSearch] = useState('')
+  // 'transaction' uses the bill/payment date the user entered; 'created'
+  // uses createdAt — useful for catching entries logged late after the fact.
+  const [dateBasis, setDateBasis] = useState('transaction')
 
   // Distinct vendor list derived from the entries themselves so the filter
   // dropdown stays in sync with what's actually visible.
@@ -7034,8 +7047,15 @@ const GlobalLedgerDrawer = ({ isOpen, onClose, scope, entries, loading, onExport
       }
     }
     if (filterVendor !== 'all' && e.vendorId !== filterVendor) return false
-    if (filterFrom && new Date(e.date) < new Date(filterFrom)) return false
-    if (filterTo && new Date(e.date) > new Date(filterTo)) return false
+    const basisDate = dateBasis === 'created' ? (e.createdAt || e.date) : e.date
+    if (filterFrom) {
+      const fromTs = new Date(filterFrom).setHours(0, 0, 0, 0)
+      if (new Date(basisDate).getTime() < fromTs) return false
+    }
+    if (filterTo) {
+      const toTs = new Date(filterTo).setHours(23, 59, 59, 999)
+      if (new Date(basisDate).getTime() > toTs) return false
+    }
     if (search) {
       const q = search.toLowerCase()
       const hay = `${e.description || ''} ${e.vendorName || ''} ${e.categoryName || ''} ${e.reference || ''} ${e.paymentMode || ''}`.toLowerCase()
@@ -7105,6 +7125,30 @@ const GlobalLedgerDrawer = ({ isOpen, onClose, scope, entries, loading, onExport
           {/* Filters */}
           <Card>
             <CardContent className="p-3 space-y-3">
+              {/* Date basis toggle — decides whether date filters compare against
+                  the user-entered transaction date or the actual entry creation
+                  timestamp (catches entries logged after the fact). */}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-slate-500 mr-1">Filter by:</span>
+                <Button
+                  type="button"
+                  variant={dateBasis === 'transaction' ? 'default' : 'outline'}
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => setDateBasis('transaction')}
+                >
+                  Transaction Date
+                </Button>
+                <Button
+                  type="button"
+                  variant={dateBasis === 'created' ? 'default' : 'outline'}
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => setDateBasis('created')}
+                >
+                  Entry Created Date
+                </Button>
+              </div>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs text-slate-500 mr-1">Quick range:</span>
                 {(() => {
@@ -7146,13 +7190,13 @@ const GlobalLedgerDrawer = ({ isOpen, onClose, scope, entries, loading, onExport
                       >
                         All Time
                       </Button>
-                      {(filterFrom || filterTo || filterType !== 'all' || filterVendor !== 'all' || search) && (
+                      {(filterFrom || filterTo || filterType !== 'all' || filterVendor !== 'all' || search || dateBasis !== 'transaction') && (
                         <Button
                           type="button"
                           variant="ghost"
                           size="sm"
                           className="h-7 px-2 text-xs text-slate-500"
-                          onClick={() => { setFilterFrom(''); setFilterTo(''); setFilterType('all'); setFilterVendor('all'); setSearch('') }}
+                          onClick={() => { setFilterFrom(''); setFilterTo(''); setFilterType('all'); setFilterVendor('all'); setSearch(''); setDateBasis('transaction') }}
                         >
                           <X className="w-3 h-3 mr-1" /> Clear all
                         </Button>
@@ -7217,7 +7261,14 @@ const GlobalLedgerDrawer = ({ isOpen, onClose, scope, entries, loading, onExport
                   <TableBody>
                     {filteredEntries.map(entry => (
                       <TableRow key={entry.id} className={entry.type === 'WITHDRAWAL' ? 'bg-orange-50/40' : ''}>
-                        <TableCell className="whitespace-nowrap">{new Date(entry.date).toLocaleDateString()}</TableCell>
+                        <TableCell className="whitespace-nowrap">
+                          <div>{new Date(entry.date).toLocaleDateString()}</div>
+                          {dateBasis === 'created' && entry.createdAt && (
+                            <div className="text-[10px] text-slate-500">
+                              entered {new Date(entry.createdAt).toLocaleDateString()}
+                            </div>
+                          )}
+                        </TableCell>
                         <TableCell className="font-medium">{entry.vendorName}</TableCell>
                         <TableCell>
                           {entry.type === 'WITHDRAWAL' ? (
@@ -7268,7 +7319,7 @@ const GlobalLedgerDrawer = ({ isOpen, onClose, scope, entries, loading, onExport
   )
 }
 
-const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onExportPDF, onAddWork, onAddPayment, onAddLabour, onDeleteEntry, onEditEntry }) => {
+const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onExportPDF, onAddWork, onAddPayment, onAddLabour, onQuickPay, onDeleteEntry, onEditEntry }) => {
   const [filterType, setFilterType] = useState('all')
   const [filterFrom, setFilterFrom] = useState('')
   const [filterTo, setFilterTo] = useState('')
@@ -7412,9 +7463,10 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
             </div>
           </div>
 
-          {/* Action buttons — Withdrawal lives inside Add Payment's type
-              selector now, so we're back to three primary actions. */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {/* Action buttons — Quick Pay creates a work entry and records full
+              payment in one submit, so the user doesn't need a follow-up step
+              when the bill is paid on the spot. */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <Button className="bg-blue-600 hover:bg-blue-700 text-white h-14 text-base" onClick={() => onAddWork && onAddWork(vendor)}>
               <Plus className="w-5 h-5 mr-2" /> Add Work
             </Button>
@@ -7423,6 +7475,9 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
             </Button>
             <Button className="bg-purple-600 hover:bg-purple-700 text-white h-14 text-base" onClick={() => onAddLabour && onAddLabour(vendor)}>
               <Plus className="w-5 h-5 mr-2" /> Add Labour
+            </Button>
+            <Button className="bg-emerald-600 hover:bg-emerald-700 text-white h-14 text-base" onClick={() => onQuickPay && onQuickPay(vendor)}>
+              <Zap className="w-5 h-5 mr-2" /> Quick Pay
             </Button>
           </div>
 
@@ -9893,6 +9948,10 @@ const VendorForm = ({ vendor, onSubmit, onCancel, vendorTypes = [], onAddNewType
 const ExpenseBillForm = ({ vendors, accounts = [], onSubmit, onCancel, initialData }) => {
   const { toast } = useToast()
   const isEdit = Boolean(initialData?.id)
+  // Quick Pay mode: opened from the vendor ledger's Quick Pay shortcut.
+  // Pre-checks "Payment Made Now" and keeps paidAmount auto-synced to
+  // billAmount so the entry is recorded as fully paid in one submit.
+  const quickPay = Boolean(initialData?.quickPay)
 
   const initialDate = (initialData?.billDate || '').toString().split('T')[0]
 
@@ -9906,7 +9965,7 @@ const ExpenseBillForm = ({ vendors, accounts = [], onSubmit, onCancel, initialDa
   // Inline first-payment capture (only for new bills). Lets the user record
   // an advance/partial payment in the same submit instead of opening the
   // payment drawer after creating the bill.
-  const [paymentMadeNow, setPaymentMadeNow] = useState(false)
+  const [paymentMadeNow, setPaymentMadeNow] = useState(quickPay)
   const [paymentData, setPaymentData] = useState({
     paidAmount: '',
     paymentMode: 'Cash',
@@ -9914,6 +9973,13 @@ const ExpenseBillForm = ({ vendors, accounts = [], onSubmit, onCancel, initialDa
     referenceNo: '',
     paymentRemark: '',
   })
+  // While quickPay is on AND the user hasn't manually overridden the paid
+  // amount, mirror billAmount → paidAmount so it always reflects full payment.
+  const [paidAmountTouched, setPaidAmountTouched] = useState(false)
+  useEffect(() => {
+    if (!quickPay || paidAmountTouched) return
+    setPaymentData(prev => ({ ...prev, paidAmount: formData.billAmount }))
+  }, [quickPay, paidAmountTouched, formData.billAmount])
 
   // Default the account to the first one matching the chosen mode whenever
   // mode flips or accounts list arrives.
@@ -9954,7 +10020,9 @@ const ExpenseBillForm = ({ vendors, accounts = [], onSubmit, onCancel, initialDa
         paymentMode: paymentData.paymentMode,
         accountId: paymentData.accountId,
         referenceNo: paymentData.referenceNo,
-        remark: paymentData.paymentRemark,
+        // Quick Pay reuses the work description as the payment remark — no
+        // separate field in that mode, so fall back to description.
+        remark: paymentData.paymentRemark || (quickPay ? formData.description : ''),
       }
     }
     onSubmit(payload)
@@ -9982,11 +10050,11 @@ const ExpenseBillForm = ({ vendors, accounts = [], onSubmit, onCancel, initialDa
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
-          <Label>Bill Amount *</Label>
+          <Label>{quickPay ? 'Amount *' : 'Bill Amount *'}</Label>
           <Input type="number" value={formData.billAmount} onChange={e => setFormData({...formData, billAmount: e.target.value})} required />
         </div>
         <div>
-          <Label>Bill Date *</Label>
+          <Label>{quickPay ? 'Date *' : 'Bill Date *'}</Label>
           <Input type="date" value={formData.billDate} onChange={e => setFormData({...formData, billDate: e.target.value})} required />
         </div>
       </div>
@@ -9996,33 +10064,64 @@ const ExpenseBillForm = ({ vendors, accounts = [], onSubmit, onCancel, initialDa
       </div>
       {!isEdit && (
         <div className={`rounded-md border ${paymentMadeNow ? 'border-emerald-300 bg-emerald-50/50' : 'border-slate-200'} p-3 space-y-3`}>
-          <label className="flex items-center gap-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              className="h-4 w-4 accent-emerald-600"
-              checked={paymentMadeNow}
-              onChange={(e) => setPaymentMadeNow(e.target.checked)}
-            />
-            <span className="font-medium">Payment Made Now</span>
-            <span className="text-sm text-slate-500">— record advance/full payment along with this work</span>
-          </label>
+          {/* In Quick Pay mode the dialog itself implies a full payment, so we
+              hide the toggle and the redundant Paid Amount / Payment Remark
+              fields — only the payment-mode/account/reference choices matter. */}
+          {!quickPay && (
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-emerald-600"
+                checked={paymentMadeNow}
+                onChange={(e) => setPaymentMadeNow(e.target.checked)}
+              />
+              <span className="font-medium">Payment Made Now</span>
+              <span className="text-sm text-slate-500">— record advance/full payment along with this work</span>
+            </label>
+          )}
+          {quickPay && (
+            <p className="text-sm text-emerald-800 font-medium flex items-center gap-2">
+              <Zap className="w-4 h-4" /> Full payment will be recorded with this entry
+            </p>
+          )}
           {paymentMadeNow && (
             <div className="space-y-3 pt-1">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <Label>Paid Amount (₹) *</Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={paymentData.paidAmount}
-                    onChange={(e) => setPaymentData({ ...paymentData, paidAmount: e.target.value })}
-                    required
-                  />
-                  {paymentExceeds && (
-                    <p className="text-xs text-red-600 mt-1">Paid amount cannot exceed work value</p>
-                  )}
+              {!quickPay && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <Label>Paid Amount (₹) *</Label>
+                    <Input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={paymentData.paidAmount}
+                      onChange={(e) => {
+                        setPaidAmountTouched(true)
+                        setPaymentData({ ...paymentData, paidAmount: e.target.value })
+                      }}
+                      required
+                    />
+                    {paymentExceeds && (
+                      <p className="text-xs text-red-600 mt-1">Paid amount cannot exceed work value</p>
+                    )}
+                  </div>
+                  <div>
+                    <Label>Payment Mode *</Label>
+                    <Select
+                      value={paymentData.paymentMode}
+                      onValueChange={(v) => setPaymentData({ ...paymentData, paymentMode: v, accountId: '' })}
+                    >
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {PAYMENT_MODES.map(m => (
+                          <SelectItem key={m} value={m}>{m}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
+              )}
+              {quickPay && (
                 <div>
                   <Label>Payment Mode *</Label>
                   <Select
@@ -10037,7 +10136,7 @@ const ExpenseBillForm = ({ vendors, accounts = [], onSubmit, onCancel, initialDa
                     </SelectContent>
                   </Select>
                 </div>
-              </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <Label>From Account</Label>
@@ -10064,18 +10163,20 @@ const ExpenseBillForm = ({ vendors, accounts = [], onSubmit, onCancel, initialDa
                   />
                 </div>
               </div>
-              <div>
-                <Label>Payment Remark</Label>
-                <Input
-                  value={paymentData.paymentRemark}
-                  onChange={(e) => setPaymentData({ ...paymentData, paymentRemark: e.target.value })}
-                />
-              </div>
+              {!quickPay && (
+                <div>
+                  <Label>Payment Remark</Label>
+                  <Input
+                    value={paymentData.paymentRemark}
+                    onChange={(e) => setPaymentData({ ...paymentData, paymentRemark: e.target.value })}
+                  />
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
-      {!isEdit && (
+      {!isEdit && !quickPay && (
         <div className="grid grid-cols-3 gap-3 rounded-md border bg-slate-50 p-3 text-center">
           <div>
             <p className="text-xs uppercase tracking-wide text-slate-500">Work Value</p>
@@ -10099,7 +10200,11 @@ const ExpenseBillForm = ({ vendors, accounts = [], onSubmit, onCancel, initialDa
       <div className="flex justify-end space-x-2">
         <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
         <Button type="submit" disabled={vendors.length === 0 || paymentExceeds}>
-          {isEdit ? 'Update Bill' : (paymentMadeNow && paidNow > 0 ? 'Save Work + Payment' : 'Add Work Entry')}
+          {isEdit
+            ? 'Update Bill'
+            : (quickPay && paidNow > 0 && paidNow === workValue
+                ? 'Save Quick Pay (Full)'
+                : (paymentMadeNow && paidNow > 0 ? 'Save Work + Payment' : 'Add Work Entry'))}
         </Button>
       </div>
     </form>

@@ -10,7 +10,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetFooter } from '@/components/ui/sheet'
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '@/components/ui/drawer'
 import { Toaster } from '@/components/ui/toaster'
 import { useToast } from '@/hooks/use-toast'
@@ -692,6 +693,10 @@ export default function ExpensesPage() {
   // Add more work value to an existing bill (vendor-ledger "Add Work" flow).
   // PUTs the bill with new total = current + delta, then optionally posts a
   // payment for the just-added portion.
+  // "Add to Bill" records a separate ledger row of type=ADDITION on the same
+  // bill — the bill's amount grows by delta but each addition stays as its
+  // own line in the activity ledger (so the user can see "₹X added on date").
+  // A payment alongside is posted as a normal PAYMENT row.
   const handleAddToBill = async () => {
     if (!paymentsBill) return
     try {
@@ -725,23 +730,19 @@ export default function ExpensesPage() {
         }
       }
 
-      const currentAmount = paymentsBill.billAmount ?? paymentsBill.amount ?? 0
-      const newAmount = currentAmount + delta
-      const existingDesc = paymentsBill.description || paymentsBill.remark || ''
-      const newDesc = billAddForm.note
-        ? (existingDesc ? `${existingDesc}\n+₹${delta} (${billAddForm.addDate}): ${billAddForm.note}` : `+₹${delta} (${billAddForm.addDate}): ${billAddForm.note}`)
-        : existingDesc
-
-      await apiCall(`/expense-bills/${paymentsBill.id}`, 'PUT', {
-        billAmount: newAmount,
-        billDate: paymentsBill.billDate,
-        description: newDesc,
+      // Record the addition as its own ledger row (type=ADDITION). Backend
+      // grows the bill amount and re-derives status without touching paid.
+      await apiCall(`/expense-bills/${paymentsBill.id}/payments`, 'POST', {
+        type: 'ADDITION',
+        amount: delta,
+        paymentDate: billAddForm.addDate,
+        remark: '',
       })
 
       if (paymentPayload) {
         try {
           await apiCall(`/expense-bills/${paymentsBill.id}/payments`, 'POST', paymentPayload)
-          toast({ title: 'Success', description: `₹${fmt(delta)} added to bill, ₹${fmt(paymentPayload.amount)} paid` })
+          toast({ title: 'Success', description: `₹${fmt(delta)} added, ₹${fmt(paymentPayload.amount)} paid` })
         } catch (payErr) {
           toast({
             title: 'Bill updated, payment failed',
@@ -1235,20 +1236,20 @@ export default function ExpensesPage() {
         </Card>
       </div>
 
-      {/* Add/Edit Expense Drawer */}
-      <Sheet open={showAddExpense} onOpenChange={setShowAddExpense}>
-        <SheetContent className="w-[400px] sm:w-[540px]">
-          <SheetHeader>
-            <SheetTitle className="flex items-center gap-2">
+      {/* Add/Edit Expense Dialog — centered modal, matching the other Add forms */}
+      <Dialog open={showAddExpense} onOpenChange={(open) => { setShowAddExpense(open); if (!open) setEditingExpense(null) }}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
               <MinusCircle className="w-5 h-5 text-red-600" />
               {editingExpense ? 'Edit Expense' : 'Add New Expense'}
-            </SheetTitle>
-            <SheetDescription>
+            </DialogTitle>
+            <DialogDescription>
               {editingExpense ? 'Update the expense details' : 'Record a new expense transaction'}
-            </SheetDescription>
-          </SheetHeader>
-          
-          <div className="space-y-4 py-6">
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
             {/* Expense Scope */}
             <div>
               <Label>Expense Scope *</Label>
@@ -1462,7 +1463,7 @@ export default function ExpensesPage() {
             </div>
           </div>
           
-          <SheetFooter>
+          <DialogFooter>
             <Button variant="outline" onClick={() => { setShowAddExpense(false); setEditingExpense(null); }}>
               Cancel
             </Button>
@@ -1470,24 +1471,24 @@ export default function ExpensesPage() {
               <MinusCircle className="w-4 h-4 mr-2" />
               {editingExpense ? 'Update Expense' : 'Save Expense'}
             </Button>
-          </SheetFooter>
-        </SheetContent>
-      </Sheet>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-      {/* ===== Add/Edit Bill Sheet (ledger entry workflow) ===== */}
-      <Sheet open={showAddBill} onOpenChange={(open) => { setShowAddBill(open); if (!open) setEditingBill(null) }}>
-        <SheetContent className="w-[400px] sm:w-[560px] overflow-y-auto">
-          <SheetHeader>
-            <SheetTitle className="flex items-center gap-2">
+      {/* ===== Add/Edit Bill Dialog — centered modal, matching other Add forms ===== */}
+      <Dialog open={showAddBill} onOpenChange={(open) => { setShowAddBill(open); if (!open) setEditingBill(null) }}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
               <Receipt className="w-5 h-5 text-orange-600" />
               {editingBill ? 'Edit Expense Bill' : 'Add Expense Bill'}
-            </SheetTitle>
-            <SheetDescription>
+            </DialogTitle>
+            <DialogDescription>
               {editingBill ? 'Update bill details' : 'Record an expense bill — pay it later via Payments'}
-            </SheetDescription>
-          </SheetHeader>
+            </DialogDescription>
+          </DialogHeader>
 
-          <div className="space-y-4 py-6">
+          <div className="space-y-4 py-2">
             <div>
               <Label>Scope *</Label>
               <Select
@@ -1680,7 +1681,7 @@ export default function ExpensesPage() {
             )}
           </div>
 
-          <SheetFooter>
+          <DialogFooter>
             <Button variant="outline" onClick={() => { setShowAddBill(false); setEditingBill(null) }}>
               Cancel
             </Button>
@@ -1688,9 +1689,9 @@ export default function ExpensesPage() {
               <Receipt className="w-4 h-4 mr-2" />
               {editingBill ? 'Update Bill' : 'Save Bill'}
             </Button>
-          </SheetFooter>
-        </SheetContent>
-      </Sheet>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ===== Bill Payments Drawer (vaul, slides up — vendor-ledger style) ===== */}
       <Drawer open={!!paymentsBill} onOpenChange={(open) => { if (!open) { setPaymentsBill(null); setBillPayments([]); setDrawerAction(null) } }}>
@@ -1787,7 +1788,7 @@ export default function ExpensesPage() {
                 </div>
               )}
 
-              {/* Add to Bill panel */}
+              {/* Add to Bill panel — bumps the existing bill's amount in place. */}
               {drawerAction === 'bill' && (
                 <div className="rounded-md border p-4 space-y-3 bg-blue-50/40">
                   <h4 className="text-sm font-semibold text-slate-700">Add to Bill Amount</h4>
@@ -1811,14 +1812,6 @@ export default function ExpensesPage() {
                         onChange={e => setBillAddForm({ ...billAddForm, addDate: e.target.value })}
                       />
                     </div>
-                  </div>
-                  <div>
-                    <Label>Note (optional)</Label>
-                    <Input
-                      placeholder="What is this addition for?"
-                      value={billAddForm.note}
-                      onChange={e => setBillAddForm({ ...billAddForm, note: e.target.value })}
-                    />
                   </div>
 
                   <div className={`rounded-md border p-3 space-y-3 ${billAddForm.payNow ? 'border-emerald-300 bg-emerald-50/60' : 'border-slate-200 bg-white'}`}>
@@ -1902,7 +1895,7 @@ export default function ExpensesPage() {
                     )}
                   </div>
 
-                  {/* Live preview */}
+                  {/* Live preview — combined bill numbers after the addition */}
                   {(() => {
                     const cur = paymentsBill.billAmount ?? paymentsBill.amount ?? 0
                     const paidAlready = paymentsBill.totalPaid ?? paymentsBill.paidAmount ?? 0
@@ -1943,7 +1936,7 @@ export default function ExpensesPage() {
                 <div className="flex items-center justify-between px-4 py-3 border-b bg-slate-50">
                   <div className="flex items-center gap-2">
                     <BookOpen className="w-4 h-4 text-slate-500" />
-                    <h4 className="text-sm font-semibold text-slate-700">Payment Ledger</h4>
+                    <h4 className="text-sm font-semibold text-slate-700">Bill Activity</h4>
                     <span className="text-xs text-slate-500">({billPayments.length})</span>
                   </div>
                   <Badge variant="outline" className="font-medium">
@@ -1957,14 +1950,15 @@ export default function ExpensesPage() {
                 ) : billPayments.length === 0 ? (
                   <div className="text-center py-10">
                     <Receipt className="w-10 h-10 mx-auto text-slate-300 mb-2" />
-                    <p className="text-sm text-gray-500">No payments yet</p>
-                    <p className="text-xs text-gray-400">Click &ldquo;Add Payment&rdquo; above to record one</p>
+                    <p className="text-sm text-gray-500">No activity yet</p>
+                    <p className="text-xs text-gray-400">Use &ldquo;Add to Bill&rdquo; or &ldquo;Add Payment&rdquo; above</p>
                   </div>
                 ) : (
                   <Table>
                     <TableHeader>
                       <TableRow>
                         <TableHead>Date</TableHead>
+                        <TableHead>Type</TableHead>
                         <TableHead>Mode</TableHead>
                         <TableHead>Account</TableHead>
                         <TableHead>Reference</TableHead>
@@ -1973,24 +1967,41 @@ export default function ExpensesPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {billPayments.map(p => (
-                        <TableRow key={p.id}>
-                          <TableCell className="font-medium">{p.paymentDate}</TableCell>
-                          <TableCell>
-                            <Badge variant="outline">{p.paymentMode}</Badge>
-                          </TableCell>
-                          <TableCell className="text-slate-600">{accounts.find(a => a.id === p.accountId)?.name || '-'}</TableCell>
-                          <TableCell className="text-slate-500 text-sm">{p.referenceNo || '-'}</TableCell>
-                          <TableCell className="text-right font-semibold text-emerald-700">₹{fmt(p.amount)}</TableCell>
-                          <TableCell>
-                            {paymentsBillType === 'expense' && !p._quickExpense && (
-                              <Button variant="ghost" size="sm" className="text-red-600 h-8 w-8 p-0" onClick={() => handleDeleteBillPayment(p.id)}>
-                                <Trash2 className="w-4 h-4" />
-                              </Button>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      ))}
+                      {billPayments.map(p => {
+                        const isAddition = p.type === 'ADDITION'
+                        const isWithdrawal = p.type === 'WITHDRAWAL'
+                        return (
+                          <TableRow key={p.id} className={isAddition ? 'bg-blue-50/40' : isWithdrawal ? 'bg-orange-50/40' : ''}>
+                            <TableCell className="font-medium">{p.paymentDate}</TableCell>
+                            <TableCell>
+                              {isAddition ? (
+                                <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100">Bill Add</Badge>
+                              ) : isWithdrawal ? (
+                                <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100">Withdrawal</Badge>
+                              ) : (
+                                <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">Payment</Badge>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {isAddition ? <span className="text-slate-400">—</span> : <Badge variant="outline">{p.paymentMode}</Badge>}
+                            </TableCell>
+                            <TableCell className="text-slate-600">
+                              {isAddition ? <span className="text-slate-400">—</span> : (accounts.find(a => a.id === p.accountId)?.name || '-')}
+                            </TableCell>
+                            <TableCell className="text-slate-500 text-sm">{p.referenceNo || '-'}</TableCell>
+                            <TableCell className={`text-right font-semibold ${isAddition ? 'text-blue-700' : isWithdrawal ? 'text-orange-700' : 'text-emerald-700'}`}>
+                              {isAddition ? '+' : isWithdrawal ? '−' : ''}₹{fmt(p.amount)}
+                            </TableCell>
+                            <TableCell>
+                              {paymentsBillType === 'expense' && !p._quickExpense && (
+                                <Button variant="ghost" size="sm" className="text-red-600 h-8 w-8 p-0" onClick={() => handleDeleteBillPayment(p.id)}>
+                                  <Trash2 className="w-4 h-4" />
+                                </Button>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        )
+                      })}
                     </TableBody>
                   </Table>
                 )}
