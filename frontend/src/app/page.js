@@ -1234,16 +1234,16 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
         })
       })
 
+      // Newest-first by createdAt — the user wants the most recently logged
+      // entry at the top regardless of its backdated transaction date, so a
+      // late-recorded bill from last week still surfaces above older ones.
+      // Falls back to the transaction date when createdAt is missing.
       const merged = [...workEntries, ...paymentEntries].sort((a, b) => {
-        const da = new Date(a.date).getTime() || 0
-        const db = new Date(b.date).getTime() || 0
-        if (da !== db) return da - db
-        return (new Date(a.createdAt).getTime() || 0) - (new Date(b.createdAt).getTime() || 0)
+        const ca = new Date(a.createdAt || a.date).getTime() || 0
+        const cb = new Date(b.createdAt || b.date).getTime() || 0
+        return cb - ca
       })
-      // Newest-first for display; no running balance — across vendors a
-      // single rolling number isn't meaningful, so we just show the row's
-      // own work/payment values.
-      setGlobalLedgerEntries(merged.reverse())
+      setGlobalLedgerEntries(merged)
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
     } finally {
