@@ -34,4 +34,8 @@ module.exports = {
   Loan: require('./Loan'),
   LoanRepayment: require('./LoanRepayment'),
   AuditLog: require('./AuditLog'),
+  Firm: require('./Firm'),
+  DastiPerson: require('./DastiPerson'),
+  DastiTransaction: require('./DastiTransaction'),
+  FirmTransaction: require('./FirmTransaction'),
 };

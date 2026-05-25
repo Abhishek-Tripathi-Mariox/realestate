@@ -18,6 +18,8 @@ import {
   HardHat,
   IndianRupee,
   Percent,
+  Wallet,
+  Briefcase,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -58,6 +60,8 @@ export function Sidebar({ user, onLogout, onChangePassword, mobileOpen = false, 
     { label: 'Commission Ledger', href: '/commission-ledger', icon: Percent },
     { label: 'Margin Ledger', href: '/margin-ledger', icon: IndianRupee },
     { label: 'Loans', href: '/borrow', icon: CreditCard },
+    { label: 'Dasti Ledger', href: '/dasti-ledger', icon: Wallet },
+    { label: 'Firm Ledger', href: '/firm-ledger', icon: Briefcase },
   ]
 
   if (user?.role === 'super_admin' || user?.role === 'admin') {
