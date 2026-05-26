@@ -325,6 +325,63 @@ const deleteBuyerPayment = async (paymentId, userId) => {
   await ResaleBuyerPayment.updateOne({ id: paymentId }, { $set: { isDeleted: true, deletedAt: new Date() } });
   return { message: 'Buyer payment deleted with reversal' };
 };
+// Edit a buyer payment in place. Same reverse-and-repost pattern delete uses —
+// the daybook is append-only, so the prior IN entry is reversed and a fresh
+// one is posted off the updated values. Keeps the account balance correct and
+// the audit trail clean.
+const updateBuyerPayment = async (paymentId, body, userId) => {
+  const existing = await ResaleBuyerPayment.findOne(notDeleted({ id: paymentId })).lean();
+  if (!existing) return { error: 'Payment not found', status: 404 };
+  const deal = await ResaleDeal.findOne({ id: existing.dealId }).lean();
+  if (!deal) return { error: 'Deal not found', status: 404 };
+
+  const amount = body.amount !== undefined ? parseFloat(body.amount) || 0 : existing.amount;
+  if (!(amount > 0)) return { error: 'Amount must be greater than 0', status: 400 };
+
+  let accountId = body.accountId !== undefined ? body.accountId : existing.accountId;
+  if (!accountId) {
+    const defaultAccount = await Account.findOne({ isDefault: true }).lean();
+    accountId = defaultAccount?.id;
+  }
+
+  const update = {
+    amount,
+    accountId,
+    paymentDate: body.paymentDate || existing.paymentDate,
+    paymentMode: body.paymentMode || existing.paymentMode || 'Cash',
+    referenceNo: body.referenceNo !== undefined ? body.referenceNo : (existing.referenceNo || ''),
+    remark: body.remark !== undefined ? body.remark : (existing.remark || ''),
+    updatedAt: new Date(),
+  };
+
+  await ResaleBuyerPayment.updateOne({ id: paymentId }, { $set: update });
+
+  // Reverse the prior daybook IN entry and post a fresh one with new values.
+  const originalTxn = await Transaction.findOne({
+    sourceType: 'RESALE_BUYER_PAYMENT',
+    sourceId: paymentId,
+    isReversal: { $ne: true },
+    isReversed: { $ne: true },
+  }).lean();
+  if (originalTxn) {
+    await createReversalTransaction(originalTxn, userId, 'Resale buyer payment edited');
+  }
+  await createTransaction({
+    txnDate: update.paymentDate,
+    societyId: deal.societyId,
+    accountId,
+    direction: 'IN',
+    amount,
+    paymentMode: update.paymentMode,
+    partyType: 'Customer',
+    partyName: deal.buyerName,
+    sourceType: 'RESALE_BUYER_PAYMENT',
+    sourceId: paymentId,
+    remark: update.remark || `Resale buyer payment - ${deal.buyerName}`,
+  }, userId);
+
+  return { ...existing, ...update };
+};
 
 const listSellerPayouts = async (dealId) => {
   const payouts = await ResaleSellerPayout
@@ -409,8 +466,89 @@ const deleteSellerPayout = async (payoutId, userId) => {
   return { message: 'Seller payout deleted with reversal' };
 };
 
+// Edit a seller payout in place. Daybook is reversed-and-reposted just like
+// updateBuyerPayment so account balance + audit trail stay correct. Accepts
+// both legacy (paymentDate/paymentMode/referenceNo) and new (payoutDate/
+// payoutMode/reference) field names — mirrors addSellerPayout.
+const updateSellerPayout = async (payoutId, body, userId) => {
+  const existing = await ResaleSellerPayout.findOne(notDeleted({ id: payoutId })).lean();
+  if (!existing) return { error: 'Payout not found', status: 404 };
+  const deal = await ResaleDeal.findOne({ id: existing.dealId }).lean();
+  if (!deal) return { error: 'Deal not found', status: 404 };
+
+  const principalAmount = body.principalAmount !== undefined
+    ? parseFloat(body.principalAmount) || 0
+    : (existing.principalAmount || 0);
+  const profitAmount = body.profitAmount !== undefined
+    ? parseFloat(body.profitAmount) || 0
+    : (existing.profitAmount || 0);
+  const chargesDeducted = body.chargesDeducted !== undefined
+    ? parseFloat(body.chargesDeducted) || 0
+    : (existing.chargesDeducted || 0);
+  // amount can be sent explicitly OR derived from principal+profit-charges,
+  // matching what addSellerPayout's caller (the drawer form) computes.
+  const amount = body.amount !== undefined
+    ? parseFloat(body.amount) || 0
+    : Math.max(0, principalAmount + profitAmount - chargesDeducted);
+  if (!(amount > 0)) return { error: 'Total payout must be greater than 0', status: 400 };
+
+  let accountId = body.accountId !== undefined ? body.accountId : existing.accountId;
+  if (!accountId) {
+    const defaultAccount = await Account.findOne({ isDefault: true }).lean();
+    accountId = defaultAccount?.id;
+  }
+
+  const paymentDate = body.payoutDate || body.paymentDate || existing.paymentDate;
+  const paymentMode = body.payoutMode || body.paymentMode || existing.paymentMode || 'Cash';
+  const referenceNo = body.reference ?? body.referenceNo ?? existing.referenceNo ?? '';
+
+  const update = {
+    amount,
+    principalAmount,
+    profitAmount,
+    chargesDeducted,
+    accountId,
+    paymentDate,
+    payoutDate: paymentDate,
+    paymentMode,
+    payoutMode: paymentMode,
+    referenceNo,
+    reference: referenceNo,
+    remark: body.remark !== undefined ? body.remark : (existing.remark || ''),
+    updatedAt: new Date(),
+  };
+
+  await ResaleSellerPayout.updateOne({ id: payoutId }, { $set: update });
+
+  // Reverse the prior daybook OUT entry and post a fresh one with new values.
+  const originalTxn = await Transaction.findOne({
+    sourceType: 'RESALE_SELLER_PAYOUT',
+    sourceId: payoutId,
+    isReversal: { $ne: true },
+    isReversed: { $ne: true },
+  }).lean();
+  if (originalTxn) {
+    await createReversalTransaction(originalTxn, userId, 'Resale seller payout edited');
+  }
+  await createTransaction({
+    txnDate: paymentDate,
+    societyId: deal.societyId,
+    accountId,
+    direction: 'OUT',
+    amount,
+    paymentMode,
+    partyType: 'Vendor',
+    partyName: deal.sellerName,
+    sourceType: 'RESALE_SELLER_PAYOUT',
+    sourceId: payoutId,
+    remark: update.remark || `Resale seller payout - ${deal.sellerName}`,
+  }, userId);
+
+  return { ...existing, ...update };
+};
+
 module.exports = {
   list, create, remove, closeDeal,
-  listBuyerPayments, addBuyerPayment, deleteBuyerPayment,
-  listSellerPayouts, addSellerPayout, deleteSellerPayout,
+  listBuyerPayments, addBuyerPayment, deleteBuyerPayment, updateBuyerPayment,
+  listSellerPayouts, addSellerPayout, deleteSellerPayout, updateSellerPayout,
 };

@@ -140,6 +140,96 @@ const remove = async (id, userId) => {
   return { message: 'Payment deleted with reversal' };
 };
 
+// Edit a customer payment in place. Reverse-and-repost pattern (same as the
+// resale buyer/seller edits): the daybook is append-only, so the prior IN
+// entry is reversed and a fresh one is posted off the updated values. Keeps
+// account balances correct and the audit trail clean. Allocations are NOT
+// touched here — the unallocatedAmount is recomputed from the live allocation
+// total against the new payment amount, and the call is rejected if shrinking
+// below what's already allocated.
+const update = async (id, body, userId) => {
+  const existing = await CustomerPayment.findOne(notDeleted({ id })).lean();
+  if (!existing) return { error: 'Payment not found', status: 404 };
+
+  const customerId = body.customerId !== undefined ? body.customerId : existing.customerId;
+  const customer = await Customer.findOne({ id: customerId }).lean();
+  if (!customer) return { error: 'Customer not found', status: 404 };
+
+  const amount = body.amount !== undefined ? Number(body.amount) || 0 : existing.amount;
+  if (!(amount > 0)) return { error: 'Amount must be greater than 0', status: 400 };
+
+  // Sum of live allocations against this payment — if user is shrinking the
+  // amount below what's already been allocated to sales, the math breaks. Tell
+  // them to free up allocations first instead of silently corrupting the
+  // unallocated balance.
+  const allocs = await PaymentAllocation.find({ paymentId: id }).lean();
+  const allocSaleIds = [...new Set(allocs.map(a => a.saleId).filter(Boolean))];
+  const liveSales = allocSaleIds.length
+    ? await Sale.find(notDeleted({ id: { $in: allocSaleIds } })).lean()
+    : [];
+  const liveSaleIds = new Set(liveSales.map(s => s.id));
+  const allocatedAmount = allocs
+    .filter(a => liveSaleIds.has(a.saleId))
+    .reduce((sum, a) => sum + (a.amount || 0), 0);
+  if (amount + 0.01 < allocatedAmount) {
+    return {
+      error: `New amount ₹${amount} is less than already allocated ₹${allocatedAmount}. Free up allocations first.`,
+      status: 400,
+    };
+  }
+
+  let accountId = body.accountId !== undefined ? body.accountId : existing.accountId;
+  if (!accountId) {
+    const defaultAccount = await Account.findOne({ isDefault: true }).lean();
+    accountId = defaultAccount?.id;
+  }
+
+  const referenceNo = body.referenceNo ?? body.reference ?? existing.referenceNo ?? '';
+  const update = {
+    customerId,
+    amount,
+    accountId,
+    paymentDate: body.paymentDate || existing.paymentDate,
+    paymentMode: body.paymentMode || existing.paymentMode || 'Cash',
+    referenceNo,
+    reference: referenceNo,
+    remark: body.remark !== undefined ? body.remark : (existing.remark || ''),
+    unallocatedAmount: Math.max(0, amount - allocatedAmount),
+    societyId: body.societyId || existing.societyId || customer.societyId,
+    updatedAt: new Date(),
+  };
+
+  await CustomerPayment.updateOne({ id }, { $set: update });
+
+  // Reverse the prior IN daybook entry, then post a fresh one with the new
+  // account / mode / amount / date. The reversal pair nets to zero on the
+  // OLD account; the new entry posts the live amount on the NEW one.
+  const originalTxn = await Transaction.findOne({
+    sourceType: 'CUSTOMER_PAYMENT',
+    sourceId: id,
+    isReversal: { $ne: true },
+    isReversed: { $ne: true },
+  }).lean();
+  if (originalTxn) {
+    await createReversalTransaction(originalTxn, userId, 'Customer payment edited');
+  }
+  await createTransaction({
+    txnDate: update.paymentDate,
+    societyId: update.societyId,
+    accountId,
+    direction: 'IN',
+    amount,
+    paymentMode: update.paymentMode,
+    partyType: 'Customer',
+    partyName: customer.name,
+    sourceType: 'CUSTOMER_PAYMENT',
+    sourceId: id,
+    remark: update.remark || `Customer payment - ${customer.name}`,
+  }, userId);
+
+  return { ...existing, ...update };
+};
+
 const listAllocations = async (paymentId) => {
   const allocations = await PaymentAllocation.find({ paymentId }).lean();
   return allocations.map(({ _id, ...rest }) => ({ ...rest, allocatedAmount: rest.amount }));
@@ -235,4 +325,4 @@ const setAllocations = async (paymentId, body, userId) => {
   return { message: 'Allocations saved', count: docs.length, unallocatedAmount };
 };
 
-module.exports = { list, create, remove, listAllocations, setAllocations };
+module.exports = { list, create, update, remove, listAllocations, setAllocations };

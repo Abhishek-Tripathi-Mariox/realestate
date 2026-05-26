@@ -331,6 +331,9 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
   const [showCustomerForm, setShowCustomerForm] = useState(false)
   const [editingCustomer, setEditingCustomer] = useState(null)
   const [showPaymentForm, setShowPaymentForm] = useState(false)
+  // null = creating a new payment, an object = editing that payment in place.
+  // The same dialog hosts both modes via CustomerPaymentForm's `payment` prop.
+  const [editingPayment, setEditingPayment] = useState(null)
   const [showAllocationModal, setShowAllocationModal] = useState(false)
   const [currentPaymentForAllocation, setCurrentPaymentForAllocation] = useState(null)
   const [customerSalesForAllocation, setCustomerSalesForAllocation] = useState([])
@@ -697,11 +700,15 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
   const loadSalesTab = async () => {
     // Sales tab list renders denormalized fields, but Add/Edit Sale dialogs
     // need inventory + customers — fetch those alongside so the form is
-    // ready when the user clicks Add.
-    const [salesData, inventoryData, customersData] = await Promise.all([
+    // ready when the user clicks Add. Resale deals are pulled too so the
+    // per-row resale-chain (original → ... → latest owner) renders on first
+    // visit; without this the chain only appeared after the user opened the
+    // Resales tab once to populate resaleDeals.
+    const [salesData, inventoryData, customersData, dealsData] = await Promise.all([
       apiCall(`/societies/${selectedSociety}/sales`),
       apiCall(`/societies/${selectedSociety}/inventory`),
       apiCall(`/customers?societyId=${selectedSociety}`),
+      apiCall(`/resales?societyId=${selectedSociety}`).catch(() => []),
     ])
     if (salesData?.sales) {
       setSales(salesData.sales)
@@ -712,6 +719,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
     }
     setInventory(inventoryData)
     setCustomers(customersData || [])
+    setResaleDeals(dealsData || [])
   }
 
   const loadResalesTab = async () => {
@@ -1536,6 +1544,39 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
     }
   }
   
+  const handleUpdatePayment = async (formData) => {
+    if (!editingPayment) return
+    try {
+      await apiCall(`/customer-payments/${editingPayment.id}`, 'PUT', formData)
+
+      // Mirror handleCreatePayment's refresh fan-out so balances stay in sync
+      // across the dashboard, customer list, sales, and summary cards.
+      await loadCustomerPayments(customerPaymentsPagination.page, customerPaymentsPagination.limit)
+      const customersData = await apiCall(`/customers?societyId=${selectedSociety}`)
+      setCustomers(customersData || [])
+      const salesData = await apiCall(`/societies/${selectedSociety}/sales`)
+      if (salesData.sales) {
+        setSales(salesData.sales)
+        setSalesSummary(salesData.summary)
+      } else {
+        setSales(salesData)
+      }
+      const summaryData = await apiCall(`/societies/${selectedSociety}/summary`)
+      setSummary(summaryData)
+
+      setShowPaymentForm(false)
+      setEditingPayment(null)
+      toast({ title: 'Success', description: 'Payment updated' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  const openEditPayment = (payment) => {
+    setEditingPayment(payment)
+    setShowPaymentForm(true)
+  }
+
   const handleDeletePayment = async (paymentId) => {
     if (!confirm('Are you sure you want to delete this payment? This will create a reversal entry and remove all allocations.')) return
     
@@ -2194,6 +2235,17 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
     }
   }
 
+  const handleEditBuyerPayment = async (paymentId, formData) => {
+    try {
+      await apiCall(`/resales/${resaleDeal.id}/buyer-payments/${paymentId}`, 'PUT', formData)
+      await openResalePayments(resaleDeal)
+      await loadSocietyData()
+      toast({ title: 'Success', description: 'Buyer payment updated successfully' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
   const handleAddSellerPayout = async (formData) => {
     try {
       await apiCall(`/resales/${resaleDeal.id}/seller-payouts`, 'POST', formData)
@@ -2211,6 +2263,17 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
       await openResalePayments(resaleDeal)
       await loadSocietyData()
       toast({ title: 'Success', description: 'Seller payout deleted successfully' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  const handleEditSellerPayout = async (payoutId, formData) => {
+    try {
+      await apiCall(`/resales/${resaleDeal.id}/seller-payouts/${payoutId}`, 'PUT', formData)
+      await openResalePayments(resaleDeal)
+      await loadSocietyData()
+      toast({ title: 'Success', description: 'Seller payout updated successfully' })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
     }
@@ -3027,7 +3090,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
           <>
             {/* Dashboard Summary Cards */}
             {!singleTabMode && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
                 <StatCard
                   label="Total Purchases"
                   value={`₹${fmt(summary.totalPurchaseAmount)}`}
@@ -3085,15 +3148,18 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
             {/* Tabs for different modules */}
             <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-4">
               {!singleTabMode && (
-                <TabsList className="flex w-full flex-nowrap overflow-x-auto whitespace-nowrap lg:grid lg:grid-cols-8 h-11 p-1 bg-slate-100/80 border border-slate-200/70 rounded-xl">
-                  <TabsTrigger value="partners" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Partners</TabsTrigger>
-                  <TabsTrigger value="inventory" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Inventory</TabsTrigger>
-                  <TabsTrigger value="purchases" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Purchases</TabsTrigger>
-                  <TabsTrigger value="customers" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Customers</TabsTrigger>
-                  <TabsTrigger value="sales" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Sales</TabsTrigger>
-                  <TabsTrigger value="resales" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Resale</TabsTrigger>
-                  <TabsTrigger value="vendors" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Vendors</TabsTrigger>
-                  <TabsTrigger value="commissions" className="shrink-0 rounded-lg px-2 text-xs data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Commissions</TabsTrigger>
+                <TabsList className="flex w-full flex-nowrap overflow-x-auto whitespace-nowrap lg:grid lg:grid-cols-6 gap-2 h-14 p-2 bg-slate-100/80 border border-slate-200/70 rounded-xl">
+                  <TabsTrigger value="partners" className="shrink-0 rounded-lg px-5 py-2 text-sm data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Partners</TabsTrigger>
+                  <TabsTrigger value="inventory" className="shrink-0 rounded-lg px-5 py-2 text-sm data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Inventory</TabsTrigger>
+                  <TabsTrigger value="purchases" className="shrink-0 rounded-lg px-5 py-2 text-sm data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Purchases</TabsTrigger>
+                  <TabsTrigger value="customers" className="shrink-0 rounded-lg px-5 py-2 text-sm data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Customers</TabsTrigger>
+                  <TabsTrigger value="sales" className="shrink-0 rounded-lg px-5 py-2 text-sm data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Sales</TabsTrigger>
+                  <TabsTrigger value="resales" className="shrink-0 rounded-lg px-5 py-2 text-sm data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Resale</TabsTrigger>
+                  {/* Vendors + Commissions tabs hidden (user request). The
+                      content blocks below are gated on `false && ...` so they
+                      stay in the source for easy revival. */}
+                  {/* <TabsTrigger value="vendors" className="shrink-0 rounded-lg px-5 py-2 text-sm data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Vendors</TabsTrigger> */}
+                  {/* <TabsTrigger value="commissions" className="shrink-0 rounded-lg px-5 py-2 text-sm data-[state=active]:bg-white data-[state=active]:shadow-soft data-[state=active]:text-primary font-medium">Commissions</TabsTrigger> */}
                 </TabsList>
               )}
 
@@ -3998,9 +4064,17 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
                                         <Eye className="w-4 h-4 mr-1" /> View Allocations
                                       </Button>
                                     )}
-                                    <Button 
-                                      variant="outline" 
-                                      size="sm" 
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => openEditPayment(payment)}
+                                      title="Edit payment (mode / account / amount / date / remark)"
+                                    >
+                                      <Pencil className="w-4 h-4" />
+                                    </Button>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
                                       className="text-red-500"
                                       onClick={() => handleDeletePayment(payment.id)}
                                     >
@@ -4200,14 +4274,115 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {salesPage.paged.map(sale => (
+                            {salesPage.paged.map(sale => {
+                              // Walk the resale chain (sale → first ResaleDeal
+                              // → ResaleDeal whose previousResaleDealId == prev
+                              // → ...) so we can surface the full hierarchy
+                              // in the table — every hop with its sale price
+                              // and the margin captured at that step.
+                              const resaleChain = []
+                              if (sale.resaleDealId) {
+                                let cur = resaleDeals.find(d => d.id === sale.resaleDealId)
+                                while (cur) {
+                                  resaleChain.push(cur)
+                                  cur = resaleDeals.find(d => d.previousResaleDealId === cur.id)
+                                }
+                              }
+                              // Build a unified ownership timeline so we can
+                              // render the same shape (name + price + margin)
+                              // for both the original sale and each resale hop.
+                              // First step = original; subsequent = resales.
+                              const ownerSteps = [
+                                {
+                                  name: sale.customerName,
+                                  phone: sale.customerPhone || '',
+                                  price: sale.finalAmount || 0,
+                                  margin: null,
+                                  isOriginal: true,
+                                  isLatest: resaleChain.length === 0,
+                                },
+                                ...resaleChain.map((d, idx) => ({
+                                  name: d.buyerName,
+                                  phone: d.buyerPhone || '',
+                                  price: Number(d.resalePrice) || 0,
+                                  margin: Number(d.companyCommission) || 0,
+                                  isOriginal: false,
+                                  isLatest: idx === resaleChain.length - 1,
+                                })),
+                              ]
+                              const latestStep = ownerSteps[ownerSteps.length - 1]
+                              return (
                               <TableRow key={sale.id}>
                                 <TableCell>
                                   <span className="font-medium">{sale.inventoryNumber || sale.inventoryName}</span>
                                   {sale.inventoryArea > 0 && <span className="text-xs text-gray-500 block">{sale.inventoryArea} sq ft</span>}
+                                  {resaleChain.length > 0 && (
+                                    <span className="text-[10px] text-purple-600 mt-1 inline-flex items-center gap-1">
+                                      <ArrowRightLeft className="w-3 h-3" />
+                                      {resaleChain.length} resale{resaleChain.length > 1 ? 's' : ''}
+                                    </span>
+                                  )}
                                 </TableCell>
-                                <TableCell className="font-medium">{sale.customerName}</TableCell>
-                                <TableCell>{sale.customerPhone}</TableCell>
+                                {/* Customer cell rendered as a vertical owner
+                                    chain when resold. ALL owners stay fully
+                                    readable (original sale info matters too);
+                                    the latest hop just gets a purple highlight
+                                    so the current owner stands out. */}
+                                <TableCell>
+                                  {resaleChain.length === 0 ? (
+                                    <span className="font-medium">{sale.customerName}</span>
+                                  ) : (
+                                    <div className="space-y-1.5 min-w-[200px]">
+                                      {ownerSteps.map((step, idx) => (
+                                        <div key={idx}>
+                                          {idx > 0 && (
+                                            <div className="text-[10px] text-slate-400 leading-none ml-1">↓</div>
+                                          )}
+                                          <div className={`flex items-baseline justify-between gap-2 rounded px-1.5 py-0.5 ${
+                                            step.isLatest ? 'bg-purple-50 border border-purple-200' : ''
+                                          }`}>
+                                            <div className="flex items-center gap-1 min-w-0">
+                                              {step.isLatest && <ArrowRightLeft className="w-3 h-3 text-purple-600 shrink-0" />}
+                                              <span className={`text-xs truncate font-medium ${
+                                                step.isLatest ? 'text-purple-700' : 'text-slate-800'
+                                              }`} title={step.name}>
+                                                {step.name}
+                                              </span>
+                                              {step.isOriginal && (
+                                                <span className="text-[9px] bg-blue-100 text-blue-700 px-1 rounded uppercase">orig</span>
+                                              )}
+                                              {step.isLatest && !step.isOriginal && (
+                                                <span className="text-[9px] bg-purple-100 text-purple-700 px-1 rounded uppercase">now</span>
+                                              )}
+                                            </div>
+                                            <span className={`text-[11px] tabular-nums shrink-0 font-medium ${
+                                              step.isLatest ? 'text-purple-700' : 'text-slate-700'
+                                            }`}>
+                                              ₹{fmt(step.price)}
+                                            </span>
+                                          </div>
+                                          {step.margin > 0 && (
+                                            <div className="text-[10px] text-amber-600 leading-none ml-1 mt-0.5">
+                                              margin ₹{fmt(step.margin)}
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </TableCell>
+                                <TableCell>
+                                  {resaleChain.length === 0 ? (
+                                    sale.customerPhone
+                                  ) : (
+                                    /* Both numbers readable; latest gets purple
+                                        tint to match the chain highlight. */
+                                    <div className="text-xs space-y-0.5">
+                                      <div className="text-slate-700">{sale.customerPhone || '-'}</div>
+                                      <div className="text-purple-700 font-medium">{latestStep.phone || '—'}</div>
+                                    </div>
+                                  )}
+                                </TableCell>
                                 <TableCell className="max-w-[220px] truncate text-slate-600" title={sale.notes || ''}>
                                   {sale.notes || '-'}
                                 </TableCell>
@@ -4298,7 +4473,8 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
                                   </div>
                                 </TableCell>
                               </TableRow>
-                            ))}
+                              )
+                            })}
                           </TableBody>
                         </Table>
                         <TablePager
@@ -4527,6 +4703,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
                               <TableHead>Buyer Paid</TableHead>
                               <TableHead>Seller Amt</TableHead>
                               <TableHead>Seller Paid</TableHead>
+                              <TableHead>Commission / Margin</TableHead>
                               <TableHead>Net Profit</TableHead>
                               <TableHead>Status</TableHead>
                               <TableHead>Actions</TableHead>
@@ -4564,6 +4741,32 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
                                       {deal.sellerStatus}
                                     </Badge>
                                   </div>
+                                </TableCell>
+                                {/* Company Commission / Margin — total on top,
+                                    charges breakdown (transfer + brokerage +
+                                    other) as a small grey hint below when any
+                                    of them are set. */}
+                                <TableCell>
+                                  {(() => {
+                                    const tc = Number(deal.transferCharges) || 0
+                                    const br = Number(deal.brokerage) || 0
+                                    const oc = Number(deal.otherCharges) || 0
+                                    const cc = Number(deal.companyCommission) || 0
+                                    const breakdownParts = []
+                                    if (tc) breakdownParts.push(`T:₹${fmt(tc)}`)
+                                    if (br) breakdownParts.push(`B:₹${fmt(br)}`)
+                                    if (oc) breakdownParts.push(`O:₹${fmt(oc)}`)
+                                    return (
+                                      <div className="flex flex-col">
+                                        <span className="text-amber-700 font-semibold">₹{fmt(cc)}</span>
+                                        {breakdownParts.length > 0 && (
+                                          <span className="text-[10px] text-slate-500" title="Transfer · Brokerage · Other">
+                                            {breakdownParts.join(' · ')}
+                                          </span>
+                                        )}
+                                      </div>
+                                    )
+                                  })()}
                                 </TableCell>
                                 <TableCell className={(deal.netProfit ?? ((deal.resalePrice || 0) - (deal.originalSalePrice || 0) - (deal.companyCommission || 0))) >= 0 ? 'text-green-600 font-medium' : 'text-red-600 font-medium'}>
                                   ₹{fmt(deal.netProfit ?? ((deal.resalePrice || 0) - (deal.originalSalePrice || 0) - (deal.companyCommission || 0)))}
@@ -4641,7 +4844,10 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
                 </Card>
               </TabsContent>
 
-              {/* Vendors Tab */}
+              {/* Vendors Tab hidden (user request). Wrapped in false && (...)
+                  so the JSX stays in source and can be revived by removing the
+                  guard. */}
+              {false && (
               <TabsContent value="vendors" className="space-y-4">
                 <Card>
                   <CardHeader>
@@ -4741,6 +4947,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
                   </CardContent>
                 </Card>
               </TabsContent>
+              )}
 
               {/* Vendor Ledger Tab (Builder Daily Khata view).
                   Same UI for the Commission Ledger — scope flips title +
@@ -5026,7 +5233,9 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
                 </Card>
               </TabsContent>
 
-              {/* Commissions Tab */}
+              {/* Commissions Tab — hidden (user request). Wrapped in
+                  `false && (...)` so it stays in source and can be revived. */}
+              {false && (
               <TabsContent value="commissions" className="space-y-4">
                 <Card>
                   <CardHeader>
@@ -5250,6 +5459,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
                   </CardContent>
                 </Card>
               </TabsContent>
+              )}
 
               {/* Margins Tab */}
               <TabsContent value="margins" className="space-y-4">
@@ -5681,7 +5891,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
       />
 
       {/* Resale Payment Drawer */}
-      <ResalePaymentDrawer 
+      <ResalePaymentDrawer
         isOpen={isResalePaymentDrawerOpen}
         onClose={() => setIsResalePaymentDrawerOpen(false)}
         deal={resaleDeal}
@@ -5690,8 +5900,10 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
         accounts={accounts}
         onAddBuyerPayment={handleAddBuyerPayment}
         onDeleteBuyerPayment={handleDeleteBuyerPayment}
+        onEditBuyerPayment={handleEditBuyerPayment}
         onAddSellerPayout={handleAddSellerPayout}
         onDeleteSellerPayout={handleDeleteSellerPayout}
+        onEditSellerPayout={handleEditSellerPayout}
       />
 
       {/* Recycle Bin Dialog */}
@@ -6001,20 +6213,25 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
         </DialogContent>
       </Dialog>
 
-      {/* Customer Payment Form Dialog */}
-      <Dialog open={showPaymentForm} onOpenChange={setShowPaymentForm}>
+      {/* Customer Payment Form Dialog — same dialog handles both Add and Edit;
+          editingPayment toggles the mode. Closing the dialog clears the edit
+          target so the next "Record Payment" open starts blank. */}
+      <Dialog open={showPaymentForm} onOpenChange={(open) => { setShowPaymentForm(open); if (!open) setEditingPayment(null); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Record Customer Payment</DialogTitle>
+            <DialogTitle>{editingPayment ? 'Edit Customer Payment' : 'Record Customer Payment'}</DialogTitle>
             <DialogDescription>
-              Record a single payment. After saving, you'll allocate this payment to flats.
+              {editingPayment
+                ? 'Update payment mode, account, amount, date or remark. Daybook entry is reversed and reposted.'
+                : "Record a single payment. After saving, you'll allocate this payment to flats."}
             </DialogDescription>
           </DialogHeader>
-          <CustomerPaymentForm 
+          <CustomerPaymentForm
             customers={customers}
             accounts={accounts}
-            onSubmit={handleCreatePayment}
-            onCancel={() => setShowPaymentForm(false)}
+            payment={editingPayment}
+            onSubmit={editingPayment ? handleUpdatePayment : handleCreatePayment}
+            onCancel={() => { setShowPaymentForm(false); setEditingPayment(null); }}
           />
         </DialogContent>
       </Dialog>
@@ -10993,8 +11210,12 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [
 }
 
 // Resale Payment Drawer Component
-const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayouts, accounts, onAddBuyerPayment, onDeleteBuyerPayment, onAddSellerPayout, onDeleteSellerPayout }) => {
+const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayouts, accounts, onAddBuyerPayment, onDeleteBuyerPayment, onEditBuyerPayment, onAddSellerPayout, onDeleteSellerPayout, onEditSellerPayout }) => {
   const [activeTab, setActiveTab] = useState('buyer')
+  // editingBuyerId / editingSellerId switch the existing add forms into edit
+  // mode. null = creating a new entry, an id = editing that row in place.
+  const [editingBuyerId, setEditingBuyerId] = useState(null)
+  const [editingSellerId, setEditingSellerId] = useState(null)
   const [buyerFormData, setBuyerFormData] = useState({
     amount: '',
     paymentDate: new Date().toISOString().split('T')[0],
@@ -11028,26 +11249,27 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
     }
   }, [accounts])
 
-  // Auto-calculate principal/profit when deal changes
+  // Auto-calculate principal/profit when deal changes — skipped while editing
+  // a specific payout so the user's loaded values aren't overwritten.
   useEffect(() => {
-    if (deal && useAutoBreakdown) {
+    if (deal && useAutoBreakdown && !editingSellerId) {
       const sellerPaid = sellerPayouts.reduce((sum, p) => sum + p.amount, 0)
       const sellerBalance = (deal.sellerPayoutAmount || 0) - sellerPaid
-      
+
       // Calculate remaining principal and profit
       const totalPrincipalPaid = sellerPayouts.reduce((sum, p) => sum + (p.principalAmount || 0), 0)
       const totalProfitPaid = sellerPayouts.reduce((sum, p) => sum + (p.profitAmount || 0), 0)
-      
+
       const remainingPrincipal = Math.max(0, (deal.sellerPayoutPrincipal || 0) - totalPrincipalPaid)
       const remainingProfit = Math.max(0, (deal.sellerPayoutProfit || deal.netProfit || 0) - totalProfitPaid)
-      
+
       setSellerFormData(prev => ({
         ...prev,
         principalAmount: remainingPrincipal > 0 ? Math.min(sellerBalance, remainingPrincipal).toString() : '0',
         profitAmount: remainingProfit > 0 ? Math.min(sellerBalance - Math.min(sellerBalance, remainingPrincipal), remainingProfit).toString() : '0'
       }))
     }
-  }, [deal, sellerPayouts, useAutoBreakdown])
+  }, [deal, sellerPayouts, useAutoBreakdown, editingSellerId])
 
   if (!deal) return null
 
@@ -11063,17 +11285,67 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
   const remainingPrincipal = Math.max(0, (deal.sellerPayoutPrincipal || deal.sellerPrincipal || 0) - totalPrincipalPaid)
   const remainingProfit = Math.max(0, (deal.sellerPayoutProfit || deal.netProfit || 0) - totalProfitPaid)
 
+  const resetBuyerForm = () => setBuyerFormData({
+    amount: '', paymentDate: new Date().toISOString().split('T')[0],
+    paymentMode: 'Cash', accountId: accounts?.[0]?.id || '', reference: '', remark: '',
+  })
+  const resetSellerForm = () => setSellerFormData({
+    principalAmount: '', profitAmount: '', chargesDeducted: '0',
+    payoutDate: new Date().toISOString().split('T')[0], payoutMode: 'Cash',
+    accountId: accounts?.[0]?.id || '', reference: '', remark: '',
+  })
+
+  // Pre-populate the existing add form with a row's values so the user can
+  // edit in place. The form's Submit handler branches on editingBuyerId /
+  // editingSellerId to call the edit handler instead of the add handler.
+  const startEditBuyer = (payment) => {
+    setEditingBuyerId(payment.id)
+    setBuyerFormData({
+      amount: String(payment.amount ?? ''),
+      paymentDate: (payment.paymentDate || '').slice(0, 10) || new Date().toISOString().split('T')[0],
+      paymentMode: payment.paymentMode || 'Cash',
+      accountId: payment.accountId || '',
+      reference: payment.referenceNo || payment.reference || '',
+      remark: payment.remark || '',
+    })
+    // Scroll to top so the now-populated form is visible.
+    setTimeout(() => document.querySelector('[data-resale-buyer-form]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 30)
+  }
+  const cancelEditBuyer = () => { setEditingBuyerId(null); resetBuyerForm() }
+
+  const startEditSeller = (payout) => {
+    setEditingSellerId(payout.id)
+    setSellerFormData({
+      principalAmount: String(payout.principalAmount ?? ''),
+      profitAmount: String(payout.profitAmount ?? ''),
+      chargesDeducted: String(payout.chargesDeducted ?? '0'),
+      payoutDate: (payout.payoutDate || payout.paymentDate || '').slice(0, 10) || new Date().toISOString().split('T')[0],
+      payoutMode: payout.payoutMode || payout.paymentMode || 'Cash',
+      accountId: payout.accountId || '',
+      reference: payout.reference || payout.referenceNo || '',
+      remark: payout.remark || '',
+    })
+    setTimeout(() => document.querySelector('[data-resale-seller-form]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 30)
+  }
+  const cancelEditSeller = () => { setEditingSellerId(null); resetSellerForm() }
+
   const handleBuyerSubmit = (e) => {
     e.preventDefault()
-    onAddBuyerPayment({
+    const payload = {
       amount: parseFloat(buyerFormData.amount),
       paymentDate: buyerFormData.paymentDate,
       paymentMode: buyerFormData.paymentMode,
       accountId: buyerFormData.accountId,
-      reference: buyerFormData.reference,
-      remark: buyerFormData.remark
-    })
-    setBuyerFormData({ ...buyerFormData, amount: '', paymentDate: new Date().toISOString().split('T')[0], reference: '', remark: '' })
+      referenceNo: buyerFormData.reference,
+      remark: buyerFormData.remark,
+    }
+    if (editingBuyerId) {
+      onEditBuyerPayment?.(editingBuyerId, payload)
+      setEditingBuyerId(null)
+    } else {
+      onAddBuyerPayment(payload)
+    }
+    resetBuyerForm()
   }
 
   const handleSellerSubmit = (e) => {
@@ -11082,12 +11354,12 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
     const profit = parseFloat(sellerFormData.profitAmount) || 0
     const charges = parseFloat(sellerFormData.chargesDeducted) || 0
     const totalAmount = principal + profit - charges
-    
+
     if (totalAmount <= 0) {
       return
     }
-    
-    onAddSellerPayout({
+
+    const payload = {
       amount: totalAmount,
       principalAmount: principal,
       profitAmount: profit,
@@ -11096,17 +11368,15 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
       payoutMode: sellerFormData.payoutMode,
       accountId: sellerFormData.accountId,
       reference: sellerFormData.reference,
-      remark: sellerFormData.remark
-    })
-    setSellerFormData({ 
-      ...sellerFormData, 
-      principalAmount: '', 
-      profitAmount: '', 
-      chargesDeducted: '0',
-      payoutDate: new Date().toISOString().split('T')[0], 
-      reference: '',
-      remark: '' 
-    })
+      remark: sellerFormData.remark,
+    }
+    if (editingSellerId) {
+      onEditSellerPayout?.(editingSellerId, payload)
+      setEditingSellerId(null)
+    } else {
+      onAddSellerPayout(payload)
+    }
+    resetSellerForm()
   }
 
   const sellerPayoutTotal = (parseFloat(sellerFormData.principalAmount) || 0) + 
@@ -11117,55 +11387,144 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
     <Drawer open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
       <DrawerContent className="max-h-[90vh]">
         <DrawerHeader>
-          <DrawerTitle>Resale Payments - {deal?.inventoryName}</DrawerTitle>
+          <DrawerTitle>Resale Payments - {deal?.inventoryName || deal?.inventoryNumber}</DrawerTitle>
           <DrawerDescription>
             {deal?.sellerName} → {deal?.buyerName}
           </DrawerDescription>
         </DrawerHeader>
-        
+
         <div className="px-4 overflow-y-auto max-h-[60vh]">
-          {/* Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-            <Card className="bg-green-50">
-              <CardContent className="pt-4">
-                <p className="text-sm font-medium text-green-700">Money IN (From Buyer)</p>
-                <div className="grid grid-cols-3 gap-2 mt-2">
-                  <div>
-                    <p className="text-xs text-gray-600">Amount</p>
-                    <p className="font-bold">₹{fmt(deal.buyerPurchaseAmount || deal.resalePrice || 0)}</p>
+          {/* Deal Overview — single-glance view of every important number on
+              the deal: parties, flat, pricing, margin, charges, profit, status.
+              Replaces the old two-card summary so the user doesn't need to dig
+              into the create form to see what the deal actually consists of. */}
+          {(() => {
+            const transferCharges = Number(deal.transferCharges) || 0
+            const brokerage = Number(deal.brokerage) || 0
+            const otherCharges = Number(deal.otherCharges) || 0
+            const companyCommission = Number(deal.companyCommission) || 0
+            const originalSalePrice = Number(deal.originalSalePrice) || 0
+            const originalSalePaid = Number(deal.originalSalePaid) || 0
+            const resalePrice = Number(deal.resalePrice) || 0
+            const grossProfit = resalePrice - originalSalePrice
+            const netProfit = Number(deal.netProfit ?? (grossProfit - companyCommission))
+            const dealDateStr = deal.dealDate
+              ? new Date(deal.dealDate).toLocaleDateString()
+              : (deal.createdAt ? new Date(deal.createdAt).toLocaleDateString() : '—')
+            const isClosed = (deal.status || '').toLowerCase() === 'closed'
+            return (
+              <Card className="mb-4 border-blue-200 bg-gradient-to-br from-blue-50/60 via-white to-purple-50/60">
+                <CardHeader className="pb-2">
+                  <div className="flex items-start justify-between gap-2 flex-wrap">
+                    <div>
+                      <CardTitle className="text-base">Deal Overview</CardTitle>
+                      <CardDescription>Flat {deal.inventoryName || deal.inventoryNumber || '-'} · Booked on {dealDateStr}</CardDescription>
+                    </div>
+                    <Badge variant={isClosed ? 'secondary' : 'default'} className={isClosed ? '' : 'bg-emerald-600'}>
+                      {(deal.status || 'Active').toUpperCase()}
+                    </Badge>
                   </div>
-                  <div>
-                    <p className="text-xs text-gray-600">Received</p>
-                    <p className="font-bold text-green-600">₹{fmt(buyerPaid)}</p>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {/* Parties */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="rounded-md border bg-white p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-orange-700">Seller (TRANSFERRED)</p>
+                      <p className="font-semibold text-slate-900 mt-0.5">{deal.sellerName || '—'}</p>
+                      {deal.sellerPhone && <p className="text-xs text-slate-500">{deal.sellerPhone}</p>}
+                    </div>
+                    <div className="rounded-md border bg-white p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-green-700">Buyer (NEW OWNER)</p>
+                      <p className="font-semibold text-slate-900 mt-0.5">{deal.buyerName || '—'}</p>
+                      {deal.buyerPhone && <p className="text-xs text-slate-500">{deal.buyerPhone}</p>}
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-xs text-gray-600">Due</p>
-                    <p className="font-bold text-orange-600">₹{fmt(Math.max(0, buyerBalance))}</p>
+
+                  {/* Pricing chain — Original buy → Resale → Gross → Net profit */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div className="rounded-md bg-slate-50 p-2 text-center">
+                      <p className="text-[10px] uppercase tracking-wide text-slate-500">Original Buy</p>
+                      <p className="font-bold text-slate-800">₹{fmt(originalSalePrice)}</p>
+                      {originalSalePaid > 0 && (
+                        <p className="text-[10px] text-slate-500">paid: ₹{fmt(originalSalePaid)}</p>
+                      )}
+                    </div>
+                    <div className="rounded-md bg-blue-50 p-2 text-center">
+                      <p className="text-[10px] uppercase tracking-wide text-blue-700">Resale Price</p>
+                      <p className="font-bold text-blue-700">₹{fmt(resalePrice)}</p>
+                    </div>
+                    <div className="rounded-md bg-purple-50 p-2 text-center">
+                      <p className="text-[10px] uppercase tracking-wide text-purple-700">Gross Profit</p>
+                      <p className={`font-bold ${grossProfit >= 0 ? 'text-purple-700' : 'text-red-600'}`}>₹{fmt(grossProfit)}</p>
+                    </div>
+                    <div className="rounded-md bg-emerald-50 p-2 text-center">
+                      <p className="text-[10px] uppercase tracking-wide text-emerald-700">Net Profit</p>
+                      <p className={`font-bold ${netProfit >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>₹{fmt(netProfit)}</p>
+                      <p className="text-[10px] text-slate-500">(after commission)</p>
+                    </div>
                   </div>
-                </div>
-              </CardContent>
-            </Card>
-            
-            <Card className="bg-orange-50">
-              <CardContent className="pt-4">
-                <p className="text-sm font-medium text-orange-700">Money OUT (To Seller)</p>
-                <div className="grid grid-cols-3 gap-2 mt-2">
-                  <div>
-                    <p className="text-xs text-gray-600">Amount</p>
-                    <p className="font-bold">₹{fmt(sellerPayoutExpected)}</p>
+
+                  {/* Company commission + charges breakdown */}
+                  <div className="rounded-md border bg-amber-50/50 border-amber-200 p-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <p className="text-xs font-semibold text-amber-800">Company Commission / Margin</p>
+                      <p className="font-bold text-amber-700">₹{fmt(companyCommission)}</p>
+                    </div>
+                    {(transferCharges || brokerage || otherCharges) ? (
+                      <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-600">
+                        <div>Transfer: <span className="font-medium text-slate-800">₹{fmt(transferCharges)}</span></div>
+                        <div>Brokerage: <span className="font-medium text-slate-800">₹{fmt(brokerage)}</span></div>
+                        <div>Other: <span className="font-medium text-slate-800">₹{fmt(otherCharges)}</span></div>
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-slate-500">No charges breakdown recorded</p>
+                    )}
+                    {deal.chargesNotes && (
+                      <p className="text-[11px] text-slate-500 mt-1 italic">{deal.chargesNotes}</p>
+                    )}
                   </div>
-                  <div>
-                    <p className="text-xs text-gray-600">Paid</p>
-                    <p className="font-bold text-green-600">₹{fmt(sellerPaid)}</p>
+
+                  {/* Money flow recap — same numbers as the old IN/OUT cards
+                      but condensed so the overview card carries one place to
+                      look. Status badges show progress at a glance. */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="rounded-md border bg-green-50/60 border-green-200 p-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-semibold text-green-700">Money IN (Buyer)</p>
+                        <Badge variant={buyerBalance <= 0.01 ? 'default' : 'secondary'} className={buyerBalance <= 0.01 ? 'bg-green-600' : ''}>
+                          {buyerBalance <= 0.01 ? 'FULLY RECEIVED' : buyerPaid > 0 ? 'PARTIAL' : 'PENDING'}
+                        </Badge>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
+                        <div><span className="text-gray-600">Total:</span> <span className="font-bold block">₹{fmt(deal.buyerPurchaseAmount || resalePrice)}</span></div>
+                        <div><span className="text-gray-600">Received:</span> <span className="font-bold text-green-600 block">₹{fmt(buyerPaid)}</span></div>
+                        <div><span className="text-gray-600">Due:</span> <span className="font-bold text-orange-600 block">₹{fmt(Math.max(0, buyerBalance))}</span></div>
+                      </div>
+                    </div>
+                    <div className="rounded-md border bg-orange-50/60 border-orange-200 p-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-semibold text-orange-700">Money OUT (Seller)</p>
+                        <Badge variant={sellerBalance <= 0.01 ? 'default' : 'secondary'} className={sellerBalance <= 0.01 ? 'bg-orange-600' : ''}>
+                          {sellerBalance <= 0.01 ? 'FULLY PAID' : sellerPaid > 0 ? 'PARTIAL' : 'PENDING'}
+                        </Badge>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
+                        <div><span className="text-gray-600">Total:</span> <span className="font-bold block">₹{fmt(sellerPayoutExpected)}</span></div>
+                        <div><span className="text-gray-600">Paid:</span> <span className="font-bold text-green-600 block">₹{fmt(sellerPaid)}</span></div>
+                        <div><span className="text-gray-600">Due:</span> <span className="font-bold text-orange-600 block">₹{fmt(Math.max(0, sellerBalance))}</span></div>
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-xs text-gray-600">Due</p>
-                    <p className="font-bold text-orange-600">₹{fmt(Math.max(0, sellerBalance))}</p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
+
+                  {deal.notes && (
+                    <div className="rounded-md bg-slate-50 border p-2 text-xs text-slate-600">
+                      <span className="font-medium text-slate-700">Notes:</span> {deal.notes}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )
+          })()}
 
           {/* Tabs for Buyer/Seller */}
           <Tabs value={activeTab} onValueChange={setActiveTab}>
@@ -11176,23 +11535,35 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
             
             {/* Buyer Payments Tab */}
             <TabsContent value="buyer" className="space-y-4">
-              {buyerBalance > 0 && (
-                <Card>
+              {(buyerBalance > 0 || editingBuyerId) && (
+                <Card data-resale-buyer-form>
                   <CardHeader>
-                    <CardTitle className="text-lg">Add Buyer Payment</CardTitle>
+                    <div className="flex items-center justify-between">
+                      <CardTitle className="text-lg">{editingBuyerId ? 'Edit Buyer Payment' : 'Add Buyer Payment'}</CardTitle>
+                      {editingBuyerId && (
+                        <Button type="button" variant="ghost" size="sm" onClick={cancelEditBuyer}>
+                          Cancel edit
+                        </Button>
+                      )}
+                    </div>
                   </CardHeader>
                   <CardContent>
                     <form onSubmit={handleBuyerSubmit} className="space-y-4">
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <div>
-                          <Label>Amount * (Max: ₹{fmt(buyerBalance)})</Label>
+                          <Label>Amount *{editingBuyerId ? '' : ` (Max: ₹${fmt(buyerBalance)})`}</Label>
                           <Input
                             type="number"
                             value={buyerFormData.amount}
                             onChange={e => setBuyerFormData({...buyerFormData, amount: e.target.value})}
-                            max={buyerBalance}
+                            max={editingBuyerId ? undefined : buyerBalance}
                             required
                           />
+                          {editingBuyerId && (
+                            <p className="text-[11px] text-gray-500 mt-1">
+                              Editing existing entry — limit not enforced.
+                            </p>
+                          )}
                         </div>
                         <div>
                           <Label>Payment Date *</Label>
@@ -11238,13 +11609,17 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                         />
                       </div>
                       <Button type="submit" className="w-full bg-green-600 hover:bg-green-700">
-                        <Plus className="w-4 h-4 mr-2" /> Add Buyer Payment
+                        {editingBuyerId ? (
+                          <><Edit className="w-4 h-4 mr-2" /> Save Changes</>
+                        ) : (
+                          <><Plus className="w-4 h-4 mr-2" /> Add Buyer Payment</>
+                        )}
                       </Button>
                     </form>
                   </CardContent>
                 </Card>
               )}
-              
+
               <Card>
                 <CardHeader>
                   <CardTitle className="text-lg">Buyer Payment History</CardTitle>
@@ -11265,31 +11640,42 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                       </TableHeader>
                       <TableBody>
                         {buyerPayments.map(payment => (
-                          <TableRow key={payment.id}>
+                          <TableRow key={payment.id} className={editingBuyerId === payment.id ? 'bg-blue-50/40' : ''}>
                             <TableCell>{new Date(payment.paymentDate).toLocaleDateString()}</TableCell>
                             <TableCell className="text-green-600 font-medium">₹{fmt(payment.amount)}</TableCell>
                             <TableCell><Badge variant="outline">{payment.paymentMode}</Badge></TableCell>
                             <TableCell>{payment.remark || '-'}</TableCell>
                             <TableCell>
-                              <AlertDialog>
-                                <AlertDialogTrigger asChild>
-                                  <Button variant="destructive" size="sm">
-                                    <Trash2 className="w-4 h-4" />
-                                  </Button>
-                                </AlertDialogTrigger>
-                                <AlertDialogContent>
-                                  <AlertDialogHeader>
-                                    <AlertDialogTitle>Delete Payment?</AlertDialogTitle>
-                                    <AlertDialogDescription>
-                                      This action cannot be undone.
-                                    </AlertDialogDescription>
-                                  </AlertDialogHeader>
-                                  <AlertDialogFooter>
-                                    <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                    <AlertDialogAction onClick={() => onDeleteBuyerPayment(payment.id)}>Delete</AlertDialogAction>
-                                  </AlertDialogFooter>
-                                </AlertDialogContent>
-                              </AlertDialog>
+                              <div className="flex items-center gap-1">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 w-7 p-0"
+                                  title="Edit"
+                                  onClick={() => startEditBuyer(payment)}
+                                >
+                                  <Edit className="w-4 h-4" />
+                                </Button>
+                                <AlertDialog>
+                                  <AlertDialogTrigger asChild>
+                                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-red-600" title="Delete">
+                                      <Trash2 className="w-4 h-4" />
+                                    </Button>
+                                  </AlertDialogTrigger>
+                                  <AlertDialogContent>
+                                    <AlertDialogHeader>
+                                      <AlertDialogTitle>Delete Payment?</AlertDialogTitle>
+                                      <AlertDialogDescription>
+                                        This will also reverse the daybook entry. This action cannot be undone.
+                                      </AlertDialogDescription>
+                                    </AlertDialogHeader>
+                                    <AlertDialogFooter>
+                                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                      <AlertDialogAction onClick={() => onDeleteBuyerPayment(payment.id)}>Delete</AlertDialogAction>
+                                    </AlertDialogFooter>
+                                  </AlertDialogContent>
+                                </AlertDialog>
+                              </div>
                             </TableCell>
                           </TableRow>
                         ))}
@@ -11341,11 +11727,24 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                 </Card>
               )}
 
-              {sellerBalance > 0 && (
-                <Card>
+              {(sellerBalance > 0 || editingSellerId) && (
+                <Card data-resale-seller-form>
                   <CardHeader>
-                    <CardTitle className="text-lg">Add Seller Payout</CardTitle>
-                    <CardDescription>Principal remaining: ₹{fmt(remainingPrincipal)} | Profit remaining: ₹{fmt(remainingProfit)}</CardDescription>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <CardTitle className="text-lg">{editingSellerId ? 'Edit Seller Payout' : 'Add Seller Payout'}</CardTitle>
+                        <CardDescription>
+                          {editingSellerId
+                            ? 'Editing existing entry — remaining caps are not enforced.'
+                            : `Principal remaining: ₹${fmt(remainingPrincipal)} | Profit remaining: ₹${fmt(remainingProfit)}`}
+                        </CardDescription>
+                      </div>
+                      {editingSellerId && (
+                        <Button type="button" variant="ghost" size="sm" onClick={cancelEditSeller}>
+                          Cancel edit
+                        </Button>
+                      )}
+                    </div>
                   </CardHeader>
                   <CardContent>
                     <form onSubmit={handleSellerSubmit} className="space-y-4">
@@ -11447,7 +11846,11 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                         />
                       </div>
                       <Button type="submit" className="w-full bg-orange-600 hover:bg-orange-700" disabled={sellerPayoutTotal <= 0}>
-                        <Plus className="w-4 h-4 mr-2" /> Add Seller Payout (₹{fmt(sellerPayoutTotal)})
+                        {editingSellerId ? (
+                          <><Edit className="w-4 h-4 mr-2" /> Save Changes (₹{fmt(sellerPayoutTotal)})</>
+                        ) : (
+                          <><Plus className="w-4 h-4 mr-2" /> Add Seller Payout (₹{fmt(sellerPayoutTotal)})</>
+                        )}
                       </Button>
                     </form>
                   </CardContent>
@@ -11482,32 +11885,43 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                             : '—'
                           const modeLabel = payout.payoutMode || payout.paymentMode || '—'
                           return (
-                          <TableRow key={payout.id}>
+                          <TableRow key={payout.id} className={editingSellerId === payout.id ? 'bg-orange-50/40' : ''}>
                             <TableCell>{dateLabel}</TableCell>
                             <TableCell className="text-blue-600">₹{fmt(payout.principalAmount || 0)}</TableCell>
                             <TableCell className="text-green-600">₹{fmt(payout.profitAmount || 0)}</TableCell>
                             <TableCell className="text-orange-600 font-medium">₹{fmt(payout.amount)}</TableCell>
                             <TableCell><Badge variant="outline">{modeLabel}</Badge></TableCell>
                             <TableCell>
-                              <AlertDialog>
-                                <AlertDialogTrigger asChild>
-                                  <Button variant="destructive" size="sm">
-                                    <Trash2 className="w-4 h-4" />
-                                  </Button>
-                                </AlertDialogTrigger>
-                                <AlertDialogContent>
-                                  <AlertDialogHeader>
-                                    <AlertDialogTitle>Delete Payout?</AlertDialogTitle>
-                                    <AlertDialogDescription>
-                                      This will also remove the daybook entry.
-                                    </AlertDialogDescription>
-                                  </AlertDialogHeader>
-                                  <AlertDialogFooter>
-                                    <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                    <AlertDialogAction onClick={() => onDeleteSellerPayout(payout.id)}>Delete</AlertDialogAction>
-                                  </AlertDialogFooter>
-                                </AlertDialogContent>
-                              </AlertDialog>
+                              <div className="flex items-center gap-1">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 w-7 p-0"
+                                  title="Edit"
+                                  onClick={() => startEditSeller(payout)}
+                                >
+                                  <Edit className="w-4 h-4" />
+                                </Button>
+                                <AlertDialog>
+                                  <AlertDialogTrigger asChild>
+                                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-red-600" title="Delete">
+                                      <Trash2 className="w-4 h-4" />
+                                    </Button>
+                                  </AlertDialogTrigger>
+                                  <AlertDialogContent>
+                                    <AlertDialogHeader>
+                                      <AlertDialogTitle>Delete Payout?</AlertDialogTitle>
+                                      <AlertDialogDescription>
+                                        This will also reverse the daybook entry.
+                                      </AlertDialogDescription>
+                                    </AlertDialogHeader>
+                                    <AlertDialogFooter>
+                                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                      <AlertDialogAction onClick={() => onDeleteSellerPayout(payout.id)}>Delete</AlertDialogAction>
+                                    </AlertDialogFooter>
+                                  </AlertDialogContent>
+                                </AlertDialog>
+                              </div>
                             </TableCell>
                           </TableRow>
                           )
@@ -11626,9 +12040,21 @@ const CustomerForm = ({ customer, onSubmit, onCancel }) => {
 }
 
 // Customer Payment Form Component
-const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
+const CustomerPaymentForm = ({ customers, accounts, payment, onSubmit, onCancel }) => {
+  // When `payment` is provided we're editing an existing row — seed all the
+  // fields from it. Otherwise it's a fresh entry, default to today + the
+  // user's default cash account.
+  const isEdit = !!payment
   const initialDefault = accounts.filter(a => a.type === 'CASH')
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState(() => isEdit ? {
+    customerId: payment.customerId || '',
+    amount: String(payment.amount ?? ''),
+    paymentDate: (payment.paymentDate || '').slice(0, 10) || new Date().toISOString().split('T')[0],
+    paymentMode: payment.paymentMode || 'Cash',
+    accountId: payment.accountId || '',
+    reference: payment.referenceNo || payment.reference || '',
+    remark: payment.remark || '',
+  } : {
     customerId: '',
     amount: '',
     paymentDate: new Date().toISOString().split('T')[0],
@@ -11639,13 +12065,16 @@ const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
   })
 
   useEffect(() => {
-    if (accounts.length > 0 && !formData.accountId) {
+    // Default-account picker only runs in CREATE mode — in edit mode the user
+    // already has an account set and we don't want to clobber it when they
+    // toggle the payment mode (they'll pick a matching account themselves).
+    if (!isEdit && accounts.length > 0 && !formData.accountId) {
       const wantType = formData.paymentMode === 'Cash' ? 'CASH' : 'BANK'
       const eligible = accounts.filter(a => a.type === wantType)
       const defaultAccount = eligible.find(a => a.isDefault) || eligible[0]
       if (defaultAccount) setFormData(prev => ({ ...prev, accountId: defaultAccount.id }))
     }
-  }, [accounts, formData.paymentMode])
+  }, [accounts, formData.paymentMode, isEdit])
 
   const handleSubmit = (e) => {
     e.preventDefault()
@@ -11661,7 +12090,10 @@ const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
         <Label>Customer *</Label>
-        <Select value={formData.customerId} onValueChange={v => setFormData({...formData, customerId: v})}>
+        {/* Customer is locked in edit mode — switching customers would orphan
+            the existing allocations on the prior customer's sales. To change
+            the customer, delete this payment and record a new one. */}
+        <Select value={formData.customerId} onValueChange={v => setFormData({...formData, customerId: v})} disabled={isEdit}>
           <SelectTrigger>
             <SelectValue placeholder="Select customer" />
           </SelectTrigger>
@@ -11676,6 +12108,11 @@ const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
         {selectedCustomer && (
           <p className="text-xs text-muted-foreground mt-1">
             Flats: {selectedCustomer.salesCount || 0} | Outstanding: ₹{(selectedCustomer.balance || 0).toLocaleString('en-IN')}
+          </p>
+        )}
+        {isEdit && (
+          <p className="text-[11px] text-muted-foreground mt-1 italic">
+            Customer is locked while editing — to change the customer, delete and re-record.
           </p>
         )}
       </div>
@@ -11756,7 +12193,7 @@ const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
       <div className="flex justify-end space-x-2">
         <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
         <Button type="submit" disabled={!formData.customerId || !formData.amount}>
-          Record Payment & Allocate
+          {isEdit ? 'Save Changes' : 'Record Payment & Allocate'}
         </Button>
       </div>
     </form>
@@ -11765,10 +12202,14 @@ const CustomerPaymentForm = ({ customers, accounts, onSubmit, onCancel }) => {
 
 // Payment Allocation Form Component with Create Sale capability
 const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [], customer, onCreateSale }) => {
+  // Amount starts as '' when there is no existing allocation so the input
+  // renders blank instead of "0" — easier to type into. Existing allocations
+  // (re-opening the modal to tweak) keep their saved number so the user sees
+  // what's already there.
   const [allocations, setAllocations] = useState(
     sales.map(sale => ({
       saleId: sale.id,
-      amount: sale.currentAllocation || 0,
+      amount: sale.currentAllocation ? sale.currentAllocation : '',
       maxAmount: sale.pendingBalance + (sale.currentAllocation || 0)
     }))
   )
@@ -11783,12 +12224,14 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
   })
   const [isCreatingSale, setIsCreatingSale] = useState(false)
 
-  // Update allocations when sales change (after creating new sale)
+  // Update allocations when sales change (after creating new sale). Mirrors
+  // the initial-state shape — empty string for never-allocated rows so the
+  // input renders blank.
   useEffect(() => {
     setAllocations(
       sales.map(sale => ({
         saleId: sale.id,
-        amount: sale.currentAllocation || 0,
+        amount: sale.currentAllocation ? sale.currentAllocation : '',
         maxAmount: sale.pendingBalance + (sale.currentAllocation || 0)
       }))
     )
@@ -11833,7 +12276,7 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
   }
 
   const handleClearAll = () => {
-    setAllocations(prev => prev.map(a => ({ ...a, amount: 0 })))
+    setAllocations(prev => prev.map(a => ({ ...a, amount: '' })))
   }
 
   const handleSave = () => {

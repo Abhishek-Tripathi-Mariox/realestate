@@ -34,6 +34,10 @@ const deleteBuyerPayment = asyncHandler(async (req, res) => {
   sendOrError(res, await service.deleteBuyerPayment(req.params.paymentId, req.user.userId));
 });
 
+const updateBuyerPayment = asyncHandler(async (req, res) => {
+  sendOrError(res, await service.updateBuyerPayment(req.params.paymentId, req.body, req.user.userId));
+});
+
 const listSellerPayouts = asyncHandler(async (req, res) => {
   res.json(await service.listSellerPayouts(req.params.dealId));
 });
@@ -46,8 +50,12 @@ const deleteSellerPayout = asyncHandler(async (req, res) => {
   sendOrError(res, await service.deleteSellerPayout(req.params.payoutId, req.user.userId));
 });
 
+const updateSellerPayout = asyncHandler(async (req, res) => {
+  sendOrError(res, await service.updateSellerPayout(req.params.payoutId, req.body, req.user.userId));
+});
+
 module.exports = {
   list, create, remove, closeDeal,
-  listBuyerPayments, addBuyerPayment, deleteBuyerPayment,
-  listSellerPayouts, addSellerPayout, deleteSellerPayout,
+  listBuyerPayments, addBuyerPayment, deleteBuyerPayment, updateBuyerPayment,
+  listSellerPayouts, addSellerPayout, deleteSellerPayout, updateSellerPayout,
 };

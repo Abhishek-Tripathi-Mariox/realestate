@@ -14,6 +14,10 @@ const create = asyncHandler(async (req, res) => {
   sendOrError(res, await service.create(req.body, req.user.userId));
 });
 
+const update = asyncHandler(async (req, res) => {
+  sendOrError(res, await service.update(req.params.id, req.body, req.user.userId));
+});
+
 const remove = asyncHandler(async (req, res) => {
   sendOrError(res, await service.remove(req.params.id, req.user.userId));
 });
@@ -26,4 +30,4 @@ const setAllocations = asyncHandler(async (req, res) => {
   sendOrError(res, await service.setAllocations(req.params.id, req.body, req.user.userId));
 });
 
-module.exports = { list, create, remove, listAllocations, setAllocations };
+module.exports = { list, create, update, remove, listAllocations, setAllocations };
