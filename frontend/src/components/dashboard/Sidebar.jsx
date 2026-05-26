@@ -20,6 +20,7 @@ import {
   Percent,
   Wallet,
   Briefcase,
+  StickyNote,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -62,6 +63,7 @@ export function Sidebar({ user, onLogout, onChangePassword, mobileOpen = false, 
     { label: 'Loans', href: '/borrow', icon: CreditCard },
     { label: 'Dasti Ledger', href: '/dasti-ledger', icon: Wallet },
     { label: 'Firm Ledger', href: '/firm-ledger', icon: Briefcase },
+    { label: 'Notes', href: '/notes', icon: StickyNote },
   ]
 
   if (user?.role === 'super_admin' || user?.role === 'admin') {

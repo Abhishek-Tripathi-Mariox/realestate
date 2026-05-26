@@ -38,4 +38,5 @@ module.exports = {
   DastiPerson: require('./DastiPerson'),
   DastiTransaction: require('./DastiTransaction'),
   FirmTransaction: require('./FirmTransaction'),
+  Note: require('./Note'),
 };

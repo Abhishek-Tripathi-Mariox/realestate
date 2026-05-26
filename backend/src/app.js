@@ -26,6 +26,7 @@ const resalesRoutes = require('./modules/resales/resales.routes');
 const loansRoutes = require('./modules/loans/loans.routes');
 const dastiRoutes = require('./modules/dasti/dasti.routes');
 const firmLedgerRoutes = require('./modules/firmLedger/firmLedger.routes');
+const notesRoutes = require('./modules/notes/notes.routes');
 const adminRoutes = require('./modules/admin/admin.routes');
 const trashRoutes = require('./modules/trash/trash.routes');
 
@@ -102,6 +103,9 @@ app.use('/api/dasti/transactions', dastiRoutes.transactionsRouter);
 // Firm Ledger — per-firm money IN/OUT (firm is the subject; counterparty is
 // optional free-text). Standalone, does not touch the daybook.
 app.use('/api/firm-ledger/transactions', firmLedgerRoutes.transactionsRouter);
+
+// Notes — simple title+body sticky notes shown in the sidebar.
+app.use('/api/notes', notesRoutes);
 
 app.use('/api/admin', adminRoutes.adminRouter);
 app.use('/api/cleanup-orphans', adminRoutes.cleanupOrphansRouter);
