@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -138,12 +138,19 @@ export default function MoneyReceivedPage() {
     catch (e) { /* non-fatal */ }
   }
 
-  const loadList = async () => {
+  // Stable JSON signature of the filters so we can tell "filters changed" vs
+  // "only the page changed" — pagination shouldn't re-run the expensive
+  // summary aggregate on the server.
+  const filtersJson = useMemo(() => JSON.stringify(filters), [filters])
+  const lastFiltersRef = useRef('')
+
+  const loadList = async ({ includeSummary }) => {
     try {
       setLoading(true)
       const params = new URLSearchParams()
       params.append('page', String(pagination.page))
       params.append('limit', String(pagination.limit))
+      if (!includeSummary) params.append('skipSummary', '1')
       Object.entries(filters).forEach(([k, v]) => {
         if (v && v !== 'all' && k !== 'search') params.append(k, v)
       })
@@ -160,9 +167,17 @@ export default function MoneyReceivedPage() {
         )
       }
       setTransactions(rows)
-      setSummary(data.summary || { totalAmount: 0, matchCount: 0, pageCount: 0 })
-      if (data.pagination) {
-        setPagination(prev => ({ ...prev, totalCount: data.pagination.totalCount, totalPages: data.pagination.totalPages }))
+      // Only overwrite summary on full loads — otherwise keep the totals the
+      // user last saw so they don't blink to ₹0 while paginating.
+      if (includeSummary && data.summary) {
+        setSummary(data.summary)
+      }
+      if (data.pagination && data.pagination.totalCount != null) {
+        setPagination(prev => ({
+          ...prev,
+          totalCount: data.pagination.totalCount,
+          totalPages: data.pagination.totalPages,
+        }))
       }
     } catch (e) {
       toast({ variant: 'destructive', title: 'Error', description: e.message })
@@ -178,16 +193,26 @@ export default function MoneyReceivedPage() {
     }
   }, [isAuthenticated])
 
-  // Reset to page 1 whenever filters change so the user doesn't end up on
-  // a page that no longer exists.
+  // Single effect drives all list loads. Behaviour:
+  //   • filters changed AND page > 1 → reset to page 1, don't fetch yet
+  //     (the page change re-fires this effect and the fetch happens then).
+  //   • filters changed AND page = 1 → full fetch with summary.
+  //   • only page/limit changed → paginated fetch, skip summary.
+  // This avoids the previous double-fetch where a filter change first reset
+  // page and then re-triggered another full load.
   useEffect(() => {
     if (!isAuthenticated) return
-    setPagination(p => ({ ...p, page: 1 }))
-  }, [filters])
 
-  useEffect(() => {
-    if (isAuthenticated) loadList()
-  }, [isAuthenticated, filters, pagination.page, pagination.limit])
+    const filtersChanged = filtersJson !== lastFiltersRef.current
+    if (filtersChanged && pagination.page !== 1) {
+      // Don't update the ref yet — let the page-1 trigger run the actual fetch.
+      setPagination(p => ({ ...p, page: 1 }))
+      return
+    }
+
+    lastFiltersRef.current = filtersJson
+    loadList({ includeSummary: filtersChanged })
+  }, [isAuthenticated, filtersJson, pagination.page, pagination.limit])
 
   const clearFilters = () => setFilters({
     societyId: 'all', accountId: 'all', sourceType: 'all', paymentMode: 'all',

@@ -62,26 +62,47 @@ const list = async (query) => {
   const limit = parseInt(query.limit) || 100;
   const skip = (page - 1) * limit;
 
-  // Pull a window of matching rows + the total count for pagination.
-  const totalCount = await Transaction.countDocuments(filter);
-  const txns = await Transaction
+  // Summary (total amount + total count) is expensive when filters match
+  // thousands of rows — it scans every match to sum the amount. When the
+  // user is only paginating (filters unchanged), the frontend passes
+  // `skipSummary=1` so we don't re-run the aggregate; the previously
+  // computed totals stay valid until filters change again.
+  const skipSummary = query.skipSummary === '1' || query.skipSummary === 'true';
+
+  // Run the page fetch and the summary aggregate in parallel. The aggregate
+  // also gives us the total count for pagination, so we can drop the
+  // separate countDocuments() call entirely.
+  const txnsPromise = Transaction
     .find(filter)
     .sort({ txnDate: -1, createdAt: -1 })
     .skip(skip)
     .limit(limit)
     .lean();
 
+  const summaryPromise = skipSummary
+    ? Promise.resolve(null)
+    : Transaction.aggregate([
+      { $match: filter },
+      { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]);
+
+  const [txns, summaryAgg] = await Promise.all([txnsPromise, summaryPromise]);
+
   // Drop rows whose parent (sale/bill/etc) has been soft-deleted so the
   // user doesn't see "ghost" inflows for records they've already removed.
+  // Only runs over the current page (≤ limit rows) so this stays cheap.
   const alive = await filterAliveTransactions(txns);
 
-  const accounts = await Account.find({}).lean();
-  const accountMap = Object.fromEntries(accounts.map(a => [a.id, a.name]));
-
+  // Account + society lookups are scoped to the IDs that actually appear on
+  // this page, keeping the enrichment step O(page) rather than O(global).
+  const accountIds = [...new Set(alive.map(t => t.accountId).filter(Boolean))];
   const societyIds = [...new Set(alive.map(t => t.societyId).filter(Boolean))];
-  const societies = societyIds.length
-    ? await Society.find({ id: { $in: societyIds } }).lean()
-    : [];
+
+  const [accounts, societies] = await Promise.all([
+    accountIds.length ? Account.find({ id: { $in: accountIds } }).lean() : [],
+    societyIds.length ? Society.find({ id: { $in: societyIds } }).lean() : [],
+  ]);
+  const accountMap = Object.fromEntries(accounts.map(a => [a.id, a.name]));
   const societyMap = Object.fromEntries(societies.map(s => [s.id, s.name]));
 
   const enriched = alive.map(({ _id, ...t }) => ({
@@ -90,23 +111,20 @@ const list = async (query) => {
     societyName: t.societyId ? (societyMap[t.societyId] || 'Unknown') : 'Company',
   }));
 
-  // The summary totals reflect every row matching the filter (across pages)
-  // so the user can trust them as the "true" total for the current filter.
-  const summaryAgg = await Transaction.aggregate([
-    { $match: filter },
-    { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
-  ]);
-  const totalAmount = summaryAgg[0]?.total || 0;
-  const matchCount = summaryAgg[0]?.count || 0;
+  const totalAmount = summaryAgg ? (summaryAgg[0]?.total || 0) : null;
+  const matchCount = summaryAgg ? (summaryAgg[0]?.count || 0) : null;
 
   return {
     transactions: enriched,
-    summary: { totalAmount, matchCount, pageCount: enriched.length },
+    summary: skipSummary
+      ? null
+      : { totalAmount, matchCount, pageCount: enriched.length },
     pagination: {
       page,
       limit,
-      totalCount,
-      totalPages: Math.ceil(totalCount / limit),
+      // frontend keeps the previously-known value so the pager still works.
+      totalCount: matchCount,
+      totalPages: matchCount != null ? Math.ceil(matchCount / limit) : null,
     },
   };
 };
