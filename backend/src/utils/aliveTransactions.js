@@ -21,7 +21,7 @@ const {
   ExpenseBill, ExpensePayment, CommissionBill, CommissionPayment,
   CustomerPayment, ResaleDeal, ResaleBuyerPayment, ResaleSellerPayout,
   Partner, PartnerLedgerEntry, Loan, LoanRepayment,
-  Transaction,
+  Transaction, BankOperation,
 } = require('../models');
 
 // Each chain step: { model, link } where `link` is the field on this doc
@@ -45,6 +45,8 @@ const PARENT_CHAINS = {
   LOAN_GIVEN:                 [{ model: Loan }],
   LOAN_BORROWED_REPAYMENT:    [{ model: LoanRepayment, link: 'loanId' }, { model: Loan }],
   LOAN_GIVEN_REPAYMENT:       [{ model: LoanRepayment, link: 'loanId' }, { model: Loan }],
+  BANK_WITHDRAWAL:            [{ model: BankOperation }],
+  BANK_TRANSFER:              [{ model: BankOperation }],
 };
 
 // Return the set of sourceIds (for one sourceType) whose full parent chain

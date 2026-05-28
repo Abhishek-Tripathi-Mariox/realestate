@@ -26,6 +26,7 @@ const resalesRoutes = require('./modules/resales/resales.routes');
 const loansRoutes = require('./modules/loans/loans.routes');
 const dastiRoutes = require('./modules/dasti/dasti.routes');
 const firmLedgerRoutes = require('./modules/firmLedger/firmLedger.routes');
+const bankRoutes = require('./modules/bank/bank.routes');
 const notesRoutes = require('./modules/notes/notes.routes');
 const adminRoutes = require('./modules/admin/admin.routes');
 const trashRoutes = require('./modules/trash/trash.routes');
@@ -103,6 +104,11 @@ app.use('/api/dasti/transactions', dastiRoutes.transactionsRouter);
 // Firm Ledger — per-firm money IN/OUT (firm is the subject; counterparty is
 // optional free-text). Standalone, does not touch the daybook.
 app.use('/api/firm-ledger/transactions', firmLedgerRoutes.transactionsRouter);
+
+// Bank — cash withdrawals from a single account + internal transfers between
+// two accounts. Each operation posts mirrored daybook transactions so account
+// balances reflect the movement.
+app.use('/api/bank', bankRoutes);
 
 // Notes — simple title+body sticky notes shown in the sidebar.
 app.use('/api/notes', notesRoutes);
