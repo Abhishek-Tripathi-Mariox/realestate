@@ -22,6 +22,7 @@ import {
   Briefcase,
   StickyNote,
   Landmark,
+  ArrowDownToLine,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -65,6 +66,7 @@ export function Sidebar({ user, onLogout, onChangePassword, mobileOpen = false, 
     { label: 'Dasti Ledger', href: '/dasti-ledger', icon: Wallet },
     { label: 'Firm Ledger', href: '/firm-ledger', icon: Briefcase },
     { label: 'Bank', href: '/bank', icon: Landmark },
+    { label: 'Money Received', href: '/money-received', icon: ArrowDownToLine },
     { label: 'Notes', href: '/notes', icon: StickyNote },
   ]
 

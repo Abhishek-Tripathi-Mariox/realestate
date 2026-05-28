@@ -27,6 +27,7 @@ const loansRoutes = require('./modules/loans/loans.routes');
 const dastiRoutes = require('./modules/dasti/dasti.routes');
 const firmLedgerRoutes = require('./modules/firmLedger/firmLedger.routes');
 const bankRoutes = require('./modules/bank/bank.routes');
+const moneyReceivedRoutes = require('./modules/moneyReceived/moneyReceived.routes');
 const notesRoutes = require('./modules/notes/notes.routes');
 const adminRoutes = require('./modules/admin/admin.routes');
 const trashRoutes = require('./modules/trash/trash.routes');
@@ -109,6 +110,10 @@ app.use('/api/firm-ledger/transactions', firmLedgerRoutes.transactionsRouter);
 // two accounts. Each operation posts mirrored daybook transactions so account
 // balances reflect the movement.
 app.use('/api/bank', bankRoutes);
+
+// Money Received — flat read-only view of every IN transaction, filterable
+// by both txnDate and createdAt ranges (catches entries logged after the fact).
+app.use('/api/money-received', moneyReceivedRoutes);
 
 // Notes — simple title+body sticky notes shown in the sidebar.
 app.use('/api/notes', notesRoutes);
