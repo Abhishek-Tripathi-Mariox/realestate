@@ -57,6 +57,7 @@ export default function DastiPersonDetailPage() {
   const [user, setUser] = useState(null)
 
   const [person, setPerson] = useState(null)
+  const [persons, setPersons] = useState([])
   const [firms, setFirms] = useState([])
   const [accounts, setAccounts] = useState([])
   const [transactions, setTransactions] = useState([])
@@ -66,7 +67,7 @@ export default function DastiPersonDetailPage() {
   const [txnFormType, setTxnFormType] = useState('IN')
   const [editingTxn, setEditingTxn] = useState(null)
   const [txnForm, setTxnForm] = useState({
-    type: 'IN', amount: '', firmId: '', accountId: '', paymentMode: 'Cash', txnDate: todayISO(), note: '',
+    type: 'IN', amount: '', personId: '', firmId: '', accountId: '', paymentMode: 'Cash', txnDate: todayISO(), note: '',
   })
 
   // ---------- API helper (mirrors the main page; kept inline so per-page
@@ -128,13 +129,15 @@ export default function DastiPersonDetailPage() {
     if (!personId) return
     setLoading(true)
     try {
-      const [p, f, a, t] = await Promise.all([
+      const [p, allPersons, f, a, t] = await Promise.all([
         apiCall(`/dasti/persons/${personId}`),
+        apiCall('/dasti/persons'),
         apiCall('/firms'),
         apiCall('/accounts'),
         apiCall(`/dasti/transactions?personId=${personId}`),
       ])
       setPerson(p)
+      setPersons(allPersons)
       setFirms(f)
       setAccounts(a)
       setTransactions(t)
@@ -154,7 +157,7 @@ export default function DastiPersonDetailPage() {
   const openAddTxn = (type) => {
     setEditingTxn(null)
     setTxnFormType(type)
-    setTxnForm({ type, amount: '', firmId: '', accountId: '', paymentMode: 'Cash', txnDate: todayISO(), note: '' })
+    setTxnForm({ type, amount: '', personId, firmId: '', accountId: '', paymentMode: 'Cash', txnDate: todayISO(), note: '' })
     setShowAddTxn(true)
   }
   const openEditTxn = (t) => {
@@ -163,6 +166,7 @@ export default function DastiPersonDetailPage() {
     setTxnForm({
       type: t.type,
       amount: String(t.amount || ''),
+      personId: t.personId || personId,
       firmId: t.firmId || '',
       accountId: t.accountId || '',
       paymentMode: t.paymentMode || 'Cash',
@@ -174,10 +178,14 @@ export default function DastiPersonDetailPage() {
   const handleSaveTxn = async () => {
     const amount = parseFloat(txnForm.amount)
     if (!Number.isFinite(amount) || amount <= 0) { toast({ variant: 'destructive', title: 'Error', description: 'Amount must be greater than 0' }); return }
+    if (!txnForm.personId) { toast({ variant: 'destructive', title: 'Error', description: 'Pick a dasti account' }); return }
     if (!txnForm.accountId) { toast({ variant: 'destructive', title: 'Error', description: 'Pick an account' }); return }
     if (!txnForm.txnDate) { toast({ variant: 'destructive', title: 'Error', description: 'Transaction date is required' }); return }
     try {
-      const payload = { ...txnForm, amount, personId }
+      // `personId` comes straight from the form so the user can reassign the
+      // entry to a different dasti person from the edit dialog. If they do,
+      // the row drops out of this person's view on reload — that's expected.
+      const payload = { ...txnForm, amount }
       if (!payload.firmId) payload.firmId = null
       if (editingTxn) {
         await apiCall(`/dasti/transactions/${editingTxn.id}`, 'PUT', payload)
@@ -424,6 +432,20 @@ export default function DastiPersonDetailPage() {
             <div>
               <Label>Amount (₹) *</Label>
               <Input type="number" min="0" step="0.01" placeholder="0" value={txnForm.amount} onChange={e => setTxnForm({ ...txnForm, amount: e.target.value })} />
+            </div>
+            <div className="sm:col-span-2">
+              <Label>Dasti Account (Person) *</Label>
+              <Select value={txnForm.personId} onValueChange={v => setTxnForm({ ...txnForm, personId: v })}>
+                <SelectTrigger><SelectValue placeholder="Pick person" /></SelectTrigger>
+                <SelectContent>
+                  {persons.map(p => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              {editingTxn && txnForm.personId !== personId && (
+                <p className="text-xs text-amber-600 mt-1">
+                  Note: changing the person moves this entry out of {person?.name || 'this view'}.
+                </p>
+              )}
             </div>
             <div>
               <Label>Firm</Label>
