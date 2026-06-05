@@ -82,7 +82,7 @@ export default function DaybookPage() {
   const [showOpeningBalanceDialog, setShowOpeningBalanceDialog] = useState(false)
   const [selectedAccountForOpening, setSelectedAccountForOpening] = useState(null)
   const [newAccount, setNewAccount] = useState({ name: '', type: 'BANK', openingAmount: 0, overdraftEnabled: false, scope: 'GLOBAL', societyId: '' })
-  const [openingBalance, setOpeningBalance] = useState({ openingAmount: 0, openingDate: '' })
+  const [openingBalance, setOpeningBalance] = useState({ name: '', openingAmount: 0, openingDate: '' })
 
   const apiCall = async (endpoint, method = 'GET', body = null) => {
     const token = localStorage.getItem('token')
@@ -296,15 +296,28 @@ export default function DaybookPage() {
 
   const handleUpdateOpeningBalance = async (e) => {
     e.preventDefault()
+    const name = (openingBalance.name || '').trim()
+    if (!name) {
+      toast({ title: 'Error', description: 'Account name cannot be empty', variant: 'destructive' })
+      return
+    }
     try {
-      await apiCall(`/accounts/${selectedAccountForOpening.id}/opening-balance`, 'PUT', {
-        ...openingBalance,
+      // Two separate endpoints back the modal: /accounts/:id carries the
+      // editable name, while /accounts/:id/opening-balance owns the
+      // AccountOpeningBalance doc. Only fire the rename PUT when the user
+      // actually changed it.
+      const account = selectedAccountForOpening
+      if (name !== (account.name || '')) {
+        await apiCall(`/accounts/${account.id}`, 'PUT', { name })
+      }
+      await apiCall(`/accounts/${account.id}/opening-balance`, 'PUT', {
         openingAmount: parseFloat(openingBalance.openingAmount) || 0,
+        openingDate: openingBalance.openingDate,
       })
       await loadAccounts()
       handleRefresh()
       setShowOpeningBalanceDialog(false)
-      toast({ title: 'Success', description: 'Opening balance updated' })
+      toast({ title: 'Success', description: 'Account updated' })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
     }
@@ -572,7 +585,11 @@ export default function DaybookPage() {
                           title="Set Opening Balance"
                           onClick={() => {
                             setSelectedAccountForOpening(account)
-                            setOpeningBalance({ openingAmount: account.openingAmount || 0, openingDate: account.openingDate || '' })
+                            setOpeningBalance({
+                              name: account.name || '',
+                              openingAmount: account.openingAmount || 0,
+                              openingDate: account.openingDate || '',
+                            })
                             setShowOpeningBalanceDialog(true)
                           }}
                         >
@@ -629,20 +646,28 @@ export default function DaybookPage() {
           </CardContent>
         </Card>
 
-        {/* Opening Balance Dialog */}
+        {/* Edit Account Dialog (name / scope / opening balance) */}
         <Dialog open={showOpeningBalanceDialog} onOpenChange={setShowOpeningBalanceDialog}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Edit Opening Balance - {selectedAccountForOpening?.name}</DialogTitle>
+              <DialogTitle>Edit Account - {selectedAccountForOpening?.name}</DialogTitle>
             </DialogHeader>
             <form onSubmit={handleUpdateOpeningBalance} className="space-y-4">
               <div>
+                <Label>Account Name</Label>
+                <Input
+                  value={openingBalance.name}
+                  onChange={e => setOpeningBalance({ ...openingBalance, name: e.target.value })}
+                  placeholder="e.g., HDFC Current"
+                />
+              </div>
+              <div>
                 <Label>Opening Amount</Label>
-                <Input type="number" value={openingBalance.openingAmount} onChange={e => setOpeningBalance({...openingBalance, openingAmount: e.target.value})} />
+                <Input type="number" value={openingBalance.openingAmount} onChange={e => setOpeningBalance({ ...openingBalance, openingAmount: e.target.value })} />
               </div>
               <div>
                 <Label>Opening Date</Label>
-                <Input type="date" value={openingBalance.openingDate} onChange={e => setOpeningBalance({...openingBalance, openingDate: e.target.value})} />
+                <Input type="date" value={openingBalance.openingDate} onChange={e => setOpeningBalance({ ...openingBalance, openingDate: e.target.value })} />
               </div>
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="outline" onClick={() => setShowOpeningBalanceDialog(false)}>Cancel</Button>
