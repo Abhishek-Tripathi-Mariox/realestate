@@ -412,6 +412,51 @@ const listExpenses = async (query) => {
   };
 };
 
+// Edit a quick expense (the standalone OUT txn created via /api/daybook with
+// sourceType=QUICK_EXPENSE). Bills aren't involved here — we reverse the old
+// txn for audit and post a fresh one with the new values. The frontend keeps
+// pointing at the same row id by using the new txn's id from the response.
+const updateExpense = async (id, body, userId) => {
+  const original = await Transaction.findOne({ id }).lean();
+  if (!original) return { error: 'Expense not found', status: 404 };
+  // Block edits on rows that aren't standalone quick expenses — those go
+  // through the bill / payment edit paths and have stricter invariants.
+  if (original.sourceType !== 'QUICK_EXPENSE') {
+    return { error: 'This entry isn\'t a quick expense — edit it from its bill / payment view', status: 400 };
+  }
+  if (original.isReversed || original.isReversal || original.isVoided) {
+    return { error: 'Cannot edit a reversed / voided entry', status: 400 };
+  }
+
+  const amount = Number(body.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { error: 'Amount must be greater than 0', status: 400 };
+  }
+  const accountId = body.accountId || original.accountId;
+  if (!accountId) return { error: 'Account is required', status: 400 };
+  const account = await Account.findOne({ id: accountId }).lean();
+  if (!account) return { error: 'Account not found', status: 400 };
+
+  await createReversalTransaction(original, userId, 'Quick expense edited');
+
+  const replacement = await createTransaction({
+    txnDate: body.txnDate || original.txnDate,
+    societyId: body.scope === 'COMPANY' ? null : (body.societyId || original.societyId),
+    accountId,
+    direction: 'OUT',
+    amount,
+    paymentMode: body.paymentMode || original.paymentMode || 'Cash',
+    partyType: original.partyType || 'Vendor',
+    partyName: body.partyName || body.vendorName || original.partyName || '',
+    sourceType: 'QUICK_EXPENSE',
+    sourceId: null,
+    referenceNo: body.referenceNo || body.category || original.referenceNo || '',
+    remark: body.remark || original.remark || '',
+  }, userId);
+
+  return { message: 'Expense updated', id: replacement.id, previousId: original.id };
+};
+
 const deleteExpense = async (id, userId) => {
   let txn = await Transaction.findOne({ id }).lean();
   let bill = null;
@@ -832,6 +877,6 @@ const updateBillPayment = async (id, body, userId) => {
 
 module.exports = {
   listBills, createBill, updateBill, deleteBill,
-  listExpenses, deleteExpense, quickExpense,
+  listExpenses, updateExpense, deleteExpense, quickExpense,
   listBillPayments, addBillPayment, updateBillPayment, deleteBillPayment,
 };

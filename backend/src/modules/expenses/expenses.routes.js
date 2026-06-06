@@ -15,6 +15,7 @@ expenseBillsRouter.post('/:billId/payments', verifyToken, ctrl.addBillPayment);
 const expensesRouter = express.Router();
 expensesRouter.get('/', verifyToken, ctrl.listExpenses);
 expensesRouter.post('/quick', verifyToken, ctrl.quickExpense);
+expensesRouter.put('/:id', verifyToken, ctrl.updateExpense);
 expensesRouter.delete('/:id', verifyToken, ctrl.deleteExpense);
 
 // /api/expense-payments/:id

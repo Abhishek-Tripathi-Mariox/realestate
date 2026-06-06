@@ -33,6 +33,10 @@ const deleteExpense = asyncHandler(async (req, res) => {
   sendOrError(res, await service.deleteExpense(req.params.id, req.user.userId));
 });
 
+const updateExpense = asyncHandler(async (req, res) => {
+  sendOrError(res, await service.updateExpense(req.params.id, req.body, req.user.userId));
+});
+
 const quickExpense = asyncHandler(async (req, res) => {
   res.json(await service.quickExpense(req.body, req.user.userId));
 });
@@ -55,6 +59,6 @@ const updateBillPayment = asyncHandler(async (req, res) => {
 
 module.exports = {
   listBills, createBill, updateBill, deleteBill,
-  listExpenses, deleteExpense, quickExpense,
+  listExpenses, updateExpense, deleteExpense, quickExpense,
   listBillPayments, addBillPayment, updateBillPayment, deleteBillPayment,
 };

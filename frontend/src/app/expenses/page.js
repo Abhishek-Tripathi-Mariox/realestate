@@ -119,6 +119,18 @@ export default function ExpensesPage() {
     referenceNo: '',
     remark: '',
   })
+  // Inline edit dialog for an existing Bill Activity row. We can't edit a
+  // payment's `type` (PAYMENT/ADDITION/WITHDRAWAL) since each flips the
+  // bill balance differently — only the value fields are editable here.
+  const [editingPayment, setEditingPayment] = useState(null)
+  const [editPaymentForm, setEditPaymentForm] = useState({
+    amount: '',
+    paymentDate: new Date().toISOString().split('T')[0],
+    paymentMode: 'Cash',
+    accountId: '',
+    referenceNo: '',
+    remark: '',
+  })
   // Form for adding more work value to an existing bill (vendor-ledger style).
   // Optionally records a payment along with the addition.
   const [billAddForm, setBillAddForm] = useState({
@@ -362,7 +374,11 @@ export default function ExpensesPage() {
       setShowAddExpense(false)
       setEditingExpense(null)
       resetForm()
-      loadExpenses()
+      // Refresh accounts alongside expenses — every save (add or edit) moves
+      // money on an account, so the cached `currentBalance` is stale and the
+      // next Edit dialog would show the pre-update number in its account
+      // dropdown.
+      await Promise.all([loadExpenses(), loadAccounts()])
     } catch (error) {
       console.error('Failed to save expense:', error)
       toast({ variant: 'destructive', title: 'Error', description: error.message || 'Failed to save expense' })
@@ -373,11 +389,11 @@ export default function ExpensesPage() {
     if (!confirm('Are you sure you want to delete this expense? A reversal entry will be created.')) {
       return
     }
-    
+
     try {
       await apiCall(`/expenses/${expense.id}`, 'DELETE')
       toast({ title: 'Success', description: 'Expense deleted (reversal created)' })
-      loadExpenses()
+      await Promise.all([loadExpenses(), loadAccounts()])
     } catch (error) {
       console.error('Failed to delete expense:', error)
       toast({ variant: 'destructive', title: 'Error', description: error.message || 'Failed to delete expense' })
@@ -513,7 +529,7 @@ export default function ExpensesPage() {
       setShowAddBill(false)
       setEditingBill(null)
       resetBillForm()
-      loadExpenses()
+      await Promise.all([loadExpenses(), loadAccounts()])
     } catch (error) {
       console.error('Failed to save bill:', error)
       toast({ variant: 'destructive', title: 'Error', description: error.message || 'Failed to save bill' })
@@ -526,7 +542,7 @@ export default function ExpensesPage() {
       const billId = row.billId || row.sourceId || row.id
       await apiCall(`/expense-bills/${billId}`, 'DELETE')
       toast({ title: 'Success', description: 'Bill deleted' })
-      loadExpenses()
+      await Promise.all([loadExpenses(), loadAccounts()])
     } catch (error) {
       toast({ variant: 'destructive', title: 'Error', description: error.message || 'Failed to delete bill' })
     }
@@ -672,7 +688,7 @@ export default function ExpensesPage() {
         remark: '',
       })
       await refreshPayments()
-      loadExpenses()
+      await Promise.all([loadExpenses(), loadAccounts()])
     } catch (error) {
       toast({ variant: 'destructive', title: 'Error', description: error.message || 'Failed to add payment' })
     }
@@ -684,9 +700,54 @@ export default function ExpensesPage() {
       await apiCall(`/expense-payments/${paymentId}`, 'DELETE')
       toast({ title: 'Success', description: 'Payment deleted' })
       await refreshPayments()
-      loadExpenses()
+      await Promise.all([loadExpenses(), loadAccounts()])
     } catch (error) {
       toast({ variant: 'destructive', title: 'Error', description: error.message || 'Failed to delete payment' })
+    }
+  }
+
+  const openEditBillPayment = (p) => {
+    setEditingPayment(p)
+    setEditPaymentForm({
+      amount: p.amount?.toString() || '',
+      paymentDate: (p.paymentDate || '').slice(0, 10) || new Date().toISOString().split('T')[0],
+      paymentMode: p.paymentMode || 'Cash',
+      accountId: p.accountId || '',
+      referenceNo: p.referenceNo || '',
+      remark: p.remark || '',
+    })
+  }
+
+  const handleSaveBillPaymentEdit = async () => {
+    if (!editingPayment) return
+    const amount = parseFloat(editPaymentForm.amount)
+    if (!Number.isFinite(amount) || amount <= 0) {
+      toast({ variant: 'destructive', title: 'Error', description: 'Amount must be greater than 0' })
+      return
+    }
+    // ADDITION rows don't move money, so the account field shouldn't be sent
+    // — let the backend keep it null. For PAYMENT / WITHDRAWAL, an account is
+    // required so the daybook reversal+repost knows which balance to swing.
+    const isAddition = editingPayment.type === 'ADDITION'
+    if (!isAddition && !editPaymentForm.accountId) {
+      toast({ variant: 'destructive', title: 'Error', description: 'Pick an account' })
+      return
+    }
+    try {
+      await apiCall(`/expense-payments/${editingPayment.id}`, 'PUT', {
+        amount,
+        paymentDate: editPaymentForm.paymentDate,
+        paymentMode: editPaymentForm.paymentMode,
+        accountId: isAddition ? null : editPaymentForm.accountId,
+        referenceNo: editPaymentForm.referenceNo,
+        remark: editPaymentForm.remark,
+      })
+      toast({ title: 'Saved', description: 'Payment updated' })
+      setEditingPayment(null)
+      await refreshPayments()
+      await Promise.all([loadExpenses(), loadAccounts()])
+    } catch (error) {
+      toast({ variant: 'destructive', title: 'Error', description: error.message || 'Failed to update payment' })
     }
   }
 
@@ -767,7 +828,7 @@ export default function ExpensesPage() {
       })
       setDrawerAction(null)
       await refreshPayments()
-      loadExpenses()
+      await Promise.all([loadExpenses(), loadAccounts()])
     } catch (error) {
       toast({ variant: 'destructive', title: 'Error', description: error.message || 'Failed to update bill' })
     }
@@ -1184,11 +1245,12 @@ export default function ExpensesPage() {
                                     <Trash2 className="w-4 h-4" />
                                   </Button>
                                 </>
-                              ) : !isBillLinked ? (
+                              ) : (!isBillLinked || expense.sourceType === 'QUICK_EXPENSE') ? (
+                                // Quick expenses look bill-linked (detectBillType returns 'expense')
+                                // because they live in the same view as bill payments, but the
+                                // underlying txn is a standalone OUT entry with no ExpenseBill
+                                // record — same edit/delete flow as a free expense applies.
                                 <>
-                                  <Button variant="ghost" size="sm" onClick={() => setViewingExpense(expense)}>
-                                    <Eye className="w-4 h-4" />
-                                  </Button>
                                   <Button variant="ghost" size="sm" onClick={() => openEditExpense(expense)}>
                                     <Edit className="w-4 h-4" />
                                   </Button>
@@ -1994,9 +2056,14 @@ export default function ExpensesPage() {
                             </TableCell>
                             <TableCell>
                               {paymentsBillType === 'expense' && !p._quickExpense && (
-                                <Button variant="ghost" size="sm" className="text-red-600 h-8 w-8 p-0" onClick={() => handleDeleteBillPayment(p.id)}>
-                                  <Trash2 className="w-4 h-4" />
-                                </Button>
+                                <div className="flex items-center justify-end gap-0.5">
+                                  <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="Edit" onClick={() => openEditBillPayment(p)}>
+                                    <Edit className="w-4 h-4" />
+                                  </Button>
+                                  <Button variant="ghost" size="sm" className="text-red-600 h-8 w-8 p-0" title="Delete" onClick={() => handleDeleteBillPayment(p.id)}>
+                                    <Trash2 className="w-4 h-4" />
+                                  </Button>
+                                </div>
                               )}
                             </TableCell>
                           </TableRow>
@@ -2093,6 +2160,100 @@ export default function ExpensesPage() {
           )}
         </DrawerContent>
       </Drawer>
+
+      {/* Edit Bill Activity row — payment / addition / withdrawal */}
+      <Dialog open={!!editingPayment} onOpenChange={(open) => { if (!open) setEditingPayment(null) }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>
+              Edit {editingPayment?.type === 'ADDITION' ? 'Bill Addition' : editingPayment?.type === 'WITHDRAWAL' ? 'Withdrawal' : 'Payment'}
+            </DialogTitle>
+            <DialogDescription>
+              Updating reposts the underlying daybook txn so balances stay in sync.
+            </DialogDescription>
+          </DialogHeader>
+          {editingPayment && (
+            <div className="grid grid-cols-2 gap-3 py-2">
+              <div>
+                <Label>Amount *</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={editPaymentForm.amount}
+                  onChange={e => setEditPaymentForm({ ...editPaymentForm, amount: e.target.value })}
+                />
+              </div>
+              <div>
+                <Label>Date *</Label>
+                <Input
+                  type="date"
+                  value={editPaymentForm.paymentDate}
+                  onChange={e => setEditPaymentForm({ ...editPaymentForm, paymentDate: e.target.value })}
+                />
+              </div>
+              {/* ADDITION rows don't touch an account, so hide the mode + account
+                  fields for them — backend null-outs accountId on the way through. */}
+              {editingPayment.type !== 'ADDITION' && (
+                <>
+                  <div>
+                    <Label>Payment Mode *</Label>
+                    <Select
+                      value={editPaymentForm.paymentMode}
+                      onValueChange={v => setEditPaymentForm({ ...editPaymentForm, paymentMode: v, accountId: '' })}
+                    >
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="Cash">Cash</SelectItem>
+                        <SelectItem value="Bank Transfer">Bank Transfer</SelectItem>
+                        <SelectItem value="UPI">UPI</SelectItem>
+                        <SelectItem value="Cheque">Cheque</SelectItem>
+                        <SelectItem value="Card">Card</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label>Account *</Label>
+                    <Select
+                      value={editPaymentForm.accountId}
+                      onValueChange={v => setEditPaymentForm({ ...editPaymentForm, accountId: v })}
+                    >
+                      <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
+                      <SelectContent>
+                        {accounts
+                          .filter(a => editPaymentForm.paymentMode === 'Cash' ? a.type === 'CASH' : a.type === 'BANK')
+                          .map(a => (
+                            <SelectItem key={a.id} value={a.id}>
+                              {a.name} ({a.type}) — ₹{fmt(a.currentBalance || 0)}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </>
+              )}
+              <div className="col-span-2">
+                <Label>Reference No.</Label>
+                <Input
+                  value={editPaymentForm.referenceNo}
+                  onChange={e => setEditPaymentForm({ ...editPaymentForm, referenceNo: e.target.value })}
+                />
+              </div>
+              <div className="col-span-2">
+                <Label>Remark</Label>
+                <Input
+                  value={editPaymentForm.remark}
+                  onChange={e => setEditPaymentForm({ ...editPaymentForm, remark: e.target.value })}
+                />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditingPayment(null)}>Cancel</Button>
+            <Button onClick={handleSaveBillPaymentEdit}>Save Changes</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* View Expense Details Sheet */}
       <Sheet open={!!viewingExpense} onOpenChange={() => setViewingExpense(null)}>
