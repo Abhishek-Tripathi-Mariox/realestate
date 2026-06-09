@@ -162,7 +162,13 @@ const PageSizeSelect = ({ value, onChange }) => (
 //                   'Commission' so commission vendors live on their own page.
 //   - 'commission'→ Commission Ledger; same UI but scoped to vendor type
 //                   'Commission' only, and new vendors default to that type.
-export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedgerScope = 'default' } = {}) => {
+// `companyScope` runs the vendor ledger at company level (no society):
+//   - skips the society gate and society loading
+//   - vendor + bill loaders query the company-scope APIs instead
+//   - vendor + bill mutations write `societyId: null` / `scope: 'COMPANY'`
+// All other tab paths still expect `selectedSociety`, so this flag is only
+// safe with `singleTabMode` pinned to a vendor-tied tab (e.g. expenses).
+export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedgerScope = 'default', companyScope = false } = {}) => {
   const router = useRouter()
   const { toast } = useToast()
   const [isAuthenticated, setIsAuthenticated] = useState(false)
@@ -239,7 +245,9 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
   const [unassignedSales, setUnassignedSales] = useState([])
 
   const handleTabChange = (nextTab) => {
-    if (nextTab === 'expenses' || nextTab === 'margins') {
+    // In company-scope mode there is no society to pick — let the click
+    // through directly so the user lands on the tab content immediately.
+    if (!companyScope && (nextTab === 'expenses' || nextTab === 'margins')) {
       setPendingSocietyTab(nextTab)
       setShowSocietyGate(true)
       return
@@ -432,31 +440,35 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
   }, [isAuthenticated])
 
   useEffect(() => {
-    if (selectedSociety) {
+    if (selectedSociety || companyScope) {
       // Society changed — invalidate per-tab caches and load only the data
       // the user needs right now (top summary cards + the active tab). Other
       // tabs lazy-load on first switch via the activeTab effect below.
+      // In companyScope mode the loaders ignore selectedSociety and hit the
+      // company-scope APIs instead; we still want to (re)fetch on mount.
       loadedTabsRef.current = new Set()
-      loadSocietySummary()
+      if (!companyScope) loadSocietySummary()
       ensureTabLoaded(activeTab)
       loadAccounts() // Reload accounts when society changes (for scope filtering)
     }
-  }, [selectedSociety])
+  }, [selectedSociety, companyScope])
 
   useEffect(() => {
     if (activeTab !== 'expenses' && activeTab !== 'margins') {
       setHasShownProtectedTabGate(false)
       return
     }
+    // Company-scope tabs don't need a society pick, so skip the gate.
+    if (companyScope) return
     if (!hasShownProtectedTabGate) {
       setPendingSocietyTab(activeTab)
       setShowSocietyGate(true)
       setHasShownProtectedTabGate(true)
     }
-  }, [activeTab, hasShownProtectedTabGate])
+  }, [activeTab, hasShownProtectedTabGate, companyScope])
 
   useEffect(() => {
-    if (selectedSociety) ensureTabLoaded(activeTab)
+    if (selectedSociety || companyScope) ensureTabLoaded(activeTab)
   }, [activeTab])
 
   const loadMasterData = async () => {
@@ -742,15 +754,26 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
   }
 
   const loadVendorsTab = async () => {
-    const data = await apiCall(`/vendors?societyId=${selectedSociety}`)
+    const url = companyScope
+      ? '/vendors?scope=company'
+      : `/vendors?societyId=${selectedSociety}`
+    const data = await apiCall(url)
     setVendors(data)
   }
 
   const loadExpensesTab = async () => {
-    // Expense form needs vendor list; bundle.
+    // Expense form needs vendor list; bundle. In company-scope mode both
+    // calls target the company-level endpoint shapes so vendors + bills
+    // align (a society vendor can't own a company bill and vice versa).
+    const vendorsUrl = companyScope
+      ? '/vendors?scope=company'
+      : `/vendors?societyId=${selectedSociety}`
+    const billsUrl = companyScope
+      ? '/expense-bills?scope=COMPANY'
+      : `/expense-bills?societyId=${selectedSociety}`
     const [billsData, vendorsData] = await Promise.all([
-      apiCall(`/expense-bills?societyId=${selectedSociety}`),
-      apiCall(`/vendors?societyId=${selectedSociety}`),
+      apiCall(billsUrl),
+      apiCall(vendorsUrl),
     ])
     setExpenseBills(billsData)
     setVendors(vendorsData)
@@ -820,11 +843,14 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
   // cards plus only the tabs the user has actually visited — untouched
   // tabs stay cold and load fresh on first switch.
   const loadSocietyData = async () => {
-    if (!selectedSociety) return
+    // In companyScope mode there's no society to summarise, but we still
+    // want every previously-loaded tab refreshed after a mutation (vendor
+    // create, bill edit, etc.) — otherwise the table stays stale.
+    if (!selectedSociety && !companyScope) return
     const visitedTabs = Array.from(loadedTabsRef.current)
     loadedTabsRef.current = new Set()
     await Promise.all([
-      loadSocietySummary(),
+      companyScope ? Promise.resolve() : loadSocietySummary(),
       ...visitedTabs.map(tab => ensureTabLoaded(tab)),
     ])
   }
@@ -1089,7 +1115,12 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
       // Always fetch fresh. Use bill-level payments endpoint (only "alive"
       // payments) instead of /vendors/:id/ledger, which leaves stale txns
       // behind when a payment is edited and double-counts the totals.
-      const allBills = await apiCall(`/expense-bills?societyId=${selectedSociety}`)
+      // companyScope swaps the URL to the no-society variant so the drawer
+      // shows the vendor's company-level bills instead of a society's.
+      const billsUrl = companyScope
+        ? '/expense-bills?scope=COMPANY'
+        : `/expense-bills?societyId=${selectedSociety}`
+      const allBills = await apiCall(billsUrl)
       const billsForVendor = (allBills || []).filter(b => b.vendorId === vendor.id)
 
       const paymentBundles = await Promise.all(
@@ -1184,7 +1215,13 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
       const vendorIds = new Set(scopedVendors.map(v => v.id))
       const vendorById = new Map(scopedVendors.map(v => [v.id, v]))
 
-      const allBills = await apiCall(`/expense-bills?societyId=${selectedSociety}`)
+      // companyScope hits the company-level bills endpoint; without this swap
+      // we'd request `?societyId=null` which the backend treats as "no bills"
+      // and the drawer renders the empty state.
+      const billsUrl = companyScope
+        ? '/expense-bills?scope=COMPANY'
+        : `/expense-bills?societyId=${selectedSociety}`
+      const allBills = await apiCall(billsUrl)
       const scopedBills = (allBills || []).filter(b => vendorIds.has(b.vendorId))
 
       const paymentBundles = await Promise.all(
@@ -1947,8 +1984,16 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
   // Vendor Management
   const handleCreateVendor = async (formData) => {
     try {
-      await apiCall('/vendors', 'POST', { ...formData, societyId: selectedSociety })
-      await loadSocietyData()
+      // companyScope vendors are unscoped (societyId=null) so they show up
+      // in every society's vendor ledger by virtue of being "shared".
+      const societyId = companyScope ? null : selectedSociety
+      await apiCall('/vendors', 'POST', { ...formData, societyId })
+      if (companyScope) {
+        await loadVendorsTab()
+        await loadExpensesTab()
+      } else {
+        await loadSocietyData()
+      }
       setIsDialogOpen(false)
       toast({ title: 'Success', description: 'Vendor created successfully' })
     } catch (error) {
@@ -1984,7 +2029,12 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
       // doesn't accept it, so strip it before POSTing and replay it as a
       // separate POST to /payments once we have the new bill id.
       const { initialPayment, ...billBody } = formData
-      const bill = await apiCall('/expense-bills', 'POST', { ...billBody, societyId: selectedSociety })
+      // companyScope routes bills to the no-society path. Backend reads
+      // `scope=COMPANY` to null-out the societyId on the persisted bill.
+      const scopedBody = companyScope
+        ? { ...billBody, societyId: null, scope: 'COMPANY' }
+        : { ...billBody, societyId: selectedSociety }
+      const bill = await apiCall('/expense-bills', 'POST', scopedBody)
 
       if (initialPayment && bill?.id && initialPayment.amount > 0) {
         try {
@@ -3004,7 +3054,10 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
       </div>
 
       <div className="space-y-6">
-        {/* Society Selector & Actions */}
+        {/* Society Selector & Actions — hidden in companyScope mode, the
+            whole page operates at company level and a society pick would
+            be misleading. */}
+        {!companyScope && (
         <div className="mb-6 p-3 sm:p-4 rounded-2xl bg-white border border-slate-200/70 shadow-soft">
           <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-3">
             <div className="flex items-center gap-2 min-w-0">
@@ -3085,11 +3138,12 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
             )}
           </div>
         </div>
+        )}
 
-        {selectedSociety && summary && (
+        {(selectedSociety && summary) || companyScope ? (
           <>
             {/* Dashboard Summary Cards */}
-            {!singleTabMode && (
+            {!singleTabMode && !companyScope && (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
                 <StatCard
                   label="Total Purchases"
@@ -5665,7 +5719,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
               </TabsContent>
             </Tabs>
           </>
-        )}
+        ) : null}
       </div>
 
       {/* Partner/Purchase/Sale Ledger Drawer */}

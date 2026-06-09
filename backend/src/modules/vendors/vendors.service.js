@@ -9,7 +9,19 @@ const stripId = ({ _id, ...rest }) => rest;
 
 const list = async (query) => {
   const filter = notDeleted();
-  if (query.societyId) filter.societyId = query.societyId;
+  // `scope=company` returns only company-level vendors (societyId
+  // null/missing/empty). Used by the dedicated Company Vendor Ledger tab.
+  if (query.scope === 'company') {
+    Object.assign(filter, {
+      $or: [
+        { societyId: null },
+        { societyId: { $exists: false } },
+        { societyId: '' },
+      ],
+    });
+  } else if (query.societyId) {
+    filter.societyId = query.societyId;
+  }
   const vendors = await Vendor.find(filter).lean();
   if (vendors.length === 0) return [];
 
