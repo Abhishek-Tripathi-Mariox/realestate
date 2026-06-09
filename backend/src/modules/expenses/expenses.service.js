@@ -316,11 +316,20 @@ const listExpenses = async (query) => {
   // this page also surfaces "money owed", not just "money spent". The amount
   // shown is the still-outstanding balance, and the status field lets the FE
   // tell paid transactions apart from pending bills.
-  const billFilter = notDeleted();
+  // For COMPANY scope we need TWO $or clauses (one for soft-delete check,
+  // one for "no society"). Mongo only honours a single $or per query, so
+  // either-or via spread would silently drop one — that's how soft-deleted
+  // bills kept re-appearing in the Company Expenses table even after the
+  // user deleted them. Use the explicit $and helper from `notDeleted`.
+  let billFilter;
   if (scope === 'COMPANY') {
-    billFilter.$or = [{ societyId: null }, { societyId: { $exists: false } }];
+    billFilter = notDeleted({
+      $or: [{ societyId: null }, { societyId: { $exists: false } }],
+    });
   } else if (query.societyId && query.societyId !== 'all') {
-    billFilter.societyId = query.societyId;
+    billFilter = notDeleted({ societyId: query.societyId });
+  } else {
+    billFilter = notDeleted();
   }
   if (query.startDate || query.endDate) {
     billFilter.billDate = {};
