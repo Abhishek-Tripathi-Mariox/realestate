@@ -11,7 +11,7 @@ import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
 import {
   Scale, RefreshCw, ArrowDownCircle, ArrowUpCircle,
-  Users, Receipt, HandCoins, Briefcase, Wallet, IndianRupee, Download,
+  Users, Receipt, Coins, Briefcase, Wallet, IndianRupee, Download,
 } from 'lucide-react'
 import { AppShell } from '@/components/dashboard/AppShell'
 
@@ -30,12 +30,12 @@ const todayISO = () => {
 // section (e.g., partner payouts) a one-line change.
 const SECTIONS = {
   customers:     { label: 'Customers — pending sale balances',    Icon: Users,      hrefFor: () => null },
-  loansGiven:    { label: 'Loans given',                          Icon: HandCoins,  hrefFor: () => '/borrow' },
+  loansGiven:    { label: 'Loans given',                          Icon: Coins,  hrefFor: () => '/borrow' },
   dastiReceiv:   { label: 'Dasti — person owes us',               Icon: Wallet,     hrefFor: (r) => `/dasti-ledger/${r.refId}` },
   vendors:       { label: 'Vendor bills',                         Icon: Receipt,    hrefFor: () => '/expenses' },
   commissions:   { label: 'Commission bills',                     Icon: Receipt,    hrefFor: () => '/commission-ledger' },
   margins:       { label: 'Margin bills',                         Icon: Receipt,    hrefFor: () => '/margin-ledger' },
-  loansBorrowed: { label: 'Loans borrowed',                       Icon: HandCoins,  hrefFor: () => '/borrow' },
+  loansBorrowed: { label: 'Loans borrowed',                       Icon: Coins,  hrefFor: () => '/borrow' },
   dastiPayable:  { label: 'Dasti — we owe person',                Icon: Wallet,     hrefFor: (r) => `/dasti-ledger/${r.refId}` },
 }
 
@@ -333,11 +333,23 @@ export default function ReceivablesPayablesPage() {
 
 // Section renderer — one collapsible-ish block per category. Always shows
 // the subtotal so a zero subtotal is informative ("no pending here") rather
-// than hidden behind an expand toggle.
+// than hidden behind an expand toggle. Client-side pagination so a section
+// with 200 vendor bills doesn't dump everything on screen at once.
+// PAGE_SIZE is intentionally small (5) — most sections carry 4–15 rows in
+// practice, and 5 makes the pagination controls actually visible instead
+// of getting hidden behind a single oversized page.
+const PAGE_SIZE = 5
+
 function Section({ title, Icon, sectionData, hrefFor, color, note }) {
   const rows = sectionData?.rows || []
   const total = sectionData?.total || 0
   const accent = color === 'emerald' ? 'text-emerald-700' : 'text-rose-700'
+
+  const [page, setPage] = useState(1)
+  const pageCount = Math.max(1, Math.ceil(rows.length / PAGE_SIZE))
+  // Clamp page when filter / refresh shrinks the row set under us.
+  useEffect(() => { if (page > pageCount) setPage(1) }, [pageCount, page])
+  const pageRows = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
   return (
     <div className="rounded-lg border bg-slate-50/40">
@@ -357,45 +369,86 @@ function Section({ title, Icon, sectionData, hrefFor, color, note }) {
           No pending entries
         </div>
       ) : (
-        <div className="divide-y">
-          {rows.map(r => {
-            const href = hrefFor ? hrefFor(r) : null
-            const content = (
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-slate-800 truncate" title={r.name}>
-                    {r.name}
-                    {r.category && <span className="text-slate-400 font-normal"> · {r.category}</span>}
-                  </p>
-                  <p className="text-[11px] text-slate-500">
-                    {r.date && <span>{r.date}</span>}
-                    {r.total > 0 && (
-                      <span className="ml-2">
-                        Total ₹{fmt(r.total)} · Paid ₹{fmt(r.paid)}
-                      </span>
-                    )}
+        <>
+          <div className="divide-y">
+            {pageRows.map(r => {
+              const href = hrefFor ? hrefFor(r) : null
+              // Dasti rows aren't a single bill — `total` is "received from
+              // person" and `paid` is "returned to person", so use Dasti
+              // wording instead of the Bill-style "Total / Paid" labels.
+              const isDasti = r.type === 'DASTI'
+              const content = (
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-slate-800 truncate" title={r.name}>
+                      {r.name}
+                      {r.category && <span className="text-slate-400 font-normal"> · {r.category}</span>}
+                    </p>
+                    <p className="text-[11px] text-slate-500">
+                      {r.date && <span>{isDasti ? `Last activity ${r.date}` : r.date}</span>}
+                      {(r.total > 0 || r.paid > 0) && (
+                        <span className="ml-2">
+                          {isDasti
+                            ? `IN ₹${fmt(r.total)} · OUT ₹${fmt(r.paid)}`
+                            : `Total ₹${fmt(r.total)} · Paid ₹${fmt(r.paid)}`}
+                        </span>
+                      )}
+                      {r.phone && <span className="ml-2 text-slate-400">📞 {r.phone}</span>}
+                    </p>
+                  </div>
+                  <p className={`text-sm font-semibold whitespace-nowrap ${accent}`}>
+                    ₹{fmt(r.balance)}
                   </p>
                 </div>
-                <p className={`text-sm font-semibold whitespace-nowrap ${accent}`}>
-                  ₹{fmt(r.balance)}
-                </p>
-              </div>
-            )
-            return href ? (
-              <Link
-                key={`${r.type}-${r.refId}`}
-                href={href}
-                className="block px-3 py-2 hover:bg-white"
+              )
+              return href ? (
+                <Link
+                  key={`${r.type}-${r.refId}`}
+                  href={href}
+                  className="block px-3 py-2 hover:bg-white"
+                >
+                  {content}
+                </Link>
+              ) : (
+                <div key={`${r.type}-${r.refId}`} className="px-3 py-2">
+                  {content}
+                </div>
+              )
+            })}
+          </div>
+          {/* Always render the pagination strip whenever the section has
+              rows — even on a single-page section. Hiding it when
+              `pageCount <= 1` left the user thinking the feature didn't
+              ship; "Showing N of N" + a disabled pager is a clearer signal
+              that yes, this list is paginated, there's just nothing past
+              the first page yet. */}
+          <div className="flex items-center justify-between px-3 py-2 border-t bg-white/40 text-[11px] text-slate-600">
+            <span>
+              Showing {(page - 1) * PAGE_SIZE + 1}&ndash;{Math.min(page * PAGE_SIZE, rows.length)} of {rows.length}
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                className="px-2 py-0.5 rounded border bg-white disabled:opacity-40"
+                disabled={page <= 1}
+                onClick={() => setPage(p => Math.max(1, p - 1))}
               >
-                {content}
-              </Link>
-            ) : (
-              <div key={`${r.type}-${r.refId}`} className="px-3 py-2">
-                {content}
-              </div>
-            )
-          })}
-        </div>
+                Prev
+              </button>
+              <span className="px-1">
+                {page} / {pageCount}
+              </span>
+              <button
+                type="button"
+                className="px-2 py-0.5 rounded border bg-white disabled:opacity-40"
+                disabled={page >= pageCount}
+                onClick={() => setPage(p => Math.min(pageCount, p + 1))}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        </>
       )}
     </div>
   )

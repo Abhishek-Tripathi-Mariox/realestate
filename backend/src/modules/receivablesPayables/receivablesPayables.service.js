@@ -2,6 +2,7 @@ const { notDeleted } = require('../../utils/notDeleted');
 const {
   Sale, ExpenseBill, CommissionBill, MarginBill, Loan, Party,
   DastiTransaction, DastiPerson, Society, Vendor, Customer, Inventory,
+  ResaleDeal,
 } = require('../../models');
 
 // Receivables & Payables = consolidated view of who owes us money
@@ -126,15 +127,18 @@ const summary = async (query) => {
   let weOweDastiRows = [];
   if (!isSocietySpecific) {
     const dastiTxns = await DastiTransaction
-      .find({ isDeleted: { $ne: true } }, { personId: 1, type: 1, amount: 1 })
+      .find({ isDeleted: { $ne: true } }, { personId: 1, type: 1, amount: 1, txnDate: 1 })
       .lean();
     // Roll up per-person totals in JS — collection is small enough that the
-    // round-trip wouldn't be worth a separate aggregate pipeline.
+    // round-trip wouldn't be worth a separate aggregate pipeline. Track the
+    // most recent txnDate too so the row can show "last activity" context.
     const perPerson = {};
     for (const t of dastiTxns) {
-      const slot = perPerson[t.personId] || (perPerson[t.personId] = { in: 0, out: 0 });
-      if (t.type === 'IN') slot.in += Number(t.amount) || 0;
-      else slot.out += Number(t.amount) || 0;
+      const slot = perPerson[t.personId] || (perPerson[t.personId] = { in: 0, out: 0, lastDate: '' });
+      const amt = Number(t.amount) || 0;
+      if (t.type === 'IN') slot.in += amt;
+      else slot.out += amt;
+      if (t.txnDate && t.txnDate > slot.lastDate) slot.lastDate = t.txnDate;
     }
 
     const dastiPersonIds = Object.keys(perPerson);
@@ -149,22 +153,23 @@ const summary = async (query) => {
       const net = round(totals.in - totals.out);
       // net > 0 → firm received more than it gave back → firm OWES person
       // net < 0 → firm gave more than it received → person OWES firm
+      const base = {
+        type: 'DASTI',
+        refId: pid,
+        name: person.name || '—',
+        category: person.note || '',
+        // Surface activity context so the row carries the same shape as
+        // bill / loan rows: a date + a "total received" / "total paid"
+        // summary the user can scan without opening the ledger.
+        date: totals.lastDate || null,
+        total: round(totals.in),
+        paid: round(totals.out),
+        societyId: null,
+      };
       if (net < 0) {
-        dastiOwesUsRows.push({
-          type: 'DASTI',
-          refId: pid,
-          name: person.name || '—',
-          societyId: null,
-          balance: round(-net),
-        });
+        dastiOwesUsRows.push({ ...base, balance: round(-net) });
       } else if (net > 0) {
-        weOweDastiRows.push({
-          type: 'DASTI',
-          refId: pid,
-          name: person.name || '—',
-          societyId: null,
-          balance: round(net),
-        });
+        weOweDastiRows.push({ ...base, balance: round(net) });
       }
     }
     dastiOwesUsRows.sort((a, b) => b.balance - a.balance);
@@ -215,7 +220,11 @@ const summary = async (query) => {
     .map(b => ({
       type: 'COMMISSION_BILL',
       refId: b.id,
-      name: b.brokerName || b.vendorName || '—',
+      // CommissionBill stores the recipient in `brokerName`. (The earlier
+      // `vendorName` fallback was a hangover from when these reused the
+      // expense-bill model — it never gets set on real commission rows.)
+      name: b.brokerName || '—',
+      category: b.description || '',
       societyId: b.societyId || null,
       date: b.billDate || null,
       total: round(b.amount),
@@ -225,21 +234,43 @@ const summary = async (query) => {
     .filter(r => r.balance > 0)
     .sort((a, b) => b.balance - a.balance);
 
-  // 3. Margin bills.
+  // 3. Margin bills — model has no recipient name; it links to a ResaleDeal
+  //    where the human-readable context (seller name + unit number) lives.
+  //    Enrich via a single batched ResaleDeal + Inventory lookup so the row
+  //    reads like "Seller — Unit 12" instead of just "—".
   const marginFilter = applySocietyFilter(notDeleted(), societyId);
   const marginBills = await MarginBill.find(marginFilter).lean();
-  const marginRows = marginBills
-    .map(b => ({
-      type: 'MARGIN_BILL',
-      refId: b.id,
-      name: b.partnerName || b.brokerName || '—',
-      societyId: b.societyId || null,
-      date: b.billDate || null,
-      total: round(b.amount),
-      paid: round(b.paidAmount),
-      balance: round(Math.max(0, (b.amount || 0) - (b.paidAmount || 0))),
-    }))
-    .filter(r => r.balance > 0)
+  const pendingMarginBills = marginBills.filter(b => Math.max(0, (b.amount || 0) - (b.paidAmount || 0)) > 0);
+
+  const resaleDealIds = [...new Set(pendingMarginBills.map(b => b.resaleDealId).filter(Boolean))];
+  const resaleDeals = resaleDealIds.length
+    ? await ResaleDeal.find({ id: { $in: resaleDealIds } }).lean()
+    : [];
+  const resaleDealById = Object.fromEntries(resaleDeals.map(d => [d.id, d]));
+  const marginInventoryIds = [...new Set(resaleDeals.map(d => d.inventoryId).filter(Boolean))];
+  const marginInventories = marginInventoryIds.length
+    ? await Inventory.find({ id: { $in: marginInventoryIds } }).lean()
+    : [];
+  const marginInventoryById = Object.fromEntries(marginInventories.map(i => [i.id, i]));
+
+  const marginRows = pendingMarginBills
+    .map(b => {
+      const deal = resaleDealById[b.resaleDealId];
+      const inv = deal ? marginInventoryById[deal.inventoryId] : null;
+      const name = (deal?.sellerName || '').trim() || (deal?.buyerName || '').trim() || '—';
+      const unit = inv?.inventoryNumber ? `Unit ${inv.inventoryNumber}` : (b.description || '');
+      return {
+        type: 'MARGIN_BILL',
+        refId: b.id,
+        name,
+        category: unit,
+        societyId: b.societyId || null,
+        date: b.billDate || null,
+        total: round(b.amount),
+        paid: round(b.paidAmount),
+        balance: round(Math.max(0, (b.amount || 0) - (b.paidAmount || 0))),
+      };
+    })
     .sort((a, b) => b.balance - a.balance);
 
   // 4. Loans borrowed.
