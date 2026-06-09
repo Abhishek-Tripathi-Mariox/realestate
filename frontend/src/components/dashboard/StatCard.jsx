@@ -53,10 +53,24 @@ export function StatCard({
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
           <p className="text-xs font-medium text-slate-500">{label}</p>
-          <p className="mt-2 text-2xl font-bold text-slate-900 tracking-tight truncate">
+          {/* `title` gives a native browser tooltip on hover — handy when a
+              very large amount is truncated by the `truncate` class so the
+              user can still see the full value without having to widen the
+              card. Stringify because the formatted value can be a number. */}
+          <p
+            className="mt-2 text-2xl font-bold text-slate-900 tracking-tight truncate"
+            title={value != null ? String(value) : undefined}
+          >
             {value}
           </p>
-          {sub && <p className="mt-1 text-xs text-slate-400 truncate">{sub}</p>}
+          {sub && (
+            <p
+              className="mt-1 text-xs text-slate-400 truncate"
+              title={String(sub)}
+            >
+              {sub}
+            </p>
+          )}
         </div>
 
         {/* Circular ring */}

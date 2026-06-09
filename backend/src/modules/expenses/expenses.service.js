@@ -206,18 +206,22 @@ const listExpenses = async (query) => {
   // Commission flows have their own ledger now, so we drop them from the
   // Expense Ledger summary too — otherwise commission payments would inflate
   // the "Total Paid" and "Bank/Other" cards on this page.
+  // Margin payments live on their own Margin Ledger page; including them
+  // here previously made the "Total Paid" card disagree with the Quick+Bills
+  // breakdown the user sees. Keep this page focused on standalone Quick
+  // Expenses and Add-Bill payments only.
   if (scope === 'COMPANY') {
     summaryFilter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] };
     summaryFilter.$or = [{ societyId: null }, { societyId: { $exists: false } }];
   } else if (scope === 'SOCIETY') {
-    summaryFilter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'MARGIN_PAYMENT'] };
+    summaryFilter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] };
     if (query.societyId && query.societyId !== 'all') {
       summaryFilter.societyId = query.societyId;
     } else {
       summaryFilter.societyId = { $ne: null };
     }
   } else {
-    summaryFilter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE', 'MARGIN_PAYMENT'] };
+    summaryFilter.sourceType = { $in: ['EXPENSE_PAYMENT', 'QUICK_EXPENSE'] };
     if (query.societyId && query.societyId !== 'all') {
       summaryFilter.societyId = query.societyId;
     }
@@ -278,6 +282,14 @@ const listExpenses = async (query) => {
         totalExpense: { $sum: '$amount' },
         cashExpense: { $sum: { $cond: [{ $eq: ['$paymentMode', 'Cash'] }, '$amount', 0] } },
         bankExpense: { $sum: { $cond: [{ $ne: ['$paymentMode', 'Cash'] }, '$amount', 0] } },
+        // Break the grand total down by where the OUT came from. Users want
+        // to verify both Quick Expenses AND Add-Bill payments contribute to
+        // the same "Total Paid" card — without this split the card is a
+        // black box.
+        quickExpensePaid: { $sum: { $cond: [{ $eq: ['$sourceType', 'QUICK_EXPENSE'] }, '$amount', 0] } },
+        billPaymentPaid: { $sum: { $cond: [{ $eq: ['$sourceType', 'EXPENSE_PAYMENT'] }, '$amount', 0] } },
+        quickExpenseCount: { $sum: { $cond: [{ $eq: ['$sourceType', 'QUICK_EXPENSE'] }, 1, 0] } },
+        billPaymentCount: { $sum: { $cond: [{ $eq: ['$sourceType', 'EXPENSE_PAYMENT'] }, 1, 0] } },
         transactionCount: { $sum: 1 },
       },
     },
@@ -288,9 +300,17 @@ const listExpenses = async (query) => {
         totalExpense: roundPaise(summaryAgg[0].totalExpense),
         cashExpense: roundPaise(summaryAgg[0].cashExpense),
         bankExpense: roundPaise(summaryAgg[0].bankExpense),
+        quickExpensePaid: roundPaise(summaryAgg[0].quickExpensePaid),
+        billPaymentPaid: roundPaise(summaryAgg[0].billPaymentPaid),
+        quickExpenseCount: summaryAgg[0].quickExpenseCount,
+        billPaymentCount: summaryAgg[0].billPaymentCount,
         transactionCount: summaryAgg[0].transactionCount,
       }
-    : { totalExpense: 0, cashExpense: 0, bankExpense: 0, transactionCount: 0 };
+    : {
+        totalExpense: 0, cashExpense: 0, bankExpense: 0,
+        quickExpensePaid: 0, billPaymentPaid: 0,
+        quickExpenseCount: 0, billPaymentCount: 0, transactionCount: 0,
+      };
 
   // Synthesize virtual rows for unpaid expense + commission bill balances so
   // this page also surfaces "money owed", not just "money spent". The amount

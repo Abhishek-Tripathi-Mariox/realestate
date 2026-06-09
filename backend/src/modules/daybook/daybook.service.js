@@ -24,6 +24,19 @@ const list = async (query) => {
     filter.txnDate.$lte = query.endDate;
   }
 
+  // Independent createdAt range — same idea as Money-Received: lets the user
+  // catch entries logged after the fact (back-dated bills, retrospective
+  // expense entries) without depending on `txnDate`.
+  if (query.createdFrom || query.createdTo) {
+    filter.createdAt = {};
+    if (query.createdFrom) {
+      filter.createdAt.$gte = new Date(`${query.createdFrom}T00:00:00.000Z`);
+    }
+    if (query.createdTo) {
+      filter.createdAt.$lte = new Date(`${query.createdTo}T23:59:59.999Z`);
+    }
+  }
+
   if (query.txnStatus === 'active') {
     filter.isVoided = { $ne: true };
   } else if (query.txnStatus === 'voided') {
@@ -86,6 +99,18 @@ const summary = async (query) => {
   if (query.endDate) {
     filter.txnDate = filter.txnDate || {};
     filter.txnDate.$lte = query.endDate;
+  }
+  // Mirror the createdAt range filter so summary totals match the filtered
+  // list view — without this the list could show 10 rows while the cards
+  // claim 50 because the summary ignores the date constraint.
+  if (query.createdFrom || query.createdTo) {
+    filter.createdAt = {};
+    if (query.createdFrom) {
+      filter.createdAt.$gte = new Date(`${query.createdFrom}T00:00:00.000Z`);
+    }
+    if (query.createdTo) {
+      filter.createdAt.$lte = new Date(`${query.createdTo}T23:59:59.999Z`);
+    }
   }
 
   // Group on the DB side first so we don't pull every transaction in the

@@ -74,7 +74,12 @@ export default function DaybookPage() {
     sourceType: 'all',
     txnStatus: 'all', // Default to 'all' to show ALL including deleted/voided for audit trail
     startDate: '',
-    endDate: ''
+    endDate: '',
+    // Independent filter on entry creation timestamp — useful when the user
+    // wants to see "what was logged this week" regardless of the txnDate
+    // each row carries (back-dated entries surface here).
+    createdFrom: '',
+    createdTo: '',
   })
 
   // Dialog states
@@ -232,7 +237,9 @@ export default function DaybookPage() {
       if (filters.sourceType && filters.sourceType !== 'all') params.append('sourceType', filters.sourceType)
       if (filters.startDate) params.append('startDate', filters.startDate)
       if (filters.endDate) params.append('endDate', filters.endDate)
-      
+      if (filters.createdFrom) params.append('createdFrom', filters.createdFrom)
+      if (filters.createdTo) params.append('createdTo', filters.createdTo)
+
       const data = await apiCall(`/daybook?${params.toString()}`)
       setTransactions(data.transactions || [])
       
@@ -264,7 +271,9 @@ export default function DaybookPage() {
       if (filters.accountId && filters.accountId !== 'all') params.append('accountId', filters.accountId)
       if (filters.startDate) params.append('startDate', filters.startDate)
       if (filters.endDate) params.append('endDate', filters.endDate)
-      
+      if (filters.createdFrom) params.append('createdFrom', filters.createdFrom)
+      if (filters.createdTo) params.append('createdTo', filters.createdTo)
+
       const data = await apiCall(`/daybook/summary?${params.toString()}`)
       setSummary(data)
     } catch (error) {
@@ -352,7 +361,9 @@ export default function DaybookPage() {
       sourceType: 'all',
       txnStatus: 'all',
       startDate: '',
-      endDate: ''
+      endDate: '',
+      createdFrom: '',
+      createdTo: '',
     })
     // Reset pagination to first page when clearing filters
     setPagination(prev => ({ ...prev, page: 1 }))
@@ -840,13 +851,26 @@ export default function DaybookPage() {
               </div>
               
               <div>
-                <Label className="text-xs">From Date</Label>
+                <Label className="text-xs">Txn Date From</Label>
                 <Input type="date" value={filters.startDate} onChange={e => setFilters({...filters, startDate: e.target.value})} />
               </div>
-              
+
               <div>
-                <Label className="text-xs">To Date</Label>
+                <Label className="text-xs">Txn Date To</Label>
                 <Input type="date" value={filters.endDate} onChange={e => setFilters({...filters, endDate: e.target.value})} />
+              </div>
+
+              {/* Independent range on entry creation timestamp — catches
+                  back-dated bills + late entries even when their txnDate
+                  falls outside the txn-date window above. */}
+              <div>
+                <Label className="text-xs">Entry Created From</Label>
+                <Input type="date" value={filters.createdFrom} onChange={e => setFilters({...filters, createdFrom: e.target.value})} />
+              </div>
+
+              <div>
+                <Label className="text-xs">Entry Created To</Label>
+                <Input type="date" value={filters.createdTo} onChange={e => setFilters({...filters, createdTo: e.target.value})} />
               </div>
             </div>
           </CardContent>
@@ -917,7 +941,21 @@ export default function DaybookPage() {
                           #{txn.shortId || txn.id?.substring(0, 8)}
                         </TableCell>
                         <TableCell className="whitespace-nowrap">
-                          {new Date(txn.txnDate).toLocaleDateString()} {new Date(txn.txnDate).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                          {/* Two-line cell: the user-entered txn date on top,
+                              the system-recorded createdAt below in muted
+                              text. Lets the user spot back-dated entries
+                              (txn date in the past, created today) at a
+                              glance without adding a whole new column. */}
+                          <div>{new Date(txn.txnDate).toLocaleDateString()}</div>
+                          {txn.createdAt && (
+                            <div
+                              className="text-[10px] text-gray-500 mt-0.5"
+                              title={`Entry created: ${new Date(txn.createdAt).toLocaleString()}`}
+                            >
+                              entered {new Date(txn.createdAt).toLocaleDateString()}{' '}
+                              {new Date(txn.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          )}
                         </TableCell>
                         <TableCell>{txn.societyName || '-'}</TableCell>
                         <TableCell>

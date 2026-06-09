@@ -23,6 +23,7 @@ import {
   StickyNote,
   Landmark,
   ArrowDownToLine,
+  Scale,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -67,6 +68,7 @@ export function Sidebar({ user, onLogout, onChangePassword, mobileOpen = false, 
     { label: 'Firm Ledger', href: '/firm-ledger', icon: Briefcase },
     { label: 'Bank', href: '/bank', icon: Landmark },
     { label: 'Money Received', href: '/money-received', icon: ArrowDownToLine },
+    { label: 'Receivables & Payables', href: '/receivables-payables', icon: Scale },
     { label: 'Notes', href: '/notes', icon: StickyNote },
   ]
 

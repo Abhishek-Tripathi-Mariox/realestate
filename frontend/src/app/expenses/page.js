@@ -1019,9 +1019,35 @@ export default function ExpensesPage() {
         {/* Summary cards — ledger-style compact colored grid */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
           <Card className="bg-red-50/60">
-            <CardContent className="p-4 text-center">
+            <CardContent
+              className="p-4 text-center"
+              // Native title gives the user the full breakdown on hover even
+              // when the tiny sub-line below gets truncated on narrow screens.
+              title={
+                `Quick Expense: ₹${fmt(summary.quickExpensePaid || 0)} (${summary.quickExpenseCount || 0})\n` +
+                `Bill Payments: ₹${fmt(summary.billPaymentPaid || 0)} (${summary.billPaymentCount || 0})`
+              }
+            >
               <p className="text-xs uppercase tracking-wide text-red-700">Total Paid</p>
               <p className="text-2xl font-bold text-red-700 mt-1">₹{fmt(summary.totalExpense)}</p>
+              {/* Inline breakdown so the user can verify both sources are
+                  contributing without having to hover. The labels (`entries`
+                  vs `payments`) matter — bill count differs from payment
+                  count because one bill can absorb multiple payments. */}
+              <div className="mt-2 text-[10px] text-red-700/80 leading-tight space-y-0.5">
+                <p>
+                  <span className="opacity-70">Quick:</span> ₹{fmt(summary.quickExpensePaid || 0)}
+                  <span className="opacity-60 ml-1">
+                    ({summary.quickExpenseCount || 0} {(summary.quickExpenseCount || 0) === 1 ? 'entry' : 'entries'})
+                  </span>
+                </p>
+                <p>
+                  <span className="opacity-70">Bills:</span> ₹{fmt(summary.billPaymentPaid || 0)}
+                  <span className="opacity-60 ml-1">
+                    ({summary.billPaymentCount || 0} {(summary.billPaymentCount || 0) === 1 ? 'payment' : 'payments'})
+                  </span>
+                </p>
+              </div>
             </CardContent>
           </Card>
           <Card className="bg-amber-50/60">
