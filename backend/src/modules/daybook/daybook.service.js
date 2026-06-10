@@ -48,9 +48,13 @@ const list = async (query) => {
   const skip = (page - 1) * limit;
 
   const totalCount = await Transaction.countDocuments(filter);
+  // Sort primarily by createdAt so back-dated entries surface at the top
+  // when they were logged — the txnDate the user typed can be in the past,
+  // but the user wants to scan "what got entered most recently". txnDate
+  // stays as the tiebreaker for entries created in the same instant.
   const transactions = await Transaction
     .find(filter)
-    .sort({ txnDate: -1, createdAt: -1 })
+    .sort({ createdAt: -1, txnDate: -1 })
     .skip(skip)
     .limit(limit)
     .lean();
