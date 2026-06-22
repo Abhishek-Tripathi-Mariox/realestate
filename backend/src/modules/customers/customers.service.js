@@ -3,6 +3,7 @@ const { notDeleted } = require('../../utils/notDeleted');
 const { pick } = require('../../utils/pick');
 const {
   Customer, Sale, CustomerPayment, PaymentAllocation, Inventory, SalePaymentEntry,
+  ResaleDeal, ResaleBuyerPayment,
 } = require('../../models');
 
 // Fields a client may set on update — explicit allowlist guards against
@@ -171,7 +172,7 @@ const remove = async (id) => {
 
 const listSales = async (customerId) => {
   const sales = await Sale.find(notDeleted({ customerId })).lean();
-  const enriched = await Promise.all(sales.map(async (s) => {
+  const saleRows = await Promise.all(sales.map(async (s) => {
     const inventory = s.inventoryId ? await Inventory.findOne({ id: s.inventoryId }).lean() : null;
     const [allocations, saleEntries] = await Promise.all([
       PaymentAllocation.find({ saleId: s.id }).lean(),
@@ -181,13 +182,69 @@ const listSales = async (customerId) => {
     const allocatedAmount = allocations.reduce((sum, a) => sum + (a.amount || 0), 0)
       + ledgerNet;
     return {
-      ...s,
+      ...stripId(s),
+      _isResale: false,
       inventoryNumber: inventory?.inventoryNumber || 'N/A',
+      inventoryType: inventory?.type || '',
+      phase: inventory?.phase || '',
       allocatedAmount,
       pendingBalance: (s.finalAmount || 0) - allocatedAmount,
     };
   }));
-  return enriched.map(stripId);
+
+  // Resale rows: ResaleDeal has no buyerCustomerId yet, so match on the
+  // customer's name (case-insensitive, trimmed). The user expects to see
+  // every resale flat this person has bought — the allocation table treats
+  // them just like a sale row.
+  const customer = await Customer.findOne({ id: customerId }).lean();
+  let resaleRows = [];
+  if (customer?.name) {
+    const target = customer.name.trim().toLowerCase();
+    const resaleDeals = await ResaleDeal.find(notDeleted({})).lean();
+    const matchedDeals = resaleDeals.filter(d =>
+      (d.buyerName || '').trim().toLowerCase() === target);
+
+    if (matchedDeals.length) {
+      const dealIds = matchedDeals.map(d => d.id);
+      const invIds = matchedDeals.map(d => d.inventoryId).filter(Boolean);
+      const [inventories, buyerPayments, dealAllocations] = await Promise.all([
+        invIds.length ? Inventory.find({ id: { $in: invIds } }).lean() : [],
+        ResaleBuyerPayment.find(notDeleted({ dealId: { $in: dealIds } })).lean(),
+        PaymentAllocation.find({ resaleDealId: { $in: dealIds } }).lean(),
+      ]);
+      const invById = Object.fromEntries(inventories.map(i => [i.id, i]));
+      const paidByDeal = buyerPayments.reduce((acc, p) => {
+        acc[p.dealId] = (acc[p.dealId] || 0) + (p.amount || 0);
+        return acc;
+      }, {});
+      const allocByDeal = dealAllocations.reduce((acc, a) => {
+        acc[a.resaleDealId] = (acc[a.resaleDealId] || 0) + (a.amount || 0);
+        return acc;
+      }, {});
+
+      resaleRows = matchedDeals.map(d => {
+        const inv = d.inventoryId ? invById[d.inventoryId] : null;
+        const finalAmount = d.buyerPurchaseAmount || d.resalePrice || 0;
+        const allocatedAmount = (paidByDeal[d.id] || 0) + (allocByDeal[d.id] || 0);
+        return {
+          ...stripId(d),
+          _isResale: true,
+          // Normalize to the sale shape so the frontend renders both kinds
+          // uniformly — the same table, the same inputs, the same maxAmount
+          // math. `finalAmount` is what the buyer is supposed to pay for the
+          // resale (buyerPurchaseAmount falls back to resalePrice).
+          finalAmount,
+          inventoryNumber: inv?.inventoryNumber || 'N/A',
+          inventoryType: inv?.type || '',
+          phase: inv?.phase || '',
+          allocatedAmount,
+          pendingBalance: finalAmount - allocatedAmount,
+        };
+      });
+    }
+  }
+
+  return [...saleRows, ...resaleRows];
 };
 
 const ledger = async (customerId) => {

@@ -1660,16 +1660,20 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
     try {
       const customerSales = await apiCall(`/customers/${payment.customerId}/sales`)
       const existingAllocations = await apiCall(`/customer-payments/${payment.id}/allocations`)
-      
-      // Merge existing allocations into sales data
-      const salesWithAllocations = customerSales.map(sale => {
-        const existing = existingAllocations.find(a => a.saleId === sale.id)
+
+      // Merge existing allocations into sales data. Resale rows (`_isResale`)
+      // match on `resaleDealId`, sale rows on `saleId` — the allocation record
+      // carries one or the other depending on which target it was saved for.
+      const salesWithAllocations = customerSales.map(row => {
+        const existing = row._isResale
+          ? existingAllocations.find(a => a.resaleDealId === row.id)
+          : existingAllocations.find(a => a.saleId === row.id)
         return {
-          ...sale,
-          currentAllocation: existing?.allocatedAmount || 0
+          ...row,
+          currentAllocation: existing?.allocatedAmount || 0,
         }
       })
-      
+
       setCustomerSalesForAllocation(salesWithAllocations)
       setCurrentPaymentForAllocation(payment)
       setShowAllocationModal(true)
@@ -1720,11 +1724,13 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
       if (currentPaymentForAllocation) {
         const customerSales = await apiCall(`/customers/${currentPaymentForAllocation.customerId}/sales`)
         const existingAllocations = await apiCall(`/customer-payments/${currentPaymentForAllocation.id}/allocations`)
-        const salesWithAllocations = customerSales.map(sale => {
-          const existing = existingAllocations.find(a => a.saleId === sale.id)
+        const salesWithAllocations = customerSales.map(row => {
+          const existing = row._isResale
+            ? existingAllocations.find(a => a.resaleDealId === row.id)
+            : existingAllocations.find(a => a.saleId === row.id)
           return {
-            ...sale,
-            currentAllocation: existing?.allocatedAmount || 0
+            ...row,
+            currentAllocation: existing?.allocatedAmount || 0,
           }
         })
         setCustomerSalesForAllocation(salesWithAllocations)
@@ -11327,7 +11333,13 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
 
   if (!deal) return null
 
-  const buyerPaid = buyerPayments.reduce((sum, p) => sum + p.amount, 0)
+  // Backend `list()` now sums ResaleBuyerPayment + PaymentAllocation
+  // (customer-payment → resale-deal allocations) into `deal.buyerPaid`.
+  // Prefer that authoritative number when it exists so allocations made
+  // from the customer-payment modal show up here too. Fall back to the
+  // local sum when the deal row predates the field (older fetches).
+  const buyerPaidFromPayments = buyerPayments.reduce((sum, p) => sum + p.amount, 0)
+  const buyerPaid = typeof deal.buyerPaid === 'number' ? deal.buyerPaid : buyerPaidFromPayments
   const buyerBalance = (deal.buyerPurchaseAmount || deal.resalePrice || 0) - buyerPaid
   const sellerPaid = sellerPayouts.reduce((sum, p) => sum + p.amount, 0)
   const sellerPayoutExpected = deal.sellerPayoutAmount || Math.max(0, (deal.resalePrice || 0) - (deal.companyCommission || 0))
@@ -12260,11 +12272,15 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
   // renders blank instead of "0" — easier to type into. Existing allocations
   // (re-opening the modal to tweak) keep their saved number so the user sees
   // what's already there.
+  //
+  // Each row carries `targetId` + `isResale` so it can map back to either a
+  // Sale or a ResaleDeal on save without us having to thread two arrays.
   const [allocations, setAllocations] = useState(
     sales.map(sale => ({
-      saleId: sale.id,
+      targetId: sale.id,
+      isResale: !!sale._isResale,
       amount: sale.currentAllocation ? sale.currentAllocation : '',
-      maxAmount: sale.pendingBalance + (sale.currentAllocation || 0)
+      maxAmount: sale.pendingBalance + (sale.currentAllocation || 0),
     }))
   )
   const [showCreateSaleForm, setShowCreateSaleForm] = useState(false)
@@ -12284,9 +12300,10 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
   useEffect(() => {
     setAllocations(
       sales.map(sale => ({
-        saleId: sale.id,
+        targetId: sale.id,
+        isResale: !!sale._isResale,
         amount: sale.currentAllocation ? sale.currentAllocation : '',
-        maxAmount: sale.pendingBalance + (sale.currentAllocation || 0)
+        maxAmount: sale.pendingBalance + (sale.currentAllocation || 0),
       }))
     )
   }, [sales])
@@ -12295,27 +12312,27 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
   const unallocated = payment.amount - totalAllocated
   const isValid = Math.abs(unallocated) < 0.01 // Allow small floating point differences
 
-  const handleAllocationChange = (saleId, value) => {
+  const handleAllocationChange = (targetId, value) => {
     // Allow empty string (user clearing the field)
     if (value === '') {
-      setAllocations(prev => prev.map(a => a.saleId === saleId ? { ...a, amount: '' } : a))
+      setAllocations(prev => prev.map(a => a.targetId === targetId ? { ...a, amount: '' } : a))
       return
     }
     const numValue = parseFloat(value)
     if (isNaN(numValue) || numValue < 0) return
 
     setAllocations(prev => {
-      const target = prev.find(a => a.saleId === saleId)
+      const target = prev.find(a => a.targetId === targetId)
       if (!target) return prev
-      // Cap by both: this sale's remaining balance AND the payment's
+      // Cap by both: this row's remaining balance AND the payment's
       // unallocated portion — neither limit can be exceeded.
       const otherAllocated = prev
-        .filter(a => a.saleId !== saleId)
+        .filter(a => a.targetId !== targetId)
         .reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0)
       const remainingPayment = Math.max(0, (payment.amount || 0) - otherAllocated)
       const cap = Math.min(target.maxAmount || 0, remainingPayment)
       const capped = Math.min(numValue, cap)
-      return prev.map(a => a.saleId === saleId ? { ...a, amount: capped } : a)
+      return prev.map(a => a.targetId === targetId ? { ...a, amount: capped } : a)
     })
   }
 
@@ -12334,7 +12351,18 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
   }
 
   const handleSave = () => {
-    onSave(allocations.map(a => ({ saleId: a.saleId, amount: parseFloat(a.amount) || 0 })))
+    // Backend allocations carry exactly one of saleId / resaleDealId. We
+    // route every row by its `isResale` flag so a saved resale allocation
+    // shows up in the resale deal's buyerPaid total rather than getting
+    // dropped on the floor (no saleId match = silent loss).
+    onSave(
+      allocations.map(a => {
+        const amt = parseFloat(a.amount) || 0
+        return a.isResale
+          ? { resaleDealId: a.targetId, amount: amt }
+          : { saleId: a.targetId, amount: amt }
+      })
+    )
   }
 
   const handleCreateSaleSubmit = async (e) => {
@@ -12545,11 +12573,16 @@ const PaymentAllocationForm = ({ payment, sales, onSave, onCancel, inventory = [
             </TableHeader>
             <TableBody>
               {sales.map((sale, idx) => {
-                const allocation = allocations.find(a => a.saleId === sale.id)
+                const allocation = allocations.find(a => a.targetId === sale.id)
                 return (
                   <TableRow key={sale.id}>
                     <TableCell>
-                      <div className="font-medium">{sale.inventoryNumber} ({sale.inventoryType})</div>
+                      <div className="font-medium flex items-center gap-2">
+                        <span>{sale.inventoryNumber} {sale.inventoryType ? `(${sale.inventoryType})` : ''}</span>
+                        {sale._isResale && (
+                          <Badge variant="secondary" className="text-[10px] bg-purple-100 text-purple-700 hover:bg-purple-100">Resale</Badge>
+                        )}
+                      </div>
                       <div className="text-xs text-muted-foreground">Phase: {sale.phase || 'N/A'}</div>
                     </TableCell>
                     <TableCell className="text-right">₹{(sale.finalAmount || 0).toLocaleString('en-IN')}</TableCell>

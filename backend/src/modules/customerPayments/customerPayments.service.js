@@ -3,7 +3,7 @@ const { notDeleted } = require('../../utils/notDeleted');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   CustomerPayment, Customer, Account, PaymentAllocation, Transaction,
-  Sale, SalePaymentEntry,
+  Sale, SalePaymentEntry, ResaleDeal, ResaleBuyerPayment,
 } = require('../../models');
 
 const list = async (query) => {
@@ -28,15 +28,27 @@ const list = async (query) => {
     ? await PaymentAllocation.find({ paymentId: { $in: paymentIds } }).lean()
     : [];
 
-  // Self-heal: drop allocations whose sale has been (soft-)deleted, so a
-  // payment whose sale was removed shows the freed-up money as unallocated
-  // again — even if PaymentAllocation cleanup wasn't run at delete time.
+  // Self-heal: drop allocations whose target (sale or resale deal) has been
+  // (soft-)deleted, so a payment whose target was removed shows the freed-up
+  // money as unallocated again — even if PaymentAllocation cleanup wasn't
+  // run at delete time.
   const allocSaleIds = [...new Set(rawAllocations.map(a => a.saleId).filter(Boolean))];
-  const liveSales = allocSaleIds.length
-    ? await Sale.find(notDeleted({ id: { $in: allocSaleIds } })).lean()
-    : [];
+  const allocResaleIds = [...new Set(rawAllocations.map(a => a.resaleDealId).filter(Boolean))];
+  const [liveSales, liveResaleDeals] = await Promise.all([
+    allocSaleIds.length
+      ? Sale.find(notDeleted({ id: { $in: allocSaleIds } })).lean()
+      : Promise.resolve([]),
+    allocResaleIds.length
+      ? ResaleDeal.find(notDeleted({ id: { $in: allocResaleIds } })).lean()
+      : Promise.resolve([]),
+  ]);
   const liveSaleIds = new Set(liveSales.map(s => s.id));
-  const allocations = rawAllocations.filter(a => liveSaleIds.has(a.saleId));
+  const liveResaleIds = new Set(liveResaleDeals.map(d => d.id));
+  const allocations = rawAllocations.filter(a => {
+    if (a.saleId) return liveSaleIds.has(a.saleId);
+    if (a.resaleDealId) return liveResaleIds.has(a.resaleDealId);
+    return false;
+  });
 
   const allocatedByPayment = allocations.reduce((acc, a) => {
     acc[a.paymentId] = (acc[a.paymentId] || 0) + (a.amount || 0);
@@ -245,17 +257,25 @@ const setAllocations = async (paymentId, body, userId) => {
     return { error: `Allocation total (${totalAllocated}) exceeds payment amount (${payment.amount})`, status: 400 };
   }
 
+  // Bucket incoming rows by target. Each row must carry exactly one of
+  // saleId / resaleDealId — the frontend stamps whichever applies from the
+  // `_isResale` flag on each row.
+  const incomingBySale = {};
+  const incomingByResaleDeal = {};
+  for (const a of incoming) {
+    const amt = parseFloat(a.amount) || 0;
+    if (amt <= 0) continue;
+    if (a.saleId) {
+      incomingBySale[a.saleId] = (incomingBySale[a.saleId] || 0) + amt;
+    } else if (a.resaleDealId) {
+      incomingByResaleDeal[a.resaleDealId] = (incomingByResaleDeal[a.resaleDealId] || 0) + amt;
+    }
+  }
+
   // Per-sale cap: each new allocation, combined with the sale's existing net
   // ledger balance and OTHER payments' allocations, must not push that sale's
   // total paid past its finalAmount. Stops typo over-allocation (e.g. typing
   // an extra zero on a single line) from bypassing the per-payment check.
-  const incomingBySale = {};
-  for (const a of incoming) {
-    const amt = parseFloat(a.amount) || 0;
-    if (amt > 0 && a.saleId) {
-      incomingBySale[a.saleId] = (incomingBySale[a.saleId] || 0) + amt;
-    }
-  }
   const incomingSaleIds = Object.keys(incomingBySale);
   if (incomingSaleIds.length) {
     const [sales, otherAllocs, ledgerEntries] = await Promise.all([
@@ -302,14 +322,58 @@ const setAllocations = async (paymentId, body, userId) => {
     }
   }
 
+  // Per-resale-deal cap — same shape as the sale cap. The deal's "already
+  // paid" is ResaleBuyerPayment rows + PaymentAllocations from OTHER
+  // payments. Without this guard you could over-allocate by typing too many
+  // zeros and silently drive `pendingBalance` negative on the resale.
+  const incomingResaleIds = Object.keys(incomingByResaleDeal);
+  if (incomingResaleIds.length) {
+    const [resaleDeals, otherDealAllocs, buyerPayments] = await Promise.all([
+      ResaleDeal.find(notDeleted({ id: { $in: incomingResaleIds } })).lean(),
+      PaymentAllocation.find({
+        resaleDealId: { $in: incomingResaleIds },
+        paymentId: { $ne: paymentId },
+      }).lean(),
+      ResaleBuyerPayment.find(notDeleted({ dealId: { $in: incomingResaleIds } })).lean(),
+    ]);
+    const dealById = Object.fromEntries(resaleDeals.map(d => [d.id, d]));
+    const otherAllocByDeal = otherDealAllocs.reduce((acc, a) => {
+      acc[a.resaleDealId] = (acc[a.resaleDealId] || 0) + (a.amount || 0);
+      return acc;
+    }, {});
+    const buyerPaidByDeal = buyerPayments.reduce((acc, p) => {
+      acc[p.dealId] = (acc[p.dealId] || 0) + (p.amount || 0);
+      return acc;
+    }, {});
+
+    for (const dealId of incomingResaleIds) {
+      const deal = dealById[dealId];
+      if (!deal) {
+        return { error: `Resale deal ${dealId} not found`, status: 400 };
+      }
+      const dealTotal = deal.buyerPurchaseAmount || deal.resalePrice || 0;
+      const alreadyPaid = (buyerPaidByDeal[dealId] || 0) + (otherAllocByDeal[dealId] || 0);
+      const remaining = dealTotal - alreadyPaid;
+      const requested = incomingByResaleDeal[dealId];
+      if (requested > remaining + 0.01) {
+        const fmt = (n) => `₹${(n || 0).toLocaleString('en-IN')}`;
+        return {
+          error: `Allocation ${fmt(requested)} for resale exceeds its remaining balance ${fmt(remaining)}.`,
+          status: 400,
+        };
+      }
+    }
+  }
+
   await PaymentAllocation.deleteMany({ paymentId });
 
   const docs = incoming
-    .filter(a => parseFloat(a.amount) > 0 && a.saleId)
+    .filter(a => parseFloat(a.amount) > 0 && (a.saleId || a.resaleDealId))
     .map(a => ({
       id: uuidv4(),
       paymentId,
-      saleId: a.saleId,
+      saleId: a.saleId || null,
+      resaleDealId: a.resaleDealId || null,
       amount: parseFloat(a.amount),
       createdBy: userId,
       createdAt: new Date(),

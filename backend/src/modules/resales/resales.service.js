@@ -3,7 +3,7 @@ const { notDeleted } = require('../../utils/notDeleted');
 const { createTransaction, createReversalTransaction } = require('../../utils/transactions');
 const {
   ResaleDeal, ResaleBuyerPayment, ResaleSellerPayout, Account, Transaction,
-  Inventory, InventoryOwnershipHistory, Sale,
+  Inventory, InventoryOwnershipHistory, Sale, PaymentAllocation, CustomerPayment,
 } = require('../../models');
 
 const stripId = ({ _id, ...rest }) => rest;
@@ -20,16 +20,26 @@ const list = async (query) => {
   const inventoryById = Object.fromEntries(inventories.map(i => [i.id, i]));
 
   const dealIds = deals.map(d => d.id);
-  const [buyerPayments, sellerPayouts] = await Promise.all([
+  const [buyerPayments, sellerPayouts, dealAllocations] = await Promise.all([
     dealIds.length
       ? ResaleBuyerPayment.find(notDeleted({ dealId: { $in: dealIds } })).lean()
       : Promise.resolve([]),
     dealIds.length
       ? ResaleSellerPayout.find(notDeleted({ dealId: { $in: dealIds } })).lean()
       : Promise.resolve([]),
+    // PaymentAllocations targeting these deals count toward `buyerPaid` —
+    // they came in via the Customer Payment allocation modal (instead of
+    // the resale-buyer-payment drawer) but they're still real cash received.
+    dealIds.length
+      ? PaymentAllocation.find({ resaleDealId: { $in: dealIds } }).lean()
+      : Promise.resolve([]),
   ]);
   const buyerPaidByDeal = buyerPayments.reduce((acc, p) => {
     acc[p.dealId] = (acc[p.dealId] || 0) + (p.amount || 0);
+    return acc;
+  }, {});
+  const allocPaidByDeal = dealAllocations.reduce((acc, a) => {
+    acc[a.resaleDealId] = (acc[a.resaleDealId] || 0) + (a.amount || 0);
     return acc;
   }, {});
   const sellerPaidByDeal = sellerPayouts.reduce((acc, p) => {
@@ -41,7 +51,7 @@ const list = async (query) => {
     const inv = d.inventoryId ? inventoryById[d.inventoryId] : null;
     const buyerAmount = d.buyerPurchaseAmount || d.resalePrice || 0;
     const sellerAmount = d.sellerPayoutAmount || Math.max(0, (d.resalePrice || 0) - (d.companyCommission || 0));
-    const buyerPaid = buyerPaidByDeal[d.id] || 0;
+    const buyerPaid = (buyerPaidByDeal[d.id] || 0) + (allocPaidByDeal[d.id] || 0);
     const sellerPaid = sellerPaidByDeal[d.id] || 0;
     const buyerStatus = buyerPaid <= 0 ? 'PENDING' : (buyerPaid >= buyerAmount - 0.01 ? 'PAID' : 'PARTIAL');
     const sellerStatus = sellerPaid <= 0 ? 'PENDING' : (sellerPaid >= sellerAmount - 0.01 ? 'PAID' : 'PARTIAL');
@@ -266,7 +276,45 @@ const listBuyerPayments = async (dealId) => {
     .find(notDeleted({ dealId }))
     .sort({ paymentDate: -1 })
     .lean();
-  return payments.map(stripId);
+
+  // Surface customer-payment allocations as virtual rows alongside the
+  // direct buyer payments so the drawer shows where every rupee in
+  // `buyerPaid` came from. They're read-only here — edits go through the
+  // Customer Payments page (the allocation modal). Marked with
+  // `_isAllocation: true` so the FE can dim / disable the action buttons.
+  const allocations = await PaymentAllocation.find({ resaleDealId: dealId }).lean();
+  let allocRows = [];
+  if (allocations.length) {
+    const paymentIds = [...new Set(allocations.map(a => a.paymentId))];
+    const customerPayments = paymentIds.length
+      ? await CustomerPayment.find({ id: { $in: paymentIds } }).lean()
+      : [];
+    const cpById = Object.fromEntries(customerPayments.map(p => [p.id, p]));
+    allocRows = allocations.map(a => {
+      const cp = cpById[a.paymentId];
+      return {
+        id: `alloc-${a.id}`,
+        _isAllocation: true,
+        allocationId: a.id,
+        paymentId: a.paymentId,
+        dealId,
+        accountId: cp?.accountId,
+        amount: a.amount,
+        paymentDate: cp?.paymentDate || a.createdAt,
+        paymentMode: cp?.paymentMode || 'Cash',
+        referenceNo: cp?.referenceNo || '',
+        remark: `From customer payment${cp?.remark ? ` — ${cp.remark}` : ''}`,
+        createdAt: a.createdAt,
+      };
+    });
+  }
+
+  const merged = [...payments.map(stripId), ...allocRows].sort((a, b) => {
+    const da = a.paymentDate || a.createdAt || '';
+    const db = b.paymentDate || b.createdAt || '';
+    return db.localeCompare ? db.localeCompare(da) : (db > da ? 1 : -1);
+  });
+  return merged;
 };
 
 const addBuyerPayment = async (dealId, body, userId) => {
