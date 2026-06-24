@@ -171,7 +171,13 @@ const remove = async (id) => {
 };
 
 const listSales = async (customerId) => {
-  const sales = await Sale.find(notDeleted({ customerId })).lean();
+  // Once a flat is resold its original Sale row is stamped status=TRANSFERRED
+  // (see resales.service.create). Drop those from the allocation modal so a
+  // customer who has already exited the deal via resale doesn't get charged
+  // again on the unit they no longer own. The resale flow now owns payment
+  // tracking for that flat and the new buyer will see it in their own list.
+  const sales = (await Sale.find(notDeleted({ customerId })).lean())
+    .filter(s => s.status !== 'TRANSFERRED' && s.paymentStatus !== 'Transferred');
   const saleRows = await Promise.all(sales.map(async (s) => {
     const inventory = s.inventoryId ? await Inventory.findOne({ id: s.inventoryId }).lean() : null;
     const [allocations, saleEntries] = await Promise.all([
