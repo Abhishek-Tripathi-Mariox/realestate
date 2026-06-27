@@ -44,7 +44,8 @@ export default function BankPage() {
   const [accounts, setAccounts] = useState([])
   const [operations, setOperations] = useState([])
   const [summary, setSummary] = useState({
-    totalWithdrawal: 0, totalTransfer: 0, withdrawalCount: 0, transferCount: 0, opCount: 0,
+    totalWithdrawal: 0, totalTransfer: 0, totalDirectPayment: 0,
+    withdrawalCount: 0, transferCount: 0, directPaymentCount: 0, opCount: 0,
   })
 
   const [showFilters, setShowFilters] = useState(true)
@@ -68,6 +69,14 @@ export default function BankPage() {
   const [transferForm, setTransferForm] = useState({
     fromAccountId: '',
     toAccountId: '',
+    amount: '',
+    txnDate: todayISO(),
+    note: '',
+  })
+
+  const [showDirectPayment, setShowDirectPayment] = useState(false)
+  const [directPaymentForm, setDirectPaymentForm] = useState({
+    fromAccountId: '',
     amount: '',
     txnDate: todayISO(),
     note: '',
@@ -231,6 +240,43 @@ export default function BankPage() {
     }
   }
 
+  // ---------- Direct Payment
+  const openAddDirectPayment = () => {
+    setEditingOp(null)
+    setDirectPaymentForm({ fromAccountId: '', amount: '', txnDate: todayISO(), note: '' })
+    setShowDirectPayment(true)
+  }
+  const openEditDirectPayment = (op) => {
+    setEditingOp(op)
+    setDirectPaymentForm({
+      fromAccountId: op.fromAccountId || '',
+      amount: String(op.amount || ''),
+      txnDate: (op.txnDate || '').slice(0, 10),
+      note: op.note || '',
+    })
+    setShowDirectPayment(true)
+  }
+  const handleSaveDirectPayment = async () => {
+    const amount = parseFloat(directPaymentForm.amount)
+    if (!Number.isFinite(amount) || amount <= 0) { toast({ variant: 'destructive', title: 'Error', description: 'Amount must be greater than 0' }); return }
+    if (!directPaymentForm.fromAccountId) { toast({ variant: 'destructive', title: 'Error', description: 'Pick an account' }); return }
+    if (!directPaymentForm.txnDate) { toast({ variant: 'destructive', title: 'Error', description: 'Date is required' }); return }
+    try {
+      const payload = { ...directPaymentForm, amount }
+      if (editingOp) {
+        await apiCall(`/bank/operations/${editingOp.id}`, 'PUT', payload)
+        toast({ title: 'Saved', description: 'Direct payment updated' })
+      } else {
+        await apiCall('/bank/direct-payments', 'POST', payload)
+        toast({ title: 'Saved', description: 'Direct payment recorded' })
+      }
+      setShowDirectPayment(false)
+      await Promise.all([loadOperations(), loadAccounts()])
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Error', description: e.message })
+    }
+  }
+
   // ---------- Delete
   const handleDeleteOp = async (op) => {
     if (!confirm('Delete this entry?')) return
@@ -288,20 +334,26 @@ export default function BankPage() {
               </div>
               <div>
                 <h2 className="text-xl font-bold">Bank</h2>
-                <p className="text-sm text-white/90">Cash withdrawals and internal transfers between accounts.</p>
+                <p className="text-sm text-white/90">Withdrawals, internal transfers, and direct payments into accounts.</p>
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <Button variant="secondary" size="sm" onClick={exportCSV}>
                 <Download className="w-4 h-4 mr-2" /> Excel
               </Button>
-              {activeTab === 'WITHDRAWAL' ? (
+              {activeTab === 'WITHDRAWAL' && (
                 <Button size="sm" className="bg-rose-600 hover:bg-rose-700 text-white border-0" onClick={openAddWithdraw}>
                   <ArrowDownCircle className="w-4 h-4 mr-2" /> Withdraw
                 </Button>
-              ) : (
+              )}
+              {activeTab === 'TRANSFER' && (
                 <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white border-0" onClick={openAddTransfer}>
                   <ArrowLeftRight className="w-4 h-4 mr-2" /> Transfer
+                </Button>
+              )}
+              {activeTab === 'DIRECT_PAYMENT' && (
+                <Button size="sm" className="bg-indigo-600 hover:bg-indigo-700 text-white border-0" onClick={openAddDirectPayment}>
+                  <ArrowDownCircle className="w-4 h-4 mr-2" /> Direct Add
                 </Button>
               )}
             </div>
@@ -335,18 +387,21 @@ export default function BankPage() {
 
         {/* Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList className="grid w-full grid-cols-2 h-11">
+          <TabsList className="grid w-full grid-cols-3 h-11">
             <TabsTrigger value="WITHDRAWAL" className="text-sm">
               <ArrowDownCircle className="w-4 h-4 mr-2" /> Withdrawal
             </TabsTrigger>
             <TabsTrigger value="TRANSFER" className="text-sm">
               <ArrowLeftRight className="w-4 h-4 mr-2" /> Internal Transfer
             </TabsTrigger>
+            <TabsTrigger value="DIRECT_PAYMENT" className="text-sm">
+              <ArrowDownCircle className="w-4 h-4 mr-2 rotate-180" /> Direct Payment
+            </TabsTrigger>
           </TabsList>
 
           {/* ===== Summary cards =====*/}
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-3">
-            {activeTab === 'WITHDRAWAL' ? (
+            {activeTab === 'WITHDRAWAL' && (
               <>
                 <Card className="bg-rose-50/60">
                   <CardContent className="p-4">
@@ -363,7 +418,8 @@ export default function BankPage() {
                   </CardContent>
                 </Card>
               </>
-            ) : (
+            )}
+            {activeTab === 'TRANSFER' && (
               <>
                 <Card className="bg-emerald-50/60">
                   <CardContent className="p-4">
@@ -376,6 +432,24 @@ export default function BankPage() {
                   <CardContent className="p-4">
                     <p className="text-xs uppercase tracking-wide text-slate-700">Entries</p>
                     <p className="text-2xl font-bold text-slate-700 mt-1">{summary.transferCount}</p>
+                    <p className="text-xs text-slate-500 mt-1">In current view</p>
+                  </CardContent>
+                </Card>
+              </>
+            )}
+            {activeTab === 'DIRECT_PAYMENT' && (
+              <>
+                <Card className="bg-indigo-50/60">
+                  <CardContent className="p-4">
+                    <p className="text-xs uppercase tracking-wide text-indigo-700">Total Added</p>
+                    <p className="text-2xl font-bold text-indigo-700 mt-1">₹{fmt(summary.totalDirectPayment)}</p>
+                    <p className="text-xs text-slate-500 mt-1">Across {summary.directPaymentCount} entries</p>
+                  </CardContent>
+                </Card>
+                <Card className="bg-slate-50/60">
+                  <CardContent className="p-4">
+                    <p className="text-xs uppercase tracking-wide text-slate-700">Entries</p>
+                    <p className="text-2xl font-bold text-slate-700 mt-1">{summary.directPaymentCount}</p>
                     <p className="text-xs text-slate-500 mt-1">In current view</p>
                   </CardContent>
                 </Card>
@@ -559,6 +633,72 @@ export default function BankPage() {
               </CardContent>
             </Card>
           </TabsContent>
+
+          {/* Direct Payment table */}
+          <TabsContent value="DIRECT_PAYMENT" className="mt-3">
+            <Card>
+              <CardContent className="p-0">
+                <div className="flex items-center justify-between px-4 py-3 border-b">
+                  <div className="flex items-center gap-2">
+                    <ArrowDownCircle className="w-4 h-4 text-indigo-600 rotate-180" />
+                    <h3 className="font-semibold text-slate-900">Direct Payments</h3>
+                    <Badge variant="secondary">{operations.length}</Badge>
+                  </div>
+                </div>
+                {operations.length === 0 ? (
+                  <div className="text-center py-10 text-slate-500">
+                    <ArrowDownCircle className="w-12 h-12 mx-auto text-slate-300 mb-2 rotate-180" />
+                    <p>No direct payments yet</p>
+                    <p className="text-sm text-slate-400">
+                      Click <span className="text-indigo-600 font-medium">Direct Add</span> above to record one
+                    </p>
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Date</TableHead>
+                        <TableHead>Account</TableHead>
+                        <TableHead className="text-right">Amount</TableHead>
+                        <TableHead>Note</TableHead>
+                        <TableHead className="text-right">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {operations.map(op => {
+                        const fromAcc = accounts.find(a => a.id === op.fromAccountId)
+                        return (
+                          <TableRow key={op.id}>
+                            <TableCell className="whitespace-nowrap text-slate-600">{(op.txnDate || '').slice(0, 10)}</TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium text-slate-800">{fromAcc?.name || '—'}</span>
+                                {fromAcc && <Badge variant="outline" className="text-[10px]">{fromAcc.type}</Badge>}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <span className="text-indigo-700 font-semibold">↓ ₹{fmt(op.amount)}</span>
+                            </TableCell>
+                            <TableCell className="max-w-[320px] truncate text-slate-600" title={op.note}>{op.note || '—'}</TableCell>
+                            <TableCell className="text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => openEditDirectPayment(op)}>
+                                  <Edit className="w-3.5 h-3.5" />
+                                </Button>
+                                <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-red-600" onClick={() => handleDeleteOp(op)}>
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        )
+                      })}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
         </Tabs>
       </div>
 
@@ -673,6 +813,60 @@ export default function BankPage() {
             <Button variant="outline" onClick={() => setShowTransfer(false)}>Cancel</Button>
             <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={handleSaveTransfer}>
               {editingOp ? 'Save Changes' : 'Record Transfer'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Direct Payment modal — mirrors the Withdrawal form layout exactly,
+          only the direction differs (money goes IN instead of OUT). */}
+      <Dialog open={showDirectPayment} onOpenChange={setShowDirectPayment}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <div className="-mx-6 -mt-6 px-6 py-4 rounded-t-lg bg-indigo-500 text-white">
+              <DialogTitle className="flex items-center gap-2 text-white">
+                <ArrowDownCircle className="w-5 h-5 rotate-180" />
+                {editingOp ? 'Edit Direct Payment' : 'Direct Add Payment'}
+              </DialogTitle>
+              <DialogDescription className="text-white/90">
+                Money added directly to an account. Balance increases by this amount.
+              </DialogDescription>
+            </div>
+          </DialogHeader>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 py-2">
+            <div className="sm:col-span-2">
+              <Label>Account *</Label>
+              <Select value={directPaymentForm.fromAccountId} onValueChange={v => setDirectPaymentForm({ ...directPaymentForm, fromAccountId: v })}>
+                <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
+                <SelectContent>
+                  {allAccounts.length === 0 && (
+                    <div className="px-2 py-3 text-sm text-slate-400 text-center">No accounts found</div>
+                  )}
+                  {allAccounts.map(a => (
+                    <SelectItem key={a.id} value={a.id}>
+                      {a.name} ({a.type}) — ₹{fmt(a.currentBalance)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Amount (₹) *</Label>
+              <Input type="number" min="0" step="0.01" placeholder="0" value={directPaymentForm.amount} onChange={e => setDirectPaymentForm({ ...directPaymentForm, amount: e.target.value })} />
+            </div>
+            <div>
+              <Label>Date *</Label>
+              <Input type="date" max={todayISO()} value={directPaymentForm.txnDate} onChange={e => setDirectPaymentForm({ ...directPaymentForm, txnDate: e.target.value })} />
+            </div>
+            <div className="sm:col-span-2">
+              <Label>Note / Remark</Label>
+              <Textarea rows={3} placeholder="e.g., Direct cash deposit into HDFC" value={directPaymentForm.note} onChange={e => setDirectPaymentForm({ ...directPaymentForm, note: e.target.value })} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowDirectPayment(false)}>Cancel</Button>
+            <Button className="bg-indigo-600 hover:bg-indigo-700" onClick={handleSaveDirectPayment}>
+              {editingOp ? 'Save Changes' : 'Record Payment'}
             </Button>
           </DialogFooter>
         </DialogContent>

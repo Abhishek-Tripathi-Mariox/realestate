@@ -9,9 +9,11 @@ const { Account, BankOperation, Transaction } = require('../../models');
 
 // sourceType values used on the daybook txns that mirror a BankOperation.
 // `sourceId` is the BankOperation `id`, so we can find both legs of a
-// transfer + the single withdrawal txn to reverse on update / delete.
+// transfer + the single withdrawal / direct-payment txn to reverse on
+// update / delete.
 const WITHDRAWAL_SOURCE_TYPE = 'BANK_WITHDRAWAL';
 const TRANSFER_SOURCE_TYPE = 'BANK_TRANSFER';
+const DIRECT_PAYMENT_SOURCE_TYPE = 'BANK_DIRECT_PAYMENT';
 
 const stripId = ({ _id, ...rest }) => rest;
 
@@ -53,11 +55,16 @@ const summary = async (query) => {
   const totalTransfer = ops
     .filter(o => o.kind === 'TRANSFER')
     .reduce((s, o) => s + (o.amount || 0), 0);
+  const totalDirectPayment = ops
+    .filter(o => o.kind === 'DIRECT_PAYMENT')
+    .reduce((s, o) => s + (o.amount || 0), 0);
   return {
     totalWithdrawal,
     totalTransfer,
+    totalDirectPayment,
     withdrawalCount: ops.filter(o => o.kind === 'WITHDRAWAL').length,
     transferCount: ops.filter(o => o.kind === 'TRANSFER').length,
+    directPaymentCount: ops.filter(o => o.kind === 'DIRECT_PAYMENT').length,
     opCount: ops.length,
   };
 };
@@ -66,6 +73,18 @@ const validateWithdrawal = async (body) => {
   const amount = Number(body.amount);
   if (!Number.isFinite(amount) || amount <= 0) return { error: 'Amount must be positive', status: 400 };
   if (!body.fromAccountId) return { error: 'Bank account is required', status: 400 };
+  if (!body.txnDate) return { error: 'Transaction date is required', status: 400 };
+  const account = await Account.findOne({ id: body.fromAccountId }).lean();
+  if (!account) return { error: 'Account not found', status: 404 };
+  return null;
+};
+
+// Direct payment uses the same single-account shape as a withdrawal — only
+// the daybook direction differs (IN instead of OUT), so reuse the validator.
+const validateDirectPayment = async (body) => {
+  const amount = Number(body.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return { error: 'Amount must be positive', status: 400 };
+  if (!body.fromAccountId) return { error: 'Account is required', status: 400 };
   if (!body.txnDate) return { error: 'Transaction date is required', status: 400 };
   const account = await Account.findOne({ id: body.fromAccountId }).lean();
   if (!account) return { error: 'Account not found', status: 404 };
@@ -89,10 +108,11 @@ const validateTransfer = async (body) => {
 };
 
 // Find every live daybook txn this BankOperation produced and reverse each.
-// A WITHDRAWAL has one mirror, a TRANSFER has two (OUT + IN legs).
+// A WITHDRAWAL / DIRECT_PAYMENT has one mirror; a TRANSFER has two
+// (OUT + IN legs). Filter is a single $in across all three sourceTypes.
 const reverseDaybookForOp = async (opId, userId, reason) => {
   const originals = await Transaction.find({
-    sourceType: { $in: [WITHDRAWAL_SOURCE_TYPE, TRANSFER_SOURCE_TYPE] },
+    sourceType: { $in: [WITHDRAWAL_SOURCE_TYPE, TRANSFER_SOURCE_TYPE, DIRECT_PAYMENT_SOURCE_TYPE] },
     sourceId: opId,
     isReversal: { $ne: true },
     isReversed: { $ne: true },
@@ -100,6 +120,22 @@ const reverseDaybookForOp = async (opId, userId, reason) => {
   for (const original of originals) {
     await createReversalTransaction(original, userId, reason);
   }
+};
+
+const postDirectPaymentDaybook = async (op, account, userId) => {
+  await createDaybookTxn({
+    txnDate: op.txnDate,
+    societyId: null,
+    accountId: op.fromAccountId,
+    direction: 'IN',
+    amount: op.amount,
+    paymentMode: account?.type === 'CASH' ? 'Cash' : 'Bank Transfer',
+    partyType: 'Direct',
+    partyName: account?.name || '',
+    sourceType: DIRECT_PAYMENT_SOURCE_TYPE,
+    sourceId: op.id,
+    remark: op.note || `Direct payment into ${account?.name || 'account'}`,
+  }, userId);
 };
 
 const postWithdrawalDaybook = async (op, fromAccount, userId) => {
@@ -149,6 +185,25 @@ const postTransferDaybook = async (op, fromAccount, toAccount, userId) => {
   }, userId);
 };
 
+const createDirectPayment = async (body, userId) => {
+  const err = await validateDirectPayment(body);
+  if (err) return err;
+  const op = {
+    id: uuidv4(),
+    kind: 'DIRECT_PAYMENT',
+    fromAccountId: body.fromAccountId,
+    amount: Number(body.amount),
+    txnDate: body.txnDate,
+    note: (body.note || '').trim(),
+    createdBy: userId,
+    createdAt: new Date(),
+  };
+  await BankOperation.create(op);
+  const account = await Account.findOne({ id: op.fromAccountId }).lean();
+  await postDirectPaymentDaybook(op, account, userId);
+  return op;
+};
+
 const createWithdrawal = async (body, userId) => {
   const err = await validateWithdrawal(body);
   if (err) return err;
@@ -196,9 +251,10 @@ const updateOperation = async (id, body, userId) => {
   if (!existing) return { error: 'Bank operation not found', status: 404 };
 
   const merged = { ...existing, ...body };
-  const err = existing.kind === 'WITHDRAWAL'
-    ? await validateWithdrawal(merged)
-    : await validateTransfer(merged);
+  let err;
+  if (existing.kind === 'WITHDRAWAL') err = await validateWithdrawal(merged);
+  else if (existing.kind === 'DIRECT_PAYMENT') err = await validateDirectPayment(merged);
+  else err = await validateTransfer(merged);
   if (err) return err;
 
   const update = { updatedAt: new Date() };
@@ -214,6 +270,9 @@ const updateOperation = async (id, body, userId) => {
   if (updated.kind === 'WITHDRAWAL') {
     const fromAccount = await Account.findOne({ id: updated.fromAccountId }).lean();
     await postWithdrawalDaybook(updated, fromAccount, userId);
+  } else if (updated.kind === 'DIRECT_PAYMENT') {
+    const account = await Account.findOne({ id: updated.fromAccountId }).lean();
+    await postDirectPaymentDaybook(updated, account, userId);
   } else {
     const [fromAccount, toAccount] = await Promise.all([
       Account.findOne({ id: updated.fromAccountId }).lean(),
@@ -237,6 +296,7 @@ module.exports = {
   summary,
   createWithdrawal,
   createTransfer,
+  createDirectPayment,
   updateOperation,
   removeOperation,
 };

@@ -47,6 +47,7 @@ const PARENT_CHAINS = {
   LOAN_GIVEN_REPAYMENT:       [{ model: LoanRepayment, link: 'loanId' }, { model: Loan }],
   BANK_WITHDRAWAL:            [{ model: BankOperation }],
   BANK_TRANSFER:              [{ model: BankOperation }],
+  BANK_DIRECT_PAYMENT:        [{ model: BankOperation }],
 };
 
 // Return the set of sourceIds (for one sourceType) whose full parent chain

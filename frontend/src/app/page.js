@@ -1544,16 +1544,19 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
   
   const handleCreatePayment = async (formData) => {
     try {
-      const result = await apiCall('/customer-payments', 'POST', formData)
-      
+      // Strip the FE-only flag before posting — the backend doesn't know
+      // (or care) about whether the user wants the allocation modal next.
+      const { skipAllocation, ...payload } = formData
+      const result = await apiCall('/customer-payments', 'POST', payload)
+
       // AUTO-REFRESH: Update all related data immediately after payment creation
       // 1. Refresh customer payments list (go to first page to see new payment at top)
       await loadCustomerPayments(1, customerPaymentsPagination.limit)
-      
+
       // 2. Refresh customers list (updates Total Paid, Balance for each customer)
       const customersData = await apiCall(`/customers?societyId=${selectedSociety}`)
       setCustomers(customersData || [])
-      
+
       // 3. Refresh sales data (updates payment received status on sales)
       const salesData = await apiCall(`/societies/${selectedSociety}/sales`)
       if (salesData.sales) {
@@ -1562,19 +1565,27 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
       } else {
         setSales(salesData)
       }
-      
+
       // 4. Refresh summary (updates Total Payments Received in dashboard)
       const summaryData = await apiCall(`/societies/${selectedSociety}/summary`)
       setSummary(summaryData)
-      
+
       setShowPaymentForm(false)
-      
+
+      if (skipAllocation) {
+        // Direct Add path: skip the allocation modal entirely. The payment
+        // lives in the Customer Payments table as unallocated; the user can
+        // edit / delete / allocate it later from the same row's actions.
+        toast({ title: 'Success', description: 'Payment recorded as direct add.' })
+        return
+      }
+
       // Immediately open allocation modal
       const customerSales = await apiCall(`/customers/${formData.customerId}/sales`)
       setCustomerSalesForAllocation(customerSales)
       setCurrentPaymentForAllocation({ ...result, allocatedAmount: 0 })
       setShowAllocationModal(true)
-      
+
       toast({ title: 'Success', description: 'Payment recorded. Now allocate to flats.' })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
@@ -12142,12 +12153,20 @@ const CustomerPaymentForm = ({ customers, accounts, payment, onSubmit, onCancel 
     }
   }, [accounts, formData.paymentMode, isEdit])
 
-  const handleSubmit = (e) => {
-    e.preventDefault()
+  // `skipAllocation` lets the caller record a payment and stop there — no
+  // allocation modal pops up after save. Used by the "Direct Add" button to
+  // mimic the Bank-Withdrawal-style flow the user asked for: just credit the
+  // customer, with edit/delete/history available from the payments table.
+  const submitWith = (skipAllocation) => {
     onSubmit({
       ...formData,
-      amount: parseFloat(formData.amount)
+      amount: parseFloat(formData.amount),
+      skipAllocation,
     })
+  }
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    submitWith(false)
   }
 
   const selectedCustomer = customers.find(c => c.id === formData.customerId)
@@ -12258,6 +12277,21 @@ const CustomerPaymentForm = ({ customers, accounts, payment, onSubmit, onCancel 
       
       <div className="flex justify-end space-x-2">
         <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
+        {/* In edit mode there's only one save path — no allocation modal opens.
+            On create, the user picks: just record (Direct Add) or record +
+            allocate. Both create the same CustomerPayment row; the difference
+            is only whether the allocation modal pops up next. */}
+        {!isEdit && (
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!formData.customerId || !formData.amount}
+            onClick={() => submitWith(true)}
+            title="Record payment without opening the allocation modal — allocate later if needed"
+          >
+            Direct Add
+          </Button>
+        )}
         <Button type="submit" disabled={!formData.customerId || !formData.amount}>
           {isEdit ? 'Save Changes' : 'Record Payment & Allocate'}
         </Button>

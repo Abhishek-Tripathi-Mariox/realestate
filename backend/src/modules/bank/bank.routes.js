@@ -10,6 +10,7 @@ router.get('/operations', verifyToken, ctrl.listOperations);
 router.get('/operations/summary', verifyToken, ctrl.summary);
 router.post('/withdrawals', verifyToken, ctrl.createWithdrawal);
 router.post('/transfers', verifyToken, ctrl.createTransfer);
+router.post('/direct-payments', verifyToken, ctrl.createDirectPayment);
 router.put('/operations/:id', verifyToken, ctrl.updateOperation);
 router.delete('/operations/:id', verifyToken, ctrl.removeOperation);
 

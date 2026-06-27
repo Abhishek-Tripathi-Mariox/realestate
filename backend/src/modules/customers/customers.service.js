@@ -61,9 +61,18 @@ const list = async (query) => {
   // Split sale-ledger entries: SALE_PAYMENT (or legacy entries with no
   // entryType) count as credits; WITHDRAWAL / PROFIT_PAYOUT debit the sale's
   // running balance — they're refunds / payouts that take money back out.
+  //
+  // TRANSFER_IN / TRANSFER_OUT are deliberately excluded from the customer
+  // master totals here: a flat-to-flat transfer moves money the customer
+  // already paid, it isn't a fresh inflow. Counting TRANSFER_IN as credit
+  // would inflate "Total Paid" on the customer card. They still appear on
+  // the per-sale balance and on the customer ledger drawer (where they
+  // help the user trace what moved between flats).
+  const isTransferType = (t) => t === 'TRANSFER_IN' || t === 'TRANSFER_OUT';
   const saleEntryCreditBySale = {};
   const saleEntryDebitBySale = {};
   for (const e of allSaleEntries) {
+    if (isTransferType(e.entryType)) continue;
     const delta = signedSaleDelta(e);
     if (delta > 0) saleEntryCreditBySale[e.saleId] = (saleEntryCreditBySale[e.saleId] || 0) + delta;
     else saleEntryDebitBySale[e.saleId] = (saleEntryDebitBySale[e.saleId] || 0) + Math.abs(delta);
