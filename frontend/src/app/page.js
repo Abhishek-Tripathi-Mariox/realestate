@@ -392,7 +392,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
     pageSize: 25,
     page: 1,
   })
-  const [salesFilters, setSalesFilters] = useState({ search: '', startDate: '', endDate: '', pageSize: 25, page: 1 })
+  const [salesFilters, setSalesFilters] = useState({ search: '', startDate: '', endDate: '', pageSize: 50, page: 1 })
   const [purchasesFilters, setPurchasesFilters] = useState({ search: '', startDate: '', endDate: '', pageSize: 25, page: 1 })
   const [resalesFilters, setResalesFilters] = useState({ search: '', startDate: '', endDate: '', pageSize: 25, page: 1 })
   const [inventoryFilters, setInventoryFilters] = useState({ search: '', status: 'all', pageSize: 25, page: 1 })
