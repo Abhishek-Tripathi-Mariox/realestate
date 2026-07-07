@@ -215,7 +215,12 @@ const listSales = async (customerId) => {
   let resaleRows = [];
   if (customer?.name) {
     const target = customer.name.trim().toLowerCase();
-    const resaleDeals = await ResaleDeal.find(notDeleted({})).lean();
+    console.log(`Looking for resale deals for customer ${customer.name} (societyId=${customer.societyId})`);
+    const resaleFilter = customer.societyId
+      ? notDeleted({ societyId: customer.societyId })
+      : notDeleted({});
+    console.log(`Resale filter: ${JSON.stringify(resaleFilter)}`);  
+    const resaleDeals = await ResaleDeal.find(resaleFilter).lean();
     const matchedDeals = resaleDeals.filter(d =>
       (d.buyerName || '').trim().toLowerCase() === target);
 
