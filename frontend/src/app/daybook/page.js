@@ -997,7 +997,15 @@ export default function DaybookPage() {
                         <TableCell className={`text-right font-bold ${(txn.runningBalance ?? 0) >= 0 ? 'text-blue-600' : 'text-orange-600'}`}>
                           {txn.isVoided ? '-' : `₹${fmt(txn.runningBalance)}`}
                         </TableCell>
-                        <TableCell className="max-w-[200px] truncate">{txn.remark || '-'}</TableCell>
+                        {/* Show full remark inline instead of truncating —
+                            users kept losing context when reversal reasons or
+                            long notes got cut off. `whitespace-pre-wrap` lets
+                            longer remarks wrap onto a second line inside the
+                            cell; `title` gives a native tooltip on hover for
+                            wide-column browsing. */}
+                        <TableCell className="max-w-[320px] whitespace-pre-wrap break-words align-top" title={txn.remark || ''}>
+                          {txn.remark || '-'}
+                        </TableCell>
                         <TableCell>
                           {txn.isLocked && (
                             <span title={txn.lockReason || 'Transaction locked after 7 days'}>
