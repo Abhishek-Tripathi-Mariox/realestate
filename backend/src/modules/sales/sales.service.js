@@ -354,6 +354,15 @@ const addPayment = async (saleId, body, userId) => {
     : 'Partial';
   await Sale.updateOne({ id: saleId }, { $set: { paymentStatus } });
 
+  // Prefer the Customer record's name when `sale.buyerName` is empty
+  // (some flows create the Sale with only a customerId, so buyerName is
+  // blank and the daybook party column ends up looking like "Customer:"
+  // with no name behind it).
+  let displayName = (sale.buyerName || '').trim();
+  if (!displayName && sale.customerId) {
+    const customer = await Customer.findOne({ id: sale.customerId }).lean();
+    if (customer?.name) displayName = customer.name;
+  }
   await createTransaction({
     txnDate: body.paymentDate,
     societyId: sale.societyId,
@@ -362,10 +371,10 @@ const addPayment = async (saleId, body, userId) => {
     amount,
     paymentMode: body.paymentMode || 'Cash',
     partyType: 'Customer',
-    partyName: sale.buyerName,
+    partyName: displayName || 'Customer',
     sourceType: 'SALE_PAYMENT',
     sourceId: payment.id,
-    remark: body.remark || `Sale payment - ${sale.buyerName}`,
+    remark: body.remark || `Sale payment - ${displayName || 'customer'}`,
   }, userId);
 
   return payment;
@@ -543,6 +552,13 @@ const addLedgerEntry = async (saleId, body, userId) => {
   await Sale.updateOne({ id: saleId }, { $set: { paymentStatus } });
 
   const direction = isCreditEntryType(entryType) ? 'IN' : 'OUT';
+  // Same fallback as addPayment above — the ledger flow also lands with
+  // an empty partyName when only customerId was captured on the Sale.
+  let displayName = (sale.buyerName || '').trim();
+  if (!displayName && sale.customerId) {
+    const customer = await Customer.findOne({ id: sale.customerId }).lean();
+    if (customer?.name) displayName = customer.name;
+  }
   await createTransaction({
     txnDate: body.paymentDate,
     societyId: sale.societyId,
@@ -551,10 +567,10 @@ const addLedgerEntry = async (saleId, body, userId) => {
     amount,
     paymentMode: body.paymentMode || 'Cash',
     partyType: 'Customer',
-    partyName: sale.buyerName,
+    partyName: displayName || 'Customer',
     sourceType: 'SALE_PAYMENT',
     sourceId: entry.id,
-    remark: body.remark || `${entryType} - ${sale.buyerName}`,
+    remark: body.remark || `${entryType} - ${displayName || 'customer'}`,
   }, userId);
 
   return entry;
