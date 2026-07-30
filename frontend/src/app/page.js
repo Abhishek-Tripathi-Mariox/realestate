@@ -392,7 +392,7 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
     pageSize: 25,
     page: 1,
   })
-  const [salesFilters, setSalesFilters] = useState({ search: '', startDate: '', endDate: '', pageSize: 50, page: 1 })
+  const [salesFilters, setSalesFilters] = useState({ search: '', startDate: '', endDate: '', pageSize: 50, page: 1, sortBy: 'inventoryNumber', sortDir: 'asc' })
   const [purchasesFilters, setPurchasesFilters] = useState({ search: '', startDate: '', endDate: '', pageSize: 25, page: 1 })
   const [resalesFilters, setResalesFilters] = useState({ search: '', startDate: '', endDate: '', pageSize: 25, page: 1 })
   const [inventoryFilters, setInventoryFilters] = useState({ search: '', status: 'all', pageSize: 25, page: 1 })
@@ -2562,7 +2562,49 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
     searchFields: ['customerName', 'buyerName', 'inventoryNumber', 'inventoryType', 'phase', 'notes'],
     dateField: 'saleDate',
   })
-  const salesPage = slicePage(filteredSales, salesFilters.pageSize, salesFilters.page)
+  // Column sort — kept client-side so we don't refetch on every header
+  // click. Numeric fields (finalAmount / totalPaid / balance / inventoryNumber
+  // when it parses) compare as numbers; everything else falls back to a
+  // locale string compare so text columns like Customer / Status sort
+  // naturally without needing a lookup table.
+  const sortedSales = (() => {
+    const { sortBy, sortDir } = salesFilters
+    if (!sortBy) return filteredSales
+    const dir = sortDir === 'desc' ? -1 : 1
+    const numericKeys = new Set(['inventoryNumber', 'finalAmount', 'totalPaid', 'balance'])
+    return [...filteredSales].sort((a, b) => {
+      let av = a?.[sortBy]
+      let bv = b?.[sortBy]
+      if (sortBy === 'customerName') {
+        av = a?.customerName || a?.buyerName || ''
+        bv = b?.customerName || b?.buyerName || ''
+      }
+      if (numericKeys.has(sortBy)) {
+        const na = Number(av)
+        const nb = Number(bv)
+        const aOk = Number.isFinite(na)
+        const bOk = Number.isFinite(nb)
+        if (aOk && bOk) return (na - nb) * dir
+        // Fall through to string compare when either side isn't a number
+        // (e.g. inventory numbers like "A-101" that don't parse cleanly).
+      }
+      const sa = String(av ?? '').toLowerCase()
+      const sb = String(bv ?? '').toLowerCase()
+      return sa.localeCompare(sb) * dir
+    })
+  })()
+  const toggleSalesSort = (col) => setSalesFilters(f => ({
+    ...f,
+    sortBy: col,
+    sortDir: f.sortBy === col && f.sortDir === 'asc' ? 'desc' : 'asc',
+    page: 1,
+  }))
+  const salesSortIcon = (col) => (
+    salesFilters.sortBy !== col
+      ? <span className="text-slate-300 ml-1">↕</span>
+      : <span className="text-slate-600 ml-1">{salesFilters.sortDir === 'asc' ? '↑' : '↓'}</span>
+  )
+  const salesPage = slicePage(sortedSales, salesFilters.pageSize, salesFilters.page)
   const salesFilteredTotals = {
     finalAmount: filteredSales.reduce((s, r) => s + (r.finalAmount || 0), 0),
     totalPaid: filteredSales.reduce((s, r) => s + (r.totalPaid || 0), 0),
@@ -4333,14 +4375,31 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
                         <Table>
                           <TableHeader>
                             <TableRow>
-                              <TableHead>Inventory</TableHead>
-                              <TableHead>Customer</TableHead>
+                              {/* Clickable sort headers — first click asc,
+                                  second click flips to desc, third click stays
+                                  desc unless the user picks another column.
+                                  Arrow indicator on the right shows the
+                                  current sort state per column. */}
+                              <TableHead className="cursor-pointer select-none" onClick={() => toggleSalesSort('inventoryNumber')}>
+                                Inventory {salesSortIcon('inventoryNumber')}
+                              </TableHead>
+                              <TableHead className="cursor-pointer select-none" onClick={() => toggleSalesSort('customerName')}>
+                                Customer {salesSortIcon('customerName')}
+                              </TableHead>
                               <TableHead>Phone</TableHead>
                               <TableHead>Notes</TableHead>
-                              <TableHead>Final Amount</TableHead>
-                              <TableHead>Total Paid</TableHead>
-                              <TableHead>Balance</TableHead>
-                              <TableHead>Status</TableHead>
+                              <TableHead className="cursor-pointer select-none" onClick={() => toggleSalesSort('finalAmount')}>
+                                Final Amount {salesSortIcon('finalAmount')}
+                              </TableHead>
+                              <TableHead className="cursor-pointer select-none" onClick={() => toggleSalesSort('totalPaid')}>
+                                Total Paid {salesSortIcon('totalPaid')}
+                              </TableHead>
+                              <TableHead className="cursor-pointer select-none" onClick={() => toggleSalesSort('balance')}>
+                                Balance {salesSortIcon('balance')}
+                              </TableHead>
+                              <TableHead className="cursor-pointer select-none" onClick={() => toggleSalesSort('status')}>
+                                Status {salesSortIcon('status')}
+                              </TableHead>
                               <TableHead>Actions</TableHead>
                             </TableRow>
                           </TableHeader>
