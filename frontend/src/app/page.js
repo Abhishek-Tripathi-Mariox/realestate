@@ -739,14 +739,20 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
 
   const loadResalesTab = async () => {
     // Resales: list deals; ResaleForm picks from Sold inventory and
-    // existing sales for the seller side.
-    const [dealsData, inventoryData, salesData] = await Promise.all([
+    // existing sales for the seller side. `customers` powers the Buyer
+    // Select on both Create and Edit — without loading it here the edit
+    // dialog opens with an empty dropdown (the linked buyer's id has
+    // nothing to map to) even though the resale row clearly stores a
+    // buyerCustomerId.
+    const [dealsData, inventoryData, salesData, customersData] = await Promise.all([
       apiCall(`/resales?societyId=${selectedSociety}`),
       apiCall(`/societies/${selectedSociety}/inventory`),
       apiCall(`/societies/${selectedSociety}/sales`),
+      apiCall(`/customers?societyId=${selectedSociety}`),
     ])
     setResaleDeals(dealsData)
     setInventory(inventoryData)
+    setCustomers(customersData || [])
     if (salesData?.sales) {
       setSales(salesData.sales)
       setSalesSummary(salesData.summary)
@@ -10983,6 +10989,30 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [
   const [isCreatingBuyer, setIsCreatingBuyer] = useState(false)
   const { toast } = useToast()
 
+  // Edit-mode backfill: older resale rows may have `buyerName` / `sellerName`
+  // but a null `buyerCustomerId` / `sellerCustomerId` (the customer-link
+  // fields were added later). Once the customers prop lands, try to match
+  // the stored names against the customer list so the Buyer / Seller
+  // Selects light up instead of showing empty triggers.
+  useEffect(() => {
+    if (!isEdit || !customers?.length) return
+    setFormData(prev => {
+      const next = { ...prev }
+      let changed = false
+      if (!next.buyerCustomerId && next.buyerName) {
+        const match = customers.find(c =>
+          (c.name || '').trim().toLowerCase() === next.buyerName.trim().toLowerCase())
+        if (match) { next.buyerCustomerId = match.id; changed = true }
+      }
+      if (!next.sellerCustomerId && next.sellerName) {
+        const match = customers.find(c =>
+          (c.name || '').trim().toLowerCase() === next.sellerName.trim().toLowerCase())
+        if (match) { next.sellerCustomerId = match.id; changed = true }
+      }
+      return changed ? next : prev
+    })
+  }, [isEdit, customers])
+
   // When inventory is selected, auto-populate seller info. Prefer an active
   // Sale (first-hop resale); if none exists, fall back to the most recent
   // Active ResaleDeal for that inventory (chained resale).
@@ -11041,6 +11071,10 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [
       setShowNewBuyer(true)
       return
     }
+    // Sentinel used by the legacy-buyer fallback (see the Buyer Select
+    // below). Selecting it is a no-op — the current free-text buyerName
+    // stays in place and no customerId gets attached.
+    if (buyerId === '__legacy__') return
     const buyer = customers.find(c => c.id === buyerId)
     if (buyer) {
       setFormData({
@@ -11117,12 +11151,24 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [
 
   const handleSubmit = (e) => {
     e.preventDefault()
-    if (!formData.buyerCustomerId) {
-      toast({ title: 'Error', description: 'Please select or create a buyer', variant: 'destructive' })
-      return
-    }
-    if (!selectedSale && !selectedPreviousDeal) {
-      toast({ title: 'Error', description: 'No active owner found for this inventory', variant: 'destructive' })
+    // Create-only validations. In edit mode:
+    //   - buyerCustomerId may be null on legacy rows (backend keeps the
+    //     free-text buyerName the row already stored).
+    //   - selectedSale / selectedPreviousDeal aren't (re)derived because
+    //     handleInventoryChange only runs on manual inventory change; the
+    //     originalSaleId / previousResaleDealId are already locked in the
+    //     row and the backend `updateDeal` explicitly ignores them.
+    if (!isEdit) {
+      if (!formData.buyerCustomerId) {
+        toast({ title: 'Error', description: 'Please select or create a buyer', variant: 'destructive' })
+        return
+      }
+      if (!selectedSale && !selectedPreviousDeal) {
+        toast({ title: 'Error', description: 'No active owner found for this inventory', variant: 'destructive' })
+        return
+      }
+    } else if (!formData.buyerCustomerId && !formData.buyerName?.trim()) {
+      toast({ title: 'Error', description: 'Buyer is required', variant: 'destructive' })
       return
     }
 
@@ -11130,14 +11176,17 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [
     // the previous deal's resalePrice and originalSalePaid from the
     // ResaleBuyerPayments collected against that deal. We still send
     // `previousResaleDealId` so the backend knows it's a chained deal and
-    // can mark the previous deal TRANSFERRED.
-    const sourceLink = selectedPreviousDeal
-      ? { previousResaleDealId: selectedPreviousDeal.id }
-      : {
-          originalSaleId: selectedSale?.id,
-          originalSalePrice: selectedSale?.finalAmount,
-          originalSalePaid: selectedSale?.totalPaid || 0,
-        }
+    // can mark the previous deal TRANSFERRED. Skip this on edit — those
+    // links are immutable after creation.
+    const sourceLink = isEdit
+      ? {}
+      : (selectedPreviousDeal
+          ? { previousResaleDealId: selectedPreviousDeal.id }
+          : {
+              originalSaleId: selectedSale?.id,
+              originalSalePrice: selectedSale?.finalAmount,
+              originalSalePaid: selectedSale?.totalPaid || 0,
+            })
 
     onSubmit({
       ...formData,
@@ -11207,6 +11256,30 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [
         </Card>
       )}
 
+      {/* Edit-mode seller display — the two lookup cards below only render
+          when handleInventoryChange has resolved a Sale / previous ResaleDeal
+          on the current session, which doesn't happen on the first render
+          of the edit dialog. Show a read-only card so the user still sees
+          who the seller is on the row they opened. */}
+      {isEdit && !selectedSale && !selectedPreviousDeal && (formData.sellerName || formData.sellerPhone) && (
+        <Card className="bg-gray-50">
+          <CardContent className="pt-4">
+            <h4 className="font-medium mb-2 flex items-center gap-2">
+              <UserCircle className="w-4 h-4" /> Current Owner (Seller)
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+              <div>
+                <span className="text-gray-500">Name:</span> <strong>{formData.sellerName || '—'}</strong>
+              </div>
+              <div>
+                <span className="text-gray-500">Phone:</span> {formData.sellerPhone || 'N/A'}
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-2">Change the property above to reassign the seller.</p>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Chained resale: seller is the buyer from a previous ResaleDeal */}
       {!selectedSale && selectedPreviousDeal && (
         <Card className="bg-indigo-50/60 border-indigo-200">
@@ -11240,12 +11313,39 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [
       {/* Buyer Selection */}
       <div>
         <Label>Buyer (New Owner) *</Label>
+        {/* Current-buyer chip — always renders above the Select when a name
+            is set, so the user sees the current buyer even if the Radix
+            Select trigger fails to show it (legacy rows without a matching
+            customerId, or a stale render before the customers list loads). */}
+        {formData.buyerName && (
+          <div className="mb-2 flex items-center gap-2 text-xs bg-emerald-50 border border-emerald-200 text-emerald-800 px-3 py-1.5 rounded">
+            <span className="uppercase tracking-wide text-emerald-700 font-semibold">Current buyer</span>
+            <span className="font-semibold">{formData.buyerName}</span>
+            {formData.buyerPhone && <span className="text-emerald-700/80">· {formData.buyerPhone}</span>}
+            <span className="ml-auto text-emerald-700/80">
+              {formData.buyerCustomerId ? 'linked to customer' : 'free text — pick to link'}
+            </span>
+          </div>
+        )}
         {!showNewBuyer ? (
-          <Select value={formData.buyerCustomerId} onValueChange={handleBuyerChange}>
+          <Select
+            // Legacy fallback: older resale rows carry `buyerName` as free
+            // text with no `buyerCustomerId`. In that case bind the Select
+            // to a `__legacy__` sentinel + surface the free-text name as a
+            // synthetic item so the trigger renders the current buyer
+            // instead of a blank placeholder. The item is a no-op on click.
+            value={formData.buyerCustomerId || (formData.buyerName ? '__legacy__' : '')}
+            onValueChange={handleBuyerChange}
+          >
             <SelectTrigger>
-              <SelectValue placeholder="Select buyer" />
+              <SelectValue placeholder={formData.buyerName ? `Keep: ${formData.buyerName}` : 'Select buyer'} />
             </SelectTrigger>
             <SelectContent>
+              {!formData.buyerCustomerId && formData.buyerName && (
+                <SelectItem value="__legacy__" className="text-slate-700 italic">
+                  Keep current: {formData.buyerName}
+                </SelectItem>
+              )}
               {customers.filter(c => c.id !== formData.sellerCustomerId).map(c => (
                 <SelectItem key={c.id} value={c.id}>
                   {c.name} {c.phone ? `(${c.phone})` : ''}
@@ -11385,12 +11485,27 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [
       </div>
       
       <p className="text-sm text-gray-500 bg-blue-50 p-3 rounded">
-        📋 After creating, you'll record: (1) Buyer payments → Money IN to society, (2) Seller payouts → Principal + Profit to seller.
+        📋 {isEdit
+          ? 'Updating recomputes buyer amount, seller payout, and net profit from the new price / charges. Existing payments are preserved.'
+          : "After creating, you'll record: (1) Buyer payments → Money IN to society, (2) Seller payouts → Principal + Profit to seller."}
       </p>
       
       <div className="flex justify-end space-x-2">
         <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button type="submit" disabled={inventory.length === 0 || !formData.buyerCustomerId}>Create Resale Deal</Button>
+        {/* In edit mode we relax the "buyer customer must be linked" gate —
+            older deals stored buyerName as free text only, so requiring a
+            customerId would block every save on legacy rows. As long as
+            some buyerName is present the update still writes cleanly. */}
+        <Button
+          type="submit"
+          disabled={
+            inventory.length === 0
+              || (!isEdit && !formData.buyerCustomerId)
+              || (isEdit && !formData.buyerCustomerId && !formData.buyerName?.trim())
+          }
+        >
+          {isEdit ? 'Update Resale Deal' : 'Create Resale Deal'}
+        </Button>
       </div>
     </form>
   )
