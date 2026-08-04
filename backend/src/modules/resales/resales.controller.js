@@ -14,6 +14,10 @@ const create = asyncHandler(async (req, res) => {
   res.json(await service.create(req.body));
 });
 
+const updateDeal = asyncHandler(async (req, res) => {
+  sendOrError(res, await service.updateDeal(req.params.dealId, req.body));
+});
+
 const remove = asyncHandler(async (req, res) => {
   sendOrError(res, await service.remove(req.params.dealId, req.user.userId));
 });
@@ -55,7 +59,7 @@ const updateSellerPayout = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  list, create, remove, closeDeal,
+  list, create, updateDeal, remove, closeDeal,
   listBuyerPayments, addBuyerPayment, deleteBuyerPayment, updateBuyerPayment,
   listSellerPayouts, addSellerPayout, deleteSellerPayout, updateSellerPayout,
 };

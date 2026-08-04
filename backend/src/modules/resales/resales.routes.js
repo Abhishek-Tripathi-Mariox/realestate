@@ -5,6 +5,7 @@ const ctrl = require('./resales.controller');
 const router = express.Router();
 router.get('/', verifyToken, ctrl.list);
 router.post('/', verifyToken, ctrl.create);
+router.put('/:dealId', verifyToken, ctrl.updateDeal);
 router.delete('/:dealId', verifyToken, ctrl.remove);
 router.post('/:dealId/close', verifyToken, ctrl.closeDeal);
 router.get('/:dealId/buyer-payments', verifyToken, ctrl.listBuyerPayments);

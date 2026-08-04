@@ -228,6 +228,9 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
   const [globalLedgerEntries, setGlobalLedgerEntries] = useState([])
   const [globalLedgerLoading, setGlobalLedgerLoading] = useState(false)
   const [editingCommissionBill, setEditingCommissionBill] = useState(null)
+  // Resale deal edit dialog target — opened from the row's edit button and
+  // reuses the ResaleDealForm in edit mode (initialData populates the fields).
+  const [editingResaleDeal, setEditingResaleDeal] = useState(null)
   const [editingMarginBill, setEditingMarginBill] = useState(null)
   
   // Partner edit state
@@ -2234,6 +2237,20 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
       await loadSocietyData()
       setIsDialogOpen(false)
       toast({ title: 'Success', description: 'Resale deal created successfully' })
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  const handleUpdateResaleDeal = async (formData) => {
+    if (!editingResaleDeal?.id) return
+    try {
+      await apiCall(`/resales/${editingResaleDeal.id}`, 'PUT', formData)
+      await loadSocietyData()
+      setEditingResaleDeal(null)
+      setIsDialogOpen(false)
+      setDialogMode('')
+      toast({ title: 'Success', description: 'Resale deal updated' })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
     }
@@ -4911,6 +4928,14 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
                                     <Button variant="outline" size="sm" onClick={() => openResalePayments(deal)}>
                                       <CreditCard className="w-4 h-4 mr-1" /> Payments
                                     </Button>
+                                    {/* Edit is only available while the deal is still open —
+                                        closed / transferred deals have moved ownership so
+                                        their numbers shouldn't change retroactively. */}
+                                    {deal.status !== 'TRANSFERRED' && deal.status !== 'Closed' && (
+                                      <Button variant="outline" size="sm" onClick={() => setEditingResaleDeal(deal)} title="Edit deal">
+                                        <Edit className="w-4 h-4" />
+                                      </Button>
+                                    )}
                                     {deal.status === 'ACTIVE' && deal.buyerStatus === 'PAID' && deal.sellerStatus === 'PAID' && (
                                       <AlertDialog>
                                         <AlertDialogTrigger asChild>
@@ -5888,6 +5913,37 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
               initialData={editingCommissionBill}
               onSubmit={handleUpdateCommissionBill}
               onCancel={() => setEditingCommissionBill(null)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Resale Deal Dialog — reuses ResaleDealForm with initialData so
+          the same input layout drives both create and edit. Backend
+          recomputes derived totals (buyerPurchaseAmount, seller payout,
+          netProfit) from the new resalePrice / charges. */}
+      <Dialog open={!!editingResaleDeal} onOpenChange={(open) => !open && setEditingResaleDeal(null)}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Resale Deal</DialogTitle>
+            <DialogDescription>
+              Update seller / buyer info, resale price, charges, notes.
+            </DialogDescription>
+          </DialogHeader>
+          {editingResaleDeal && (
+            <ResaleDealForm
+              inventory={inventory}
+              sales={sales}
+              customers={customers}
+              resaleDeals={resaleDeals}
+              initialData={editingResaleDeal}
+              onSubmit={handleUpdateResaleDeal}
+              onCancel={() => setEditingResaleDeal(null)}
+              onCreateCustomer={async (customerData) => {
+                const newCustomer = await apiCall('/customers', 'POST', { ...customerData, societyId: selectedSociety })
+                await loadSocietyData()
+                return newCustomer
+              }}
             />
           )}
         </DialogContent>
@@ -10897,22 +10953,23 @@ const MarginBillForm = ({ accounts = [], onSubmit, onCancel, initialData }) => {
 }
 
 // Resale Deal Form Component
-const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [], onSubmit, onCancel, onCreateCustomer }) => {
+const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [], onSubmit, onCancel, onCreateCustomer, initialData = null }) => {
+  const isEdit = Boolean(initialData?.id)
   const [formData, setFormData] = useState({
-    inventoryId: '',
-    sellerCustomerId: '',
-    sellerName: '',
-    sellerPhone: '',
-    buyerCustomerId: '',
-    buyerName: '',
-    buyerPhone: '',
-    resalePrice: '',
-    transferCharges: '0',
-    brokerage: '0',
-    otherCharges: '0',
-    chargesNotes: '',
-    dealDate: new Date().toISOString().split('T')[0],
-    notes: ''
+    inventoryId: initialData?.inventoryId || '',
+    sellerCustomerId: initialData?.sellerCustomerId || '',
+    sellerName: initialData?.sellerName || '',
+    sellerPhone: initialData?.sellerPhone || '',
+    buyerCustomerId: initialData?.buyerCustomerId || '',
+    buyerName: initialData?.buyerName || '',
+    buyerPhone: initialData?.buyerPhone || '',
+    resalePrice: initialData?.resalePrice != null ? String(initialData.resalePrice) : '',
+    transferCharges: initialData?.transferCharges != null ? String(initialData.transferCharges) : '0',
+    brokerage: initialData?.brokerage != null ? String(initialData.brokerage) : '0',
+    otherCharges: initialData?.otherCharges != null ? String(initialData.otherCharges) : '0',
+    chargesNotes: initialData?.chargesNotes || '',
+    dealDate: initialData?.dealDate || new Date().toISOString().split('T')[0],
+    notes: initialData?.notes || ''
   })
   
   const [selectedSale, setSelectedSale] = useState(null)
@@ -11562,17 +11619,19 @@ const ResalePaymentDrawer = ({ isOpen, onClose, deal, buyerPayments, sellerPayou
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {/* Parties */}
+                  {/* Parties — Buyer on the left, Seller on the right so the
+                      new owner reads first (the party the user is usually
+                      chasing payments from). */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="rounded-md border bg-white p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-orange-700">Seller (TRANSFERRED)</p>
-                      <p className="font-semibold text-slate-900 mt-0.5">{deal.sellerName || '—'}</p>
-                      {deal.sellerPhone && <p className="text-xs text-slate-500">{deal.sellerPhone}</p>}
-                    </div>
                     <div className="rounded-md border bg-white p-3">
                       <p className="text-[11px] uppercase tracking-wide text-green-700">Buyer (NEW OWNER)</p>
                       <p className="font-semibold text-slate-900 mt-0.5">{deal.buyerName || '—'}</p>
                       {deal.buyerPhone && <p className="text-xs text-slate-500">{deal.buyerPhone}</p>}
+                    </div>
+                    <div className="rounded-md border bg-white p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-orange-700">Seller (TRANSFERRED)</p>
+                      <p className="font-semibold text-slate-900 mt-0.5">{deal.sellerName || '—'}</p>
+                      {deal.sellerPhone && <p className="text-xs text-slate-500">{deal.sellerPhone}</p>}
                     </div>
                   </div>
 

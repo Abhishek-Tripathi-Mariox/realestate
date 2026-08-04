@@ -240,6 +240,75 @@ const remove = async (dealId, userId) => {
   return { message: 'Resale deal deleted with reversal' };
 };
 
+// Edit a resale deal in place. We accept the same shape the create endpoint
+// takes (except immutable links like originalSaleId / previousResaleDealId)
+// and recompute every derived field — buyerPurchaseAmount, sellerPayout*,
+// netProfit — so the payments drawer and the row totals stay consistent.
+const updateDeal = async (dealId, body) => {
+  const existing = await ResaleDeal.findOne(notDeleted({ id: dealId })).lean();
+  if (!existing) return { error: 'Deal not found', status: 404 };
+  if (existing.status === 'TRANSFERRED' || existing.status === 'Closed') {
+    return { error: 'Cannot edit a closed / transferred deal', status: 400 };
+  }
+
+  const resalePrice = body.resalePrice !== undefined
+    ? Number(body.resalePrice) || 0
+    : (existing.resalePrice || 0);
+  const transferCharges = body.transferCharges !== undefined
+    ? Number(body.transferCharges) || 0
+    : (existing.transferCharges || 0);
+  const brokerage = body.brokerage !== undefined
+    ? Number(body.brokerage) || 0
+    : (existing.brokerage || 0);
+  const otherCharges = body.otherCharges !== undefined
+    ? Number(body.otherCharges) || 0
+    : (existing.otherCharges || 0);
+  const companyCommission = body.companyCommission !== undefined
+    ? Number(body.companyCommission) || 0
+    : (transferCharges + brokerage + otherCharges);
+
+  // Keep the "original" link fields exactly as they were on create — those
+  // are set at deal creation and drive the chained-resale lineage. Only the
+  // captured amounts against them can move if the user tweaked the resale
+  // price (which shifts profit + seller payout).
+  const originalSalePrice = existing.originalSalePrice || 0;
+  const originalSalePaid = existing.originalSalePaid || 0;
+
+  const buyerPurchaseAmount = resalePrice;
+  const grossProfit = resalePrice - originalSalePrice;
+  const netProfit = grossProfit - companyCommission;
+  const sellerPayoutPrincipal = originalSalePaid;
+  const sellerPayoutProfit = netProfit;
+  const sellerPayoutAmount = Math.max(0, sellerPayoutPrincipal + sellerPayoutProfit);
+
+  const update = {
+    updatedAt: new Date(),
+    resalePrice,
+    transferCharges,
+    brokerage,
+    otherCharges,
+    companyCommission,
+    buyerPurchaseAmount,
+    sellerPayoutPrincipal,
+    sellerPayoutProfit,
+    sellerPayoutAmount,
+    netProfit,
+  };
+  // Simple pass-throughs — only overwrite when the body actually sent them
+  // so a partial PUT doesn't blank the fields it forgot to include.
+  const passThrough = [
+    'sellerName', 'sellerPhone', 'sellerCustomerId',
+    'buyerName', 'buyerPhone', 'buyerCustomerId',
+    'chargesNotes', 'notes', 'dealDate', 'inventoryId',
+  ];
+  for (const k of passThrough) {
+    if (body[k] !== undefined) update[k] = body[k];
+  }
+
+  await ResaleDeal.updateOne({ id: dealId }, { $set: update });
+  return { ...existing, ...update };
+};
+
 const closeDeal = async (dealId, userId) => {
   const deal = await ResaleDeal.findOne({ id: dealId }).lean();
   if (!deal) return { error: 'Deal not found', status: 404 };
@@ -596,7 +665,7 @@ const updateSellerPayout = async (payoutId, body, userId) => {
 };
 
 module.exports = {
-  list, create, remove, closeDeal,
+  list, create, updateDeal, remove, closeDeal,
   listBuyerPayments, addBuyerPayment, deleteBuyerPayment, updateBuyerPayment,
   listSellerPayouts, addSellerPayout, deleteSellerPayout, updateSellerPayout,
 };
