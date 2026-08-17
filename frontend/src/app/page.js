@@ -8444,8 +8444,13 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
             </Card>
           )}
 
-          {/* Entry Form - Hide for transferred sales */}
-          {ledgerType === 'sale' && ledgerItem?.status === 'TRANSFERRED' ? (
+          {/* Transferred-sale advisory — always visible for TRANSFERRED sales
+              as context, but no longer HIDES the add-entry form. Users need
+              to be able to backfill / adjust the original owner's ledger
+              even after the flat has been resold (mismatched historical
+              payments, catch-up entries, etc.). The button below carries an
+              amber tint so it reads as an advanced / override action. */}
+          {ledgerType === 'sale' && ledgerItem?.status === 'TRANSFERRED' && (
             <Card className="mb-4 border-purple-200 bg-purple-50">
               <CardContent className="py-4">
                 <div className="flex items-center gap-3 text-purple-700">
@@ -8453,23 +8458,30 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                   <div>
                     <p className="font-medium">This sale has been transferred via Resale</p>
                     <p className="text-sm text-purple-600">
-                      New owner: {ledgerItem.transferredTo}. Use the Resale module for payment tracking.
+                      New owner: {ledgerItem.transferredTo}. Use the Resale module for ongoing payment tracking. Adjust the original owner&apos;s ledger below only when correcting past entries.
                     </p>
                   </div>
                 </div>
               </CardContent>
             </Card>
-          ) : !showAddForm ? (
-            <div className={`mb-4 grid gap-2 ${ledgerType === 'sale' && sameCustomerSales.length > 0 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'}`}>
+          )}
+
+          {!showAddForm ? (
+            <div className={`mb-4 grid gap-2 ${ledgerType === 'sale' && sameCustomerSales.length > 0 && ledgerItem?.status !== 'TRANSFERRED' ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'}`}>
               <Button
                 type="button"
                 variant="outline"
-                className="w-full"
+                className={`w-full ${ledgerType === 'sale' && ledgerItem?.status === 'TRANSFERRED' ? 'border-amber-300 text-amber-700 hover:bg-amber-50' : ''}`}
                 onClick={() => setShowAddForm(true)}
               >
-                <Plus className="w-4 h-4 mr-2" /> Add New Entry
+                <Plus className="w-4 h-4 mr-2" />
+                {ledgerType === 'sale' && ledgerItem?.status === 'TRANSFERRED'
+                  ? 'Add Entry (original owner — adjustment)'
+                  : 'Add New Entry'}
               </Button>
-              {ledgerType === 'sale' && sameCustomerSales.length > 0 && (
+              {/* Inter-sale transfer doesn't apply to a transferred sale —
+                  the paid amount already moved into the resale flow. */}
+              {ledgerType === 'sale' && sameCustomerSales.length > 0 && ledgerItem?.status !== 'TRANSFERRED' && (
                 <Button
                   type="button"
                   variant="outline"

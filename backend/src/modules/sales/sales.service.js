@@ -573,6 +573,36 @@ const addLedgerEntry = async (saleId, body, userId) => {
     remark: body.remark || `${entryType} - ${displayName || 'customer'}`,
   }, userId);
 
+  // TRANSFERRED-sale sync: the linked ResaleDeal snapshots the original
+  // owner's paid amount at deal-creation time (originalSalePaid + its
+  // derived sellerPayout* fields). Without this update, adding a ledger
+  // entry to a transferred sale would bump the sale ledger + daybook but
+  // leave the resale deal's seller-payout numbers stale. Only mirror for
+  // SALE_PAYMENT credits — profit payouts / withdrawals against a
+  // transferred sale are unusual and shouldn't move the resale snapshot.
+  if (sale.status === 'TRANSFERRED' && entryType === 'SALE_PAYMENT') {
+    const linkedDeal = await ResaleDeal.findOne({
+      $or: [{ id: sale.resaleDealId }, { originalSaleId: sale.id }],
+      isDeleted: { $ne: true },
+    }).lean();
+    if (linkedDeal) {
+      const currentPaid = Number(linkedDeal.originalSalePaid) || 0;
+      const newPaid = currentPaid + amount;
+      const profit = Number(linkedDeal.sellerPayoutProfit) || 0;
+      await ResaleDeal.updateOne(
+        { id: linkedDeal.id },
+        {
+          $set: {
+            originalSalePaid: newPaid,
+            sellerPayoutPrincipal: newPaid,
+            sellerPayoutAmount: Math.max(0, newPaid + profit),
+            updatedAt: new Date(),
+          },
+        },
+      );
+    }
+  }
+
   return entry;
 };
 // Internal inter-sale transfer: moves a paid amount from one of a
@@ -858,6 +888,34 @@ const deleteSalePayment = async (id, userId) => {
     await Sale.updateOne({ id: entry.saleId }, { $set: { paymentStatus } });
   }
 
+  // TRANSFERRED-sale mirror (same as addLedgerEntry): shrink the linked
+  // ResaleDeal's originalSalePaid + seller payout snapshot when a SALE_PAYMENT
+  // credit is removed from a transferred sale. Skip debits / transfer legs
+  // (those are handled above) so the mirror only ever tracks credits.
+  const sale = await Sale.findOne({ id: entry.saleId }).lean();
+  if (sale?.status === 'TRANSFERRED' && (entry.entryType || 'SALE_PAYMENT') === 'SALE_PAYMENT') {
+    const linkedDeal = await ResaleDeal.findOne({
+      $or: [{ id: sale.resaleDealId }, { originalSaleId: sale.id }],
+      isDeleted: { $ne: true },
+    }).lean();
+    if (linkedDeal) {
+      const currentPaid = Number(linkedDeal.originalSalePaid) || 0;
+      const newPaid = Math.max(0, currentPaid - (entry.amount || 0));
+      const profit = Number(linkedDeal.sellerPayoutProfit) || 0;
+      await ResaleDeal.updateOne(
+        { id: linkedDeal.id },
+        {
+          $set: {
+            originalSalePaid: newPaid,
+            sellerPayoutPrincipal: newPaid,
+            sellerPayoutAmount: Math.max(0, newPaid + profit),
+            updatedAt: new Date(),
+          },
+        },
+      );
+    }
+  }
+
   await SalePaymentEntry.updateOne({ id }, { $set: { isDeleted: true, deletedAt: new Date() } });
   return { message: 'Sale ledger entry deleted' };
 };
@@ -1006,6 +1064,39 @@ const updateSalePayment = async (id, body, userId) => {
         referenceNo: newReferenceNo,
         remark: newRemark || `${newEntryType} - ${updatedSale.buyerName}`,
       }, userId);
+
+      // TRANSFERRED-sale mirror (same pattern as addLedgerEntry /
+      // deleteSalePayment): re-derive originalSalePaid on the linked
+      // ResaleDeal by applying the credit delta between old and new. Only
+      // SALE_PAYMENT credits count toward the resale snapshot; other
+      // entry-type flips get zero contribution so the mirror stays clean.
+      if (updatedSale.status === 'TRANSFERRED') {
+        const linkedDeal = await ResaleDeal.findOne({
+          $or: [{ id: updatedSale.resaleDealId }, { originalSaleId: updatedSale.id }],
+          isDeleted: { $ne: true },
+        }).lean();
+        if (linkedDeal) {
+          const oldCredit = oldType === 'SALE_PAYMENT' ? (entry.amount || 0) : 0;
+          const newCredit = newEntryType === 'SALE_PAYMENT' ? newAmount : 0;
+          const mirrorDelta = newCredit - oldCredit;
+          if (mirrorDelta !== 0) {
+            const currentPaid = Number(linkedDeal.originalSalePaid) || 0;
+            const newPaid = Math.max(0, currentPaid + mirrorDelta);
+            const profit = Number(linkedDeal.sellerPayoutProfit) || 0;
+            await ResaleDeal.updateOne(
+              { id: linkedDeal.id },
+              {
+                $set: {
+                  originalSalePaid: newPaid,
+                  sellerPayoutPrincipal: newPaid,
+                  sellerPayoutAmount: Math.max(0, newPaid + profit),
+                  updatedAt: new Date(),
+                },
+              },
+            );
+          }
+        }
+      }
     }
   } else {
     await SalePaymentEntry.updateOne(
