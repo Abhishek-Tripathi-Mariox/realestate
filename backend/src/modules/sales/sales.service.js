@@ -605,6 +605,37 @@ const addLedgerEntry = async (saleId, body, userId) => {
 
   return entry;
 };
+// Sync helper — apply a signed credit delta to a sale's linked ResaleDeal
+// snapshot (originalSalePaid + sellerPayout*). No-op when the sale isn't
+// TRANSFERRED or when the delta rounds to zero. Used by transfer create /
+// update / delete so an inter-sale transfer touching a TRANSFERRED leg
+// keeps the resale drawer's Money OUT numbers in sync — same idea as the
+// SALE_PAYMENT mirror inside addLedgerEntry.
+const mirrorResaleDealDelta = async (sale, deltaCredit) => {
+  if (!sale || sale.status !== 'TRANSFERRED') return;
+  const amt = Number(deltaCredit) || 0;
+  if (Math.abs(amt) < 0.01) return;
+  const linkedDeal = await ResaleDeal.findOne({
+    $or: [{ id: sale.resaleDealId }, { originalSaleId: sale.id }],
+    isDeleted: { $ne: true },
+  }).lean();
+  if (!linkedDeal) return;
+  const currentPaid = Number(linkedDeal.originalSalePaid) || 0;
+  const newPaid = Math.max(0, currentPaid + amt);
+  const profit = Number(linkedDeal.sellerPayoutProfit) || 0;
+  await ResaleDeal.updateOne(
+    { id: linkedDeal.id },
+    {
+      $set: {
+        originalSalePaid: newPaid,
+        sellerPayoutPrincipal: newPaid,
+        sellerPayoutAmount: Math.max(0, newPaid + profit),
+        updatedAt: new Date(),
+      },
+    },
+  );
+};
+
 // Internal inter-sale transfer: moves a paid amount from one of a
 // customer's sales to another sale of the SAME customer. No cash actually
 // moves, so no daybook transaction is written. Records a paired
@@ -629,9 +660,9 @@ const transferBetweenSales = async (sourceSaleId, body, userId) => {
   ]);
   if (!source || source.isDeleted) return { error: 'Source sale not found', status: 404 };
   if (!destination || destination.isDeleted) return { error: 'Destination sale not found', status: 404 };
-  if (source.status === 'TRANSFERRED' || destination.status === 'TRANSFERRED') {
-    return { error: 'Transferred sales can\'t participate in internal transfers', status: 400 };
-  }
+  // TRANSFERRED sales CAN participate now — the mirror below keeps each
+  // side's linked ResaleDeal snapshot in sync so the resale drawer's seller
+  // payout numbers move with the transfer.
   // Cross-customer transfers are allowed — the operator decides whether the
   // move makes sense. Daybook stays untouched either way (no cash movement).
 
@@ -713,6 +744,14 @@ const transferBetweenSales = async (sourceSaleId, body, userId) => {
   await Promise.all([
     Sale.updateOne({ id: sourceSaleId }, { $set: { paymentStatus: recomputeStatus(updatedSource) } }),
     Sale.updateOne({ id: destinationSaleId }, { $set: { paymentStatus: recomputeStatus(updatedDest) } }),
+  ]);
+
+  // Mirror the credit delta on any TRANSFERRED leg's linked ResaleDeal:
+  //   source (TRANSFER_OUT) sends money → its ResaleDeal snapshot shrinks
+  //   destination (TRANSFER_IN) receives → its ResaleDeal snapshot grows
+  await Promise.all([
+    mirrorResaleDealDelta(source, -amount),
+    mirrorResaleDealDelta(destination, amount),
   ]);
 
   return {
@@ -822,6 +861,12 @@ const updateTransfer = async (transferGroupId, body) => {
     ),
   ]);
 
+  // Mirror the CHANGE (not the total) onto each TRANSFERRED leg's snapshot.
+  await Promise.all([
+    mirrorResaleDealDelta(sourceSale, sourceDelta),
+    mirrorResaleDealDelta(destSale, destDelta),
+  ]);
+
   return {
     message: 'Transfer updated',
     transferGroupId,
@@ -855,6 +900,10 @@ const deleteSalePayment = async (id, userId) => {
           ? 'Pending'
           : (gteMoney(newPaid, updated.finalAmount || 0) ? 'Paid' : 'Partial');
         await Sale.updateOne({ id: leg.saleId }, { $set: { paymentStatus } });
+        // Same credit delta applied to the sale needs to mirror onto any
+        // linked ResaleDeal snapshot so the resale drawer's Money OUT
+        // (Seller) numbers back out cleanly when a transfer is reversed.
+        await mirrorResaleDealDelta(updated, legDelta);
       }
     }
     await SalePaymentEntry.updateMany(

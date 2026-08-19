@@ -8143,12 +8143,14 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
   // All live sales except this one — destination options for an internal
   // transfer. Cross-customer transfers are allowed; the operator decides
   // whether the move makes sense.
+  // Destination options for the inter-sale transfer picker. We used to filter
+  // TRANSFERRED sales out entirely — but the user needs to be able to move
+  // money into a TRANSFERRED sale too (adjustments against the original
+  // owner's ledger even after the flat has been resold). Backend now mirrors
+  // any TRANSFERRED leg's amount onto the linked ResaleDeal snapshot so the
+  // resale drawer stays in sync.
   const sameCustomerSales = ledgerType === 'sale' && ledgerItem
-    ? (sales || []).filter(s =>
-        s.id !== ledgerItem.id
-        && s.status !== 'TRANSFERRED'
-        && !s.isDeleted
-      )
+    ? (sales || []).filter(s => s.id !== ledgerItem.id && !s.isDeleted)
     : []
 
   // Set default account on mount, matching the selected payment mode
@@ -8467,7 +8469,7 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
           )}
 
           {!showAddForm ? (
-            <div className={`mb-4 grid gap-2 ${ledgerType === 'sale' && sameCustomerSales.length > 0 && ledgerItem?.status !== 'TRANSFERRED' ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'}`}>
+            <div className={`mb-4 grid gap-2 ${ledgerType === 'sale' && sameCustomerSales.length > 0 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'}`}>
               <Button
                 type="button"
                 variant="outline"
@@ -8479,18 +8481,23 @@ const LedgerDrawer = ({ isOpen, onClose, ledgerType, ledgerItem, entries, accoun
                   ? 'Add Entry (original owner — adjustment)'
                   : 'Add New Entry'}
               </Button>
-              {/* Inter-sale transfer doesn't apply to a transferred sale —
-                  the paid amount already moved into the resale flow. */}
-              {ledgerType === 'sale' && sameCustomerSales.length > 0 && ledgerItem?.status !== 'TRANSFERRED' && (
+              {/* Inter-sale transfer works both directions on TRANSFERRED
+                  sales too: the original owner can still send balance out
+                  or receive an adjustment in. Amber-tinted when this side is
+                  transferred so the user notices it's an override action. */}
+              {ledgerType === 'sale' && sameCustomerSales.length > 0 && (
                 <Button
                   type="button"
                   variant="outline"
-                  className="w-full border-indigo-300 text-indigo-700 hover:bg-indigo-50"
+                  className={`w-full ${ledgerItem?.status === 'TRANSFERRED' ? 'border-amber-300 text-amber-700 hover:bg-amber-50' : 'border-indigo-300 text-indigo-700 hover:bg-indigo-50'}`}
                   onClick={() => setShowTransferDialog(true)}
                   disabled={totals.runningBalance <= 0}
                   title={totals.runningBalance <= 0 ? 'Source has no paid balance to transfer' : 'Move paid amount to another sale of this customer'}
                 >
-                  <ArrowRightLeft className="w-4 h-4 mr-2" /> Transfer to another sale
+                  <ArrowRightLeft className="w-4 h-4 mr-2" />
+                  {ledgerItem?.status === 'TRANSFERRED'
+                    ? 'Transfer to another sale (adjustment)'
+                    : 'Transfer to another sale'}
                 </Button>
               )}
             </div>
