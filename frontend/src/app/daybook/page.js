@@ -761,20 +761,25 @@ export default function DaybookPage() {
                 </Button>
               </div>
               
-              <div>
-                <Label className="text-xs">Society</Label>
-                <Select value={filters.societyId} onValueChange={v => setFilters({...filters, societyId: v})}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="All Societies" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All Societies</SelectItem>
-                    {societies.map(s => (
-                      <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              {/* Society filter only makes sense in Society Daybook — the
+                  Company Daybook already scopes to company-level rows, so
+                  a society picker there just adds noise. */}
+              {scope !== 'COMPANY' && (
+                <div>
+                  <Label className="text-xs">Society</Label>
+                  <Select value={filters.societyId} onValueChange={v => setFilters({...filters, societyId: v})}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="All Societies" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All Societies</SelectItem>
+                      {societies.map(s => (
+                        <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
               
               <div>
                 <Label className="text-xs">Account</Label>

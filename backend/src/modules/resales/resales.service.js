@@ -4,6 +4,7 @@ const { createTransaction, createReversalTransaction } = require('../../utils/tr
 const {
   ResaleDeal, ResaleBuyerPayment, ResaleSellerPayout, Account, Transaction,
   Inventory, InventoryOwnershipHistory, Sale, PaymentAllocation, CustomerPayment,
+  MarginBill,
 } = require('../../models');
 
 const stripId = ({ _id, ...rest }) => rest;
@@ -145,6 +146,31 @@ const create = async (body) => {
   };
   await ResaleDeal.create(deal);
 
+  // Auto-create a MarginBill for the total company commission so the amount
+  // shows up as an unpaid margin bill in the Margin Ledger — user can then
+  // record margin payouts against it via the standard margin-payment flow.
+  // Skip when commission is 0 (no charges captured, nothing to bill).
+  if (companyCommission > 0) {
+    // Build a compact breakdown in the description so the Margin Ledger row
+    // reads like "Transfer ₹X · Brokerage ₹Y · Margin ₹Z" without needing
+    // the user to jump back into the resale details.
+    const bits = [];
+    if (transferCharges > 0) bits.push(`Transfer ₹${transferCharges.toLocaleString('en-IN')}`);
+    if (brokerage > 0) bits.push(`Brokerage ₹${brokerage.toLocaleString('en-IN')}`);
+    if (otherCharges > 0) bits.push(`Margin ₹${otherCharges.toLocaleString('en-IN')}`);
+    await MarginBill.create({
+      id: uuidv4(),
+      societyId: deal.societyId,
+      resaleDealId: deal.id,
+      amount: companyCommission,
+      billDate: deal.dealDate || new Date().toISOString().split('T')[0],
+      description: bits.join(' · ') || 'Resale company commission',
+      paidAmount: 0,
+      status: 'Pending',
+      createdAt: new Date(),
+    });
+  }
+
   // Mark the original Sale as TRANSFERRED so the Sales tab stops showing it
   // as an active booking with a pending balance — the resale flow now owns
   // payment tracking for this unit.
@@ -206,6 +232,36 @@ const remove = async (dealId, userId) => {
       isReversal: { $ne: true },
     }).lean();
     if (t) await createReversalTransaction(t, userId, 'Resale deal deleted');
+  }
+
+  // Cascade the auto-created MarginBill(s) — reverse each margin-payment
+  // daybook txn first, then soft-delete the payment rows + the bill itself.
+  // Any MarginPayment model / txns already tied to this bill will disappear
+  // from the Margin Ledger and the daybook cleanly.
+  const linkedMarginBills = await MarginBill.find(notDeleted({ resaleDealId: dealId })).lean();
+  if (linkedMarginBills.length) {
+    const MarginPayment = require('../../models').MarginPayment;
+    for (const bill of linkedMarginBills) {
+      const marginPayments = await MarginPayment.find(notDeleted({ billId: bill.id })).lean();
+      for (const mp of marginPayments) {
+        const t = await Transaction.findOne({
+          sourceType: 'MARGIN_PAYMENT',
+          sourceId: mp.id,
+          isReversal: { $ne: true },
+        }).lean();
+        if (t) await createReversalTransaction(t, userId, 'Resale deal deleted');
+      }
+      if (marginPayments.length) {
+        await MarginPayment.updateMany(
+          { billId: bill.id },
+          { $set: { isDeleted: true, deletedAt: new Date(), deletedReason: 'Resale deal deleted' } },
+        );
+      }
+    }
+    await MarginBill.updateMany(
+      { resaleDealId: dealId, isDeleted: { $ne: true } },
+      { $set: { isDeleted: true, deletedAt: new Date(), deletedReason: 'Resale deal deleted' } },
+    );
   }
 
   await ResaleBuyerPayment.updateMany({ dealId }, { $set: { isDeleted: true, deletedAt: new Date() } });
@@ -306,6 +362,62 @@ const updateDeal = async (dealId, body) => {
   }
 
   await ResaleDeal.updateOne({ id: dealId }, { $set: update });
+
+  // Sync the linked MarginBill (auto-created at deal creation) when the
+  // commission or its breakdown changes. Cases:
+  //   1. Commission was 0, now > 0 → create the bill lazily.
+  //   2. Commission was > 0, now 0 → soft-delete the bill (only if unpaid).
+  //   3. Commission changed to a new positive value → update amount +
+  //      description; refuse to shrink below paidAmount so paid margin
+  //      payouts stay consistent.
+  const existingBill = await MarginBill
+    .find(notDeleted({ resaleDealId: dealId }))
+    .sort({ createdAt: 1 })
+    .lean()
+    .then(rows => rows[0] || null);
+  const bits = [];
+  if (transferCharges > 0) bits.push(`Transfer ₹${transferCharges.toLocaleString('en-IN')}`);
+  if (brokerage > 0) bits.push(`Brokerage ₹${brokerage.toLocaleString('en-IN')}`);
+  if (otherCharges > 0) bits.push(`Margin ₹${otherCharges.toLocaleString('en-IN')}`);
+  const newDescription = bits.join(' · ') || 'Resale company commission';
+
+  if (companyCommission > 0 && !existingBill) {
+    await MarginBill.create({
+      id: uuidv4(),
+      societyId: existing.societyId,
+      resaleDealId: dealId,
+      amount: companyCommission,
+      billDate: (body.dealDate || existing.dealDate) || new Date().toISOString().split('T')[0],
+      description: newDescription,
+      paidAmount: 0,
+      status: 'Pending',
+      createdAt: new Date(),
+    });
+  } else if (existingBill && companyCommission <= 0) {
+    if ((existingBill.paidAmount || 0) > 0) {
+      return { error: 'Cannot clear commission — the linked margin bill already has payments. Reverse those first.', status: 400 };
+    }
+    await MarginBill.updateOne(
+      { id: existingBill.id },
+      { $set: { isDeleted: true, deletedAt: new Date(), deletedReason: 'Commission cleared on resale edit' } },
+    );
+  } else if (existingBill && companyCommission > 0) {
+    const paid = existingBill.paidAmount || 0;
+    if (companyCommission + 0.01 < paid) {
+      return {
+        error: `New commission ₹${companyCommission} is less than already paid margin ₹${paid}. Reverse margin payments before shrinking.`,
+        status: 400,
+      };
+    }
+    const newStatus = paid <= 0
+      ? 'Pending'
+      : (paid + 0.01 >= companyCommission ? 'Paid' : 'Partial');
+    await MarginBill.updateOne(
+      { id: existingBill.id },
+      { $set: { amount: companyCommission, description: newDescription, status: newStatus } },
+    );
+  }
+
   return { ...existing, ...update };
 };
 

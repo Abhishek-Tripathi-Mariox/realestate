@@ -27,4 +27,10 @@ const ledger = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
-module.exports = { list, create, update, remove, ledger };
+const ledgerEntries = asyncHandler(async (req, res) => {
+  const result = await service.ledgerEntries(req.params.id, req.query);
+  if (result && result.error) return res.status(result.status || 500).json({ error: result.error });
+  res.json(result);
+});
+
+module.exports = { list, create, update, remove, ledger, ledgerEntries };

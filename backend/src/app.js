@@ -19,6 +19,7 @@ const accountsRoutes = require('./modules/accounts/accounts.routes');
 const daybookRoutes = require('./modules/daybook/daybook.routes');
 const expensesRoutes = require('./modules/expenses/expenses.routes');
 const vendorsRoutes = require('./modules/vendors/vendors.routes');
+const vendorAdvancesRoutes = require('./modules/vendorAdvances/vendorAdvances.routes');
 const masterDataRoutes = require('./modules/masterData/masterData.routes');
 const commissionsRoutes = require('./modules/commissions/commissions.routes');
 const marginsRoutes = require('./modules/margins/margins.routes');
@@ -84,6 +85,8 @@ app.use('/api/expenses', expensesRoutes.expensesRouter);
 app.use('/api/expense-payments', expensesRoutes.expensePaymentsRouter);
 
 app.use('/api/vendors', vendorsRoutes);
+app.use('/api/vendors/:vendorId/advances', vendorAdvancesRoutes.vendorScopedRouter);
+app.use('/api/vendor-advances', vendorAdvancesRoutes.vendorAdvancesRouter);
 app.use('/api/vendor-types', masterDataRoutes.vendorTypesRouter);
 app.use('/api/expense-categories', masterDataRoutes.expenseCategoriesRouter);
 

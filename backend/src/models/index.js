@@ -13,6 +13,8 @@ module.exports = {
   Sale: require('./Sale'),
   SalePaymentEntry: require('./SalePaymentEntry'),
   Vendor: require('./Vendor'),
+  VendorAdvance: require('./VendorAdvance'),
+  VendorAdvanceWork: require('./VendorAdvanceWork'),
   ExpenseBill: require('./ExpenseBill'),
   ExpensePayment: require('./ExpensePayment'),
   CommissionBill: require('./CommissionBill'),

@@ -308,7 +308,12 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
   // Vendor ledger drawer
   const [isVendorLedgerOpen, setIsVendorLedgerOpen] = useState(false)
   const [vendorLedgerItem, setVendorLedgerItem] = useState(null)
+  // Full dataset — kept only so CSV/PDF exports can dump every entry the
+  // vendor has, independent of the paginated view in the drawer.
   const [vendorLedgerEntries, setVendorLedgerEntries] = useState([])
+  // Bumped by mutation handlers so the drawer's server-paged view refetches
+  // itself in response to add/edit/delete without needing to remount.
+  const [vendorLedgerRefresh, setVendorLedgerRefresh] = useState(0)
 
   // Resale payment drawer states
   const [isResalePaymentDrawerOpen, setIsResalePaymentDrawerOpen] = useState(false)
@@ -834,8 +839,13 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
 
   // Lazy-load a tab's data on first visit. Reuses the cached fetch across
   // tab toggles. On error, drops the cache marker so the next visit retries.
+  // In companyScope mode there's no selectedSociety — the tab loaders (e.g.
+  // loadExpensesTab) already branch on companyScope to hit the company-level
+  // API. Without allowing companyScope through here every post-mutation
+  // refresh via loadSocietyData would silently no-op, forcing the user to
+  // manually reload after every vendor / bill / payment change.
   const ensureTabLoaded = async (tab) => {
-    if (!selectedSociety) return
+    if (!selectedSociety && !companyScope) return
     const loader = tabLoaders[tab]
     if (!loader) return
     if (loadedTabsRef.current.has(tab)) return
@@ -1198,6 +1208,9 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
         return { ...e, amount: e.paymentAmount, balance: running }
       })
       setVendorLedgerEntries(withBalance.reverse())
+      // Trigger the drawer's server-paged refetch too, so any newly-added or
+      // edited row shows up in the paginated view without a manual reload.
+      setVendorLedgerRefresh((n) => n + 1)
     } catch (error) {
       toast({
         title: 'Error',
@@ -1433,17 +1446,59 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
         // Both Payment and Withdrawal live in the ExpensePayment collection;
         // the backend reads the row's `type` and reverses the right way.
         await apiCall(`/expense-payments/${entry.sourceId}`, 'DELETE')
+      } else if (entry.type === 'ADVANCE') {
+        await apiCall(`/vendor-advances/${entry.sourceId}`, 'DELETE')
+      } else if (entry.type === 'ADVANCE_WORK') {
+        // Work rows carry advanceId on the raw payload so we can hit the
+        // nested route without needing a separate lookup.
+        const advId = entry.advanceId || entry.raw?.advanceId
+        if (!advId) return
+        await apiCall(`/vendor-advances/${advId}/work/${entry.sourceId}`, 'DELETE')
       } else {
         return
       }
       const label = entry.type === 'WORK'
         ? 'Work entry'
-        : entry.type === 'WITHDRAWAL' ? 'Withdrawal' : 'Payment'
+        : entry.type === 'WITHDRAWAL' ? 'Withdrawal'
+        : entry.type === 'ADVANCE' ? 'Advance'
+        : entry.type === 'ADVANCE_WORK' ? 'Work against advance'
+        : 'Payment'
       toast({ title: 'Deleted', description: `${label} deleted` })
       await openVendorLedger(vendorLedgerItem)
       await loadSocietyData()
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
+    }
+  }
+
+  // Create a new advance payment against a vendor. Posts a daybook OUT the
+  // moment it's saved so account balances reflect the money that just left.
+  const handleGiveVendorAdvance = async (vendor, body) => {
+    if (!vendor?.id) return
+    try {
+      await apiCall(`/vendors/${vendor.id}/advances`, 'POST', body)
+      toast({ title: 'Advance recorded', description: `₹${body.amount} advance given` })
+      await openVendorLedger(vendor)
+      await loadSocietyData()
+      return { success: true }
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+      return { success: false, error: error.message }
+    }
+  }
+
+  // Log work performed against an existing advance. No money moves — this
+  // just consumes the advance balance in the vendor ledger.
+  const handleAddAdvanceWork = async (advanceId, body) => {
+    if (!advanceId) return
+    try {
+      await apiCall(`/vendor-advances/${advanceId}/work`, 'POST', body)
+      toast({ title: 'Work added', description: `₹${body.amount} logged against advance` })
+      if (vendorLedgerItem) await openVendorLedger(vendorLedgerItem)
+      return { success: true }
+    } catch (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' })
+      return { success: false, error: error.message }
     }
   }
 
@@ -6043,13 +6098,19 @@ export const App = ({ initialTab = 'partners', singleTabMode = false, vendorLedg
         isOpen={isVendorLedgerOpen}
         onClose={() => setIsVendorLedgerOpen(false)}
         vendor={vendorLedgerItem}
-        entries={vendorLedgerEntries}
+        companyScope={companyScope}
+        societyId={selectedSociety}
+        refreshToken={vendorLedgerRefresh}
+        apiCall={apiCall}
+        accounts={accounts}
         onExportCSV={exportVendorLedgerToCSV}
         onExportPDF={exportVendorLedgerToPDF}
         onAddWork={(v) => handleVendorDetailAddWork(v)}
         onAddPayment={(v) => handleVendorDetailAddPayment(v)}
         onAddLabour={(v) => handleVendorDetailAddWork(v, { preselectLabour: true })}
         onQuickPay={(v) => handleVendorDetailAddWork(v, { preselectQuickPay: true })}
+        onGiveAdvance={handleGiveVendorAdvance}
+        onAddAdvanceWork={handleAddAdvanceWork}
         onDeleteEntry={handleVendorLedgerDelete}
         onEditEntry={handleVendorLedgerEdit}
       />
@@ -7728,52 +7789,110 @@ const GlobalLedgerDrawer = ({ isOpen, onClose, scope, entries, loading, onExport
   )
 }
 
-const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onExportPDF, onAddWork, onAddPayment, onAddLabour, onQuickPay, onDeleteEntry, onEditEntry }) => {
+const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries = [], companyScope = false, societyId, refreshToken = 0, apiCall, accounts = [], onExportCSV, onExportPDF, onAddWork, onAddPayment, onAddLabour, onQuickPay, onGiveAdvance, onAddAdvanceWork, onDeleteEntry, onEditEntry }) => {
   const [filterType, setFilterType] = useState('all')
   const [filterFrom, setFilterFrom] = useState('')
   const [filterTo, setFilterTo] = useState('')
   const [search, setSearch] = useState('')
+  const [pageSize, setPageSize] = useState(10)
+  const [page, setPage] = useState(1)
 
-  // Aggregates derived from the merged work + payment timeline.
+  // Advance-payment dialog + "add work to advance" dialog. Both are local
+  // to the drawer so we can prefill them from the vendor / advance row the
+  // user clicked without threading state up to App.
+  const [isAdvanceOpen, setIsAdvanceOpen] = useState(false)
+  const [advanceForm, setAdvanceForm] = useState({
+    amount: '', accountId: '', advanceDate: new Date().toISOString().split('T')[0],
+    paymentMode: 'Cash', referenceNo: '', remark: '',
+  })
+  const [advanceWorkFor, setAdvanceWorkFor] = useState(null)
+  const [advanceWorkForm, setAdvanceWorkForm] = useState({
+    amount: '', workDate: new Date().toISOString().split('T')[0], category: '', description: '',
+  })
+
+  // Server-paged data for the table. Headline aggregate cards still derive
+  // from the full `entries` prop (App fetches those once for exports); the
+  // table itself pages against /vendors/:id/ledger-entries so we don't ship
+  // hundreds of rows to the client just to hide most of them.
+  const [pageEntries, setPageEntries] = useState([])
+  const [totalEntries, setTotalEntries] = useState(0)
+  const [totalPages, setTotalPages] = useState(1)
+  const [loading, setLoading] = useState(false)
+
+  // Debounce the search box — one request per pause, not one per keystroke.
+  const [searchDebounced, setSearchDebounced] = useState('')
+  useEffect(() => {
+    const t = setTimeout(() => setSearchDebounced(search.trim()), 250)
+    return () => clearTimeout(t)
+  }, [search])
+
+  // Reset to page 1 whenever the filter set changes so the user can't be
+  // stranded on a page that no longer exists after the filter shrinks the
+  // dataset.
+  useEffect(() => { setPage(1) }, [filterType, filterFrom, filterTo, searchDebounced, pageSize])
+
+  // Fetch the current page from the backend on any input that changes what's
+  // visible: vendor, scope, filters, pagination, and the mutation-refresh
+  // token that App bumps after add/edit/delete.
+  useEffect(() => {
+    if (!isOpen || !vendor?.id || !apiCall) return
+    let cancelled = false
+    setLoading(true)
+    const params = new URLSearchParams({
+      page: String(page),
+      pageSize: String(pageSize),
+      filterType,
+      filterFrom,
+      filterTo,
+      search: searchDebounced,
+    })
+    if (companyScope) params.set('scope', 'COMPANY')
+    else if (societyId) params.set('societyId', societyId)
+    apiCall(`/vendors/${vendor.id}/ledger-entries?${params.toString()}`)
+      .then((res) => {
+        if (cancelled) return
+        setPageEntries(res?.entries || [])
+        setTotalEntries(res?.total || 0)
+        setTotalPages(Math.max(1, res?.totalPages || 1))
+      })
+      .catch(() => {
+        if (cancelled) return
+        setPageEntries([])
+        setTotalEntries(0)
+        setTotalPages(1)
+      })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [isOpen, vendor?.id, companyScope, societyId, page, pageSize, filterType, filterFrom, filterTo, searchDebounced, refreshToken, apiCall])
+
+  // Aggregates derived from the full merged work + payment timeline (still
+  // fetched by App on open — exports need everything, and headline cards
+  // should reflect the vendor as a whole, not the current page). Advances
+  // count as payments (money already went out) and advance-work counts as
+  // work value (labour/material we recognised against that money) so the
+  // "advance vs owed" headline stays honest across both flows.
   const workEntries = entries.filter(e => e.type === 'WORK')
   const paymentEntries = entries.filter(e => e.type === 'PAYMENT')
   const withdrawalEntries = entries.filter(e => e.type === 'WITHDRAWAL')
+  const advanceEntries = entries.filter(e => e.type === 'ADVANCE')
+  const advanceWorkEntries = entries.filter(e => e.type === 'ADVANCE_WORK')
   const totalWork = workEntries.reduce((s, e) => s + (e.workValue || 0), 0)
+    + advanceWorkEntries.reduce((s, e) => s + (e.workValue || 0), 0)
   const totalWithdrawn = withdrawalEntries.reduce((s, e) => s + Math.abs(e.paymentAmount || 0), 0)
-  // Net paid = payments - withdrawals (payment entries already use positive
-  // amounts; withdrawal entries store paymentAmount as negative, so summing
-  // both alongside works out, but we keep them split for the headline cards).
-  const totalPaid = paymentEntries.reduce((s, e) => s + (e.paymentAmount || 0), 0) - totalWithdrawn
+  const totalPaid = paymentEntries.reduce((s, e) => s + (e.paymentAmount || 0), 0)
+    + advanceEntries.reduce((s, e) => s + (e.paymentAmount || 0), 0)
+    - totalWithdrawn
   const labourValue = workEntries
     .filter(e => /labour/i.test(e.categoryName || ''))
     .reduce((s, e) => s + (e.workValue || 0), 0)
-  // Latest payment / activity — entries are reverse-chronological so we
-  // can take the first match.
-  const lastPaymentEntry = paymentEntries[0] // already newest-first
+  const lastPaymentEntry = paymentEntries[0]
   const lastActivity = entries[0]
-  const owesUs = totalPaid - totalWork // positive = vendor owes us (advance)
-  const weOwe = totalWork - totalPaid  // positive = pending payment to vendor
+  const owesUs = totalPaid - totalWork
+  const weOwe = totalWork - totalPaid
 
-  const filteredEntries = entries.filter(e => {
-    if (filterType !== 'all') {
-      if (filterType === 'LABOUR') {
-        if (e.subType !== 'LABOUR') return false
-      } else if (filterType === 'WORK') {
-        // Plain Work excludes Labour to avoid double-listing.
-        if (e.type !== 'WORK' || e.subType === 'LABOUR') return false
-      } else if (e.type !== filterType) {
-        return false
-      }
-    }
-    if (filterFrom && new Date(e.date) < new Date(filterFrom)) return false
-    if (filterTo && new Date(e.date) > new Date(filterTo)) return false
-    if (search) {
-      const q = search.toLowerCase()
-      const hay = `${e.description || ''} ${e.categoryName || ''} ${e.reference || ''} ${e.paymentMode || ''}`.toLowerCase()
-      if (!hay.includes(q)) return false
-    }
-    return true
-  })
+  const startIdx = (page - 1) * pageSize
+  const pagedEntries = pageEntries
+  const filteredEntries = { length: totalEntries }
 
   return (
     <Drawer open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
@@ -7874,8 +7993,9 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
 
           {/* Action buttons — Quick Pay creates a work entry and records full
               payment in one submit, so the user doesn't need a follow-up step
-              when the bill is paid on the spot. */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              when the bill is paid on the spot. Give Advance is the reverse:
+              pay first, log work against it later. */}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <Button className="bg-blue-600 hover:bg-blue-700 text-white h-14 text-base" onClick={() => onAddWork && onAddWork(vendor)}>
               <Plus className="w-5 h-5 mr-2" /> Add Work
             </Button>
@@ -7887,6 +8007,20 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
             </Button>
             <Button className="bg-emerald-600 hover:bg-emerald-700 text-white h-14 text-base" onClick={() => onQuickPay && onQuickPay(vendor)}>
               <Zap className="w-5 h-5 mr-2" /> Quick Pay
+            </Button>
+            <Button
+              className="bg-amber-600 hover:bg-amber-700 text-white h-14 text-base"
+              onClick={() => {
+                setAdvanceForm({
+                  amount: '',
+                  accountId: accounts.find(a => a.isDefault)?.id || accounts[0]?.id || '',
+                  advanceDate: new Date().toISOString().split('T')[0],
+                  paymentMode: 'Cash', referenceNo: '', remark: '',
+                })
+                setIsAdvanceOpen(true)
+              }}
+            >
+              <Plus className="w-5 h-5 mr-2" /> Give Advance
             </Button>
           </div>
 
@@ -7964,6 +8098,7 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
                     <SelectItem value="LABOUR">Labour</SelectItem>
                     <SelectItem value="PAYMENT">Payment</SelectItem>
                     <SelectItem value="WITHDRAWAL">Withdrawal</SelectItem>
+                    <SelectItem value="ADVANCE">Advance</SelectItem>
                   </SelectContent>
                 </Select>
                 <div>
@@ -7980,7 +8115,11 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
           {/* Timeline table */}
           <Card>
             <CardContent className="p-0">
-              {filteredEntries.length === 0 ? (
+              {loading ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                </div>
+              ) : filteredEntries.length === 0 ? (
                 <p className="text-center text-gray-500 py-8">No activity to show</p>
               ) : (
                 <Table>
@@ -7996,12 +8135,24 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredEntries.map(entry => (
-                      <TableRow key={entry.id} className={entry.type === 'WITHDRAWAL' ? 'bg-orange-50/40' : ''}>
+                    {pagedEntries.map(entry => (
+                      <TableRow
+                        key={entry.id}
+                        className={
+                          entry.type === 'WITHDRAWAL' ? 'bg-orange-50/40'
+                          : entry.type === 'ADVANCE' ? 'bg-amber-50/50'
+                          : entry.type === 'ADVANCE_WORK' ? 'bg-amber-50/30'
+                          : ''
+                        }
+                      >
                         <TableCell className="whitespace-nowrap">{new Date(entry.date).toLocaleDateString()}</TableCell>
                         <TableCell>
                           {entry.type === 'WITHDRAWAL' ? (
                             <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100">Withdrawal</Badge>
+                          ) : entry.type === 'ADVANCE' ? (
+                            <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100">Advance</Badge>
+                          ) : entry.type === 'ADVANCE_WORK' ? (
+                            <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">Adv Work</Badge>
                           ) : entry.subType === 'LABOUR' ? (
                             <Badge className="bg-purple-100 text-purple-700 hover:bg-purple-100">Labour</Badge>
                           ) : entry.type === 'WORK' ? (
@@ -8017,6 +8168,20 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
                           )}
                           {(entry.type === 'PAYMENT' || entry.type === 'WITHDRAWAL') && entry.paymentMode && (
                             <div className="text-xs text-slate-500">via {entry.paymentMode}</div>
+                          )}
+                          {entry.type === 'ADVANCE' && (() => {
+                            const total = entry.paymentAmount || 0
+                            const used = entry.raw?.workedAmount || 0
+                            const remaining = Math.max(0, total - used)
+                            return (
+                              <div className="text-xs text-amber-700">
+                                {entry.paymentMode ? `via ${entry.paymentMode} · ` : ''}
+                                Used ₹{fmt(used)} of ₹{fmt(total)} · Remaining ₹{fmt(remaining)}
+                              </div>
+                            )
+                          })()}
+                          {entry.type === 'ADVANCE_WORK' && entry.categoryName && (
+                            <div className="text-xs text-slate-500">{entry.categoryName}</div>
                           )}
                         </TableCell>
                         <TableCell className="text-right">
@@ -8046,6 +8211,24 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-1">
+                            {entry.type === 'ADVANCE' && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-amber-700 hover:text-amber-900 hover:bg-amber-50"
+                                title="Add work against this advance"
+                                onClick={() => {
+                                  setAdvanceWorkFor(entry)
+                                  setAdvanceWorkForm({
+                                    amount: '',
+                                    workDate: new Date().toISOString().split('T')[0],
+                                    category: '', description: '',
+                                  })
+                                }}
+                              >
+                                <Plus className="w-4 h-4" />
+                              </Button>
+                            )}
                             <Button
                               variant="ghost"
                               size="sm"
@@ -8064,11 +8247,20 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
                               <AlertDialogContent>
                                 <AlertDialogHeader>
                                   <AlertDialogTitle>
-                                    Delete {entry.type === 'WORK' ? 'Work Entry' : 'Payment'}?
+                                    Delete {
+                                      entry.type === 'WORK' ? 'Work Entry'
+                                      : entry.type === 'ADVANCE' ? 'Advance'
+                                      : entry.type === 'ADVANCE_WORK' ? 'Work Against Advance'
+                                      : 'Payment'
+                                    }?
                                   </AlertDialogTitle>
                                   <AlertDialogDescription>
                                     {entry.type === 'WORK'
                                       ? 'This will delete the work entry and all associated payments. This action cannot be undone.'
+                                      : entry.type === 'ADVANCE'
+                                      ? 'This will reverse the advance payment (money returns to the account) and delete every work entry recorded against it. This cannot be undone.'
+                                      : entry.type === 'ADVANCE_WORK'
+                                      ? 'This will remove the work entry and free that amount back onto the advance.'
                                       : 'This will delete this payment. The vendor balance will be recalculated.'}
                                   </AlertDialogDescription>
                                 </AlertDialogHeader>
@@ -8087,6 +8279,41 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
                   </TableBody>
                 </Table>
               )}
+              {filteredEntries.length > 0 && (
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-3 mt-3 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="text-gray-600">Rows per page:</span>
+                    <Select value={String(pageSize)} onValueChange={(v) => setPageSize(Number(v))}>
+                      <SelectTrigger className="h-8 w-20">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {[5, 10, 15, 20, 50].map(n => (
+                          <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="text-gray-600">
+                    Showing {startIdx + 1}–{Math.min(startIdx + pageSize, filteredEntries.length)} of {filteredEntries.length}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={page <= 1}
+                      onClick={() => setPage(p => Math.max(1, p - 1))}
+                    >Prev</Button>
+                    <span className="text-gray-600">Page {page} / {totalPages}</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={page >= totalPages}
+                      onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                    >Next</Button>
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>
@@ -8094,6 +8321,189 @@ const VendorLedgerDrawer = ({ isOpen, onClose, vendor, entries, onExportCSV, onE
         <DrawerFooter>
           <Button variant="outline" onClick={onClose}>Close</Button>
         </DrawerFooter>
+
+        {/* Advance payment dialog */}
+        <Dialog open={isAdvanceOpen} onOpenChange={setIsAdvanceOpen}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Give Advance to {vendor?.name}</DialogTitle>
+              <DialogDescription>
+                Money leaves the account now. Log work against it later — the running balance settles automatically.
+              </DialogDescription>
+            </DialogHeader>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault()
+                const amount = parseFloat(advanceForm.amount)
+                if (!(amount > 0)) return
+                if (!advanceForm.accountId) return
+                const res = await (onGiveAdvance && onGiveAdvance(vendor, {
+                  amount,
+                  accountId: advanceForm.accountId,
+                  advanceDate: advanceForm.advanceDate,
+                  paymentMode: advanceForm.paymentMode,
+                  referenceNo: advanceForm.referenceNo,
+                  remark: advanceForm.remark,
+                }))
+                if (res?.success) setIsAdvanceOpen(false)
+              }}
+              className="space-y-3"
+            >
+              <div>
+                <Label>Amount *</Label>
+                <Input
+                  type="number" step="0.01" min="0" required
+                  value={advanceForm.amount}
+                  onChange={(e) => setAdvanceForm({ ...advanceForm, amount: e.target.value })}
+                />
+              </div>
+              <div>
+                <Label>Account *</Label>
+                <Select
+                  value={advanceForm.accountId}
+                  onValueChange={(v) => setAdvanceForm({ ...advanceForm, accountId: v })}
+                >
+                  <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
+                  <SelectContent>
+                    {accounts.map(a => (
+                      <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <Label>Date</Label>
+                  <Input
+                    type="date"
+                    value={advanceForm.advanceDate}
+                    onChange={(e) => setAdvanceForm({ ...advanceForm, advanceDate: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <Label>Mode</Label>
+                  <Select
+                    value={advanceForm.paymentMode}
+                    onValueChange={(v) => setAdvanceForm({ ...advanceForm, paymentMode: v })}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Cash">Cash</SelectItem>
+                      <SelectItem value="Bank">Bank</SelectItem>
+                      <SelectItem value="UPI">UPI</SelectItem>
+                      <SelectItem value="Cheque">Cheque</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div>
+                <Label>Reference (optional)</Label>
+                <Input
+                  value={advanceForm.referenceNo}
+                  onChange={(e) => setAdvanceForm({ ...advanceForm, referenceNo: e.target.value })}
+                />
+              </div>
+              <div>
+                <Label>Note (optional)</Label>
+                <Input
+                  value={advanceForm.remark}
+                  onChange={(e) => setAdvanceForm({ ...advanceForm, remark: e.target.value })}
+                />
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setIsAdvanceOpen(false)}>Cancel</Button>
+                <Button type="submit" className="bg-amber-600 hover:bg-amber-700">Give Advance</Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+
+        {/* Add work against advance dialog */}
+        <Dialog open={!!advanceWorkFor} onOpenChange={(open) => { if (!open) setAdvanceWorkFor(null) }}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Add Work Against Advance</DialogTitle>
+              <DialogDescription>
+                {advanceWorkFor && (() => {
+                  const total = advanceWorkFor.paymentAmount || 0
+                  const used = advanceWorkFor.raw?.workedAmount || 0
+                  const remaining = Math.max(0, total - used)
+                  return `Advance ₹${fmt(total)} · Remaining ₹${fmt(remaining)}`
+                })()}
+              </DialogDescription>
+            </DialogHeader>
+            {(() => {
+              const total = advanceWorkFor?.paymentAmount || 0
+              const used = advanceWorkFor?.raw?.workedAmount || 0
+              const remaining = Math.max(0, total - used)
+              const typedAmount = parseFloat(advanceWorkForm.amount) || 0
+              const overflows = typedAmount > remaining
+              return (
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault()
+                    if (!advanceWorkFor) return
+                    if (!(typedAmount > 0) || overflows) return
+                    const res = await (onAddAdvanceWork && onAddAdvanceWork(advanceWorkFor.sourceId, {
+                      amount: typedAmount,
+                      workDate: advanceWorkForm.workDate,
+                      category: advanceWorkForm.category,
+                      description: advanceWorkForm.description,
+                    }))
+                    if (res?.success) setAdvanceWorkFor(null)
+                  }}
+                  className="space-y-3"
+                >
+                  <div>
+                    <Label>Amount * <span className="text-xs text-slate-500 font-normal">(max ₹{fmt(remaining)})</span></Label>
+                    <Input
+                      type="number" step="0.01" min="0" max={remaining} required
+                      value={advanceWorkForm.amount}
+                      onChange={(e) => setAdvanceWorkForm({ ...advanceWorkForm, amount: e.target.value })}
+                      className={overflows ? 'border-red-500 focus-visible:ring-red-500' : ''}
+                    />
+                    {overflows && (
+                      <p className="text-xs text-red-600 mt-1">
+                        Work can't exceed remaining advance (₹{fmt(remaining)})
+                      </p>
+                    )}
+                  </div>
+              <div>
+                <Label>Work Date</Label>
+                <Input
+                  type="date"
+                  value={advanceWorkForm.workDate}
+                  onChange={(e) => setAdvanceWorkForm({ ...advanceWorkForm, workDate: e.target.value })}
+                />
+              </div>
+              <div>
+                <Label>Category (optional)</Label>
+                <Input
+                  placeholder="e.g. Painting, Tiles, Labour"
+                  value={advanceWorkForm.category}
+                  onChange={(e) => setAdvanceWorkForm({ ...advanceWorkForm, category: e.target.value })}
+                />
+              </div>
+              <div>
+                <Label>Description (optional)</Label>
+                <Input
+                  value={advanceWorkForm.description}
+                  onChange={(e) => setAdvanceWorkForm({ ...advanceWorkForm, description: e.target.value })}
+                />
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setAdvanceWorkFor(null)}>Cancel</Button>
+                <Button
+                  type="submit"
+                  className="bg-amber-600 hover:bg-amber-700"
+                  disabled={overflows || !(typedAmount > 0)}
+                >Add Work</Button>
+              </DialogFooter>
+            </form>
+              )
+            })()}
+          </DialogContent>
+        </Dialog>
       </DrawerContent>
     </Drawer>
   )
@@ -11505,8 +11915,8 @@ const ResaleDealForm = ({ inventory, sales = [], customers = [], resaleDeals = [
       
       <p className="text-sm text-gray-500 bg-blue-50 p-3 rounded">
         📋 {isEdit
-          ? 'Updating recomputes buyer amount, seller payout, and net profit from the new price / charges. Existing payments are preserved.'
-          : "After creating, you'll record: (1) Buyer payments → Money IN to society, (2) Seller payouts → Principal + Profit to seller."}
+          ? 'Updating recomputes buyer amount, seller payout, net profit + the linked Margin bill from the new price / charges. Existing payments are preserved.'
+          : "After creating: (1) Buyer payments → Money IN to society, (2) Seller payouts → Principal + Profit to seller, (3) Transfer + Brokerage + Margin auto-post as an unpaid bill in the Margin Ledger — pay it from there."}
       </p>
       
       <div className="flex justify-end space-x-2">
