@@ -38,6 +38,18 @@ schema.index({ societyId: 1, direction: 1, txnDate: -1 });
 // instead of scanning the whole transactions collection.
 schema.index({ direction: 1, txnDate: -1 });
 schema.index({ direction: 1, createdAt: -1 });
+// Daybook default sort is {createdAt:-1, txnDate:-1} — these two feed the
+// COMPANY-scope tab (no societyId filter) and the SOCIETY-scope tab
+// respectively when no other filter narrows the scan.
+schema.index({ createdAt: -1 });
+schema.index({ societyId: 1, createdAt: -1 });
+// Short-form vendor ledger endpoint (vendors.service.js `ledger`) filters
+// on partyType + partyName + direction. Without this it was doing a full
+// collection scan every time the vendor drawer opened.
+schema.index({ partyType: 1, partyName: 1, direction: 1 });
+// Account-balance aggregation groups by accountId + direction; the pair
+// makes the group scan an index instead of the whole table.
+schema.index({ accountId: 1, direction: 1 });
 // `isVoided` / `isReversed` are filtered on every summary/balance call;
 // the partial index keeps it small (most rows are neither).
 schema.index(

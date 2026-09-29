@@ -19,6 +19,8 @@ const schema = buildSchema({
 
 schema.index({ societyId: 1, isDeleted: 1 });
 schema.index({ inventoryId: 1 });
-schema.index({ originalSaleId: 1 });
+// TRANSFERRED-sale mirror sync (sales.service.js) filters on originalSaleId
+// + isDeleted; the compound covers both.
+schema.index({ originalSaleId: 1, isDeleted: 1 });
 
 module.exports = mongoose.model('ResaleDeal', schema, 'resale_deals');

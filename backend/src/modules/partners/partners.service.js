@@ -12,15 +12,28 @@ const stripId = ({ _id, ...rest }) => rest;
 
 const listForSociety = async (societyId) => {
   const partners = await Partner.find(notDeleted({ societyId })).lean();
+  const partnerIds = partners.map((p) => p.id);
 
-  const partnersWithTotals = await Promise.all(partners.map(async (partner) => {
-    const ledgerEntries = await PartnerLedgerEntry.find(notDeleted({ partnerId: partner.id })).lean();
+  // Pull every partner's ledger entries in ONE query and bucket in JS —
+  // the previous per-partner .find() inside Promise.all fanned out to N
+  // round-trips against Mongo Atlas which was the dominant latency.
+  const entries = partnerIds.length
+    ? await PartnerLedgerEntry.find(notDeleted({ partnerId: { $in: partnerIds } })).lean()
+    : [];
+  const byPartner = new Map();
+  for (const e of entries) {
+    const arr = byPartner.get(e.partnerId) || [];
+    arr.push(e);
+    byPartner.set(e.partnerId, arr);
+  }
+  const partnersWithTotals = partners.map((partner) => {
+    const ledgerEntries = byPartner.get(partner.id) || [];
     const totalInvestment = ledgerEntries.filter(e => e.type === 'INVESTMENT').reduce((sum, e) => sum + e.amount, 0);
     const totalWithdrawal = ledgerEntries.filter(e => e.type === 'WITHDRAWAL').reduce((sum, e) => sum + e.amount, 0);
     const totalProfitPaid = ledgerEntries.filter(e => e.type === 'PROFIT_PAYOUT').reduce((sum, e) => sum + e.amount, 0);
     const runningBalance = totalInvestment - totalWithdrawal - totalProfitPaid;
     return { ...partner, totalInvestment, totalWithdrawal, totalProfitPaid, runningBalance };
-  }));
+  });
 
   const summary = {
     totalPartnerInvestment: partnersWithTotals.reduce((sum, p) => sum + p.totalInvestment, 0),

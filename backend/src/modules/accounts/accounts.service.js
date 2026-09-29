@@ -38,21 +38,47 @@ const list = async (query) => {
   const accounts = await Account.find(filter).lean();
   if (accounts.length === 0) return [];
 
-  // Compute balances in a single batch instead of N separate scans of the
-  // transactions collection. Load every transaction for the relevant
-  // accounts once, run aliveTransactions ONCE, then group by accountId.
+  // Compute balances via an aggregation that GROUPS on the server instead
+  // of shipping every transaction row to Node. We group by (accountId,
+  // sourceType, sourceId, direction) so aliveTransactions only sees one
+  // synthetic doc per parent (usually a few thousand) rather than every
+  // txn row (potentially hundreds of thousands). That's the difference
+  // between the accounts page loading in seconds vs. minutes.
   const accountIds = accounts.map(a => a.id);
-  const rawTxns = await Transaction.find({
-    accountId: { $in: accountIds },
-    isVoided: { $ne: true },
-    isReversed: { $ne: true },
-    isReversal: { $ne: true },
-  }).lean();
+  const groups = await Transaction.aggregate([
+    {
+      $match: {
+        accountId: { $in: accountIds },
+        isVoided: { $ne: true },
+        isReversed: { $ne: true },
+        isReversal: { $ne: true },
+      },
+    },
+    {
+      $group: {
+        _id: {
+          accountId: '$accountId',
+          sourceType: '$sourceType',
+          sourceId: '$sourceId',
+          direction: '$direction',
+        },
+        amount: { $sum: '$amount' },
+      },
+    },
+  ]);
+
   const { filterAliveTransactions } = require('../../utils/aliveTransactions');
-  const aliveTxns = await filterAliveTransactions(rawTxns);
-  const balanceByAccount = aliveTxns.reduce((acc, t) => {
-    const amt = Number(t.amount) || 0;
-    acc[t.accountId] = (acc[t.accountId] || 0) + (t.direction === 'IN' ? amt : -amt);
+  // filterAliveTransactions only looks at sourceType + sourceId, so passing
+  // one synthetic doc per group is enough to reuse the parent-chain walker
+  // without changing its signature.
+  const aliveGroups = await filterAliveTransactions(
+    groups.map((g) => ({ sourceType: g._id.sourceType, sourceId: g._id.sourceId, _group: g })),
+  );
+  const balanceByAccount = aliveGroups.reduce((acc, g) => {
+    const grp = g._group;
+    const amt = Number(grp.amount) || 0;
+    acc[grp._id.accountId] = (acc[grp._id.accountId] || 0)
+      + (grp._id.direction === 'IN' ? amt : -amt);
     return acc;
   }, {});
 

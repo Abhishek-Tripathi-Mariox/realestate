@@ -27,7 +27,9 @@ const schema = buildSchema({
 
 schema.index({ societyId: 1, isDeleted: 1 });
 schema.index({ inventoryId: 1 });
-schema.index({ customerId: 1 });
+// Customer detail page + payment allocation both filter on (customerId,
+// isDeleted). The bare customerId index couldn't cover the compound.
+schema.index({ customerId: 1, isDeleted: 1 });
 schema.index({ status: 1 });
 
 module.exports = mongoose.model('Sale', schema, 'sales');

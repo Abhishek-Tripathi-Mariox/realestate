@@ -5,24 +5,45 @@ const getAccountBalance = async (accountId) => {
   const account = await Account.findOne({ id: accountId }).lean();
   if (!account) return { balance: 0, account: null };
 
-  const rawTxns = await Transaction.find({
-    accountId,
-    isVoided: { $ne: true },
-    isReversed: { $ne: true },
-    isReversal: { $ne: true },
-  }).lean();
+  // Aggregate on the server: one synthetic row per (sourceType, sourceId,
+  // direction) instead of one row per raw transaction. That keeps the
+  // aliveTransactions cost proportional to the number of distinct parent
+  // records rather than the total transaction count.
+  const groups = await Transaction.aggregate([
+    {
+      $match: {
+        accountId,
+        isVoided: { $ne: true },
+        isReversed: { $ne: true },
+        isReversal: { $ne: true },
+      },
+    },
+    {
+      $group: {
+        _id: {
+          sourceType: '$sourceType',
+          sourceId: '$sourceId',
+          direction: '$direction',
+        },
+        amount: { $sum: '$amount' },
+      },
+    },
+  ]);
+
   // Lazy-require to avoid a circular import (aliveTransactions ↔ models ↔ utils).
   const { filterAliveTransactions } = require('./aliveTransactions');
-  const transactions = await filterAliveTransactions(rawTxns);
+  const aliveGroups = await filterAliveTransactions(
+    groups.map((g) => ({ sourceType: g._id.sourceType, sourceId: g._id.sourceId, _group: g })),
+  );
 
   // Start from the opening balance the user entered when creating the
   // account — without this, a fresh bank with ₹25L pre-existing cash shows
   // ₹0 until activity flows through.
   const opening = await AccountOpeningBalance.findOne({ accountId }).lean();
   let balance = Number(opening?.openingAmount) || 0;
-  for (const txn of transactions) {
-    const amt = Number(txn.amount) || 0;
-    if (txn.direction === 'IN') balance += amt;
+  for (const g of aliveGroups) {
+    const amt = Number(g._group.amount) || 0;
+    if (g._group._id.direction === 'IN') balance += amt;
     else balance -= amt;
   }
 

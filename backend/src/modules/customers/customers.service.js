@@ -187,12 +187,41 @@ const listSales = async (customerId) => {
   // tracking for that flat and the new buyer will see it in their own list.
   const sales = (await Sale.find(notDeleted({ customerId })).lean())
     .filter(s => s.status !== 'TRANSFERRED' && s.paymentStatus !== 'Transferred');
-  const saleRows = await Promise.all(sales.map(async (s) => {
-    const inventory = s.inventoryId ? await Inventory.findOne({ id: s.inventoryId }).lean() : null;
-    const [allocations, saleEntries] = await Promise.all([
-      PaymentAllocation.find({ saleId: s.id }).lean(),
-      SalePaymentEntry.find(notDeleted({ saleId: s.id })).lean(),
-    ]);
+
+  // Batch all lookups instead of firing 3 queries per sale. Previously a
+  // customer with 10 sales meant 30+ round-trips to Mongo Atlas — the
+  // latency added up to seconds even on modest data.
+  const saleIds = sales.map((s) => s.id);
+  const invIds = sales.map((s) => s.inventoryId).filter(Boolean);
+  const [inventoryDocs, allAllocations, allSaleEntries] = await Promise.all([
+    invIds.length
+      ? Inventory.find({ id: { $in: invIds } }).lean()
+      : Promise.resolve([]),
+    saleIds.length
+      ? PaymentAllocation.find({ saleId: { $in: saleIds } }).lean()
+      : Promise.resolve([]),
+    saleIds.length
+      ? SalePaymentEntry.find(notDeleted({ saleId: { $in: saleIds } })).lean()
+      : Promise.resolve([]),
+  ]);
+  const invById = new Map(inventoryDocs.map((i) => [i.id, i]));
+  const allocBySale = new Map();
+  for (const a of allAllocations) {
+    const arr = allocBySale.get(a.saleId) || [];
+    arr.push(a);
+    allocBySale.set(a.saleId, arr);
+  }
+  const entriesBySale = new Map();
+  for (const e of allSaleEntries) {
+    const arr = entriesBySale.get(e.saleId) || [];
+    arr.push(e);
+    entriesBySale.set(e.saleId, arr);
+  }
+
+  const saleRows = sales.map((s) => {
+    const inventory = invById.get(s.inventoryId) || null;
+    const allocations = allocBySale.get(s.id) || [];
+    const saleEntries = entriesBySale.get(s.id) || [];
     const ledgerNet = saleEntries.reduce((sum, e) => sum + signedSaleDelta(e), 0);
     const allocatedAmount = allocations.reduce((sum, a) => sum + (a.amount || 0), 0)
       + ledgerNet;
@@ -205,7 +234,7 @@ const listSales = async (customerId) => {
       allocatedAmount,
       pendingBalance: (s.finalAmount || 0) - allocatedAmount,
     };
-  }));
+  });
 
   // Resale rows: ResaleDeal has no buyerCustomerId yet, so match on the
   // customer's name (case-insensitive, trimmed). The user expects to see

@@ -20,7 +20,9 @@ const schema = buildSchema({
 });
 
 schema.index({ societyId: 1, isDeleted: 1 });
-schema.index({ vendorId: 1 });
+// Vendor drawer + Company Vendor Ledger both filter on (vendorId, isDeleted)
+// — the bare vendorId index couldn't serve the compound predicate.
+schema.index({ vendorId: 1, isDeleted: 1 });
 schema.index({ scope: 1 });
 
 module.exports = mongoose.model('ExpenseBill', schema, 'expense_bills');
