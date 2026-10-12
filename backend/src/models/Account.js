@@ -9,6 +9,10 @@ const schema = buildSchema({
   scope: String,
   societyId: String,
   isActive: Boolean,
+  // When true the account is kept for historical reference (old txns still
+  // reference it) but no longer offered in Account dropdowns on new entry
+  // forms. Toggle via Edit Account dialog.
+  isHidden: Boolean,
   deletedAt: Date,
   createdAt: Date,
   updatedAt: Date,

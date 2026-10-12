@@ -106,8 +106,15 @@ const removeFirm = async (id) => {
 
 // ====================================================== Dasti Persons ============
 
-const listPersons = async () => {
-  const persons = await DastiPerson.find(notDeleted()).sort({ name: 1 }).lean();
+const listPersons = async (query = {}) => {
+  // Hidden persons stay in the DB (old txns still reference them) but drop
+  // out of the default list so the Dasti Ledger view only shows active
+  // accounts. The /hidden page passes includeHidden=true to list them for
+  // the unhide flow.
+  const includeHidden = query.includeHidden === 'true' || query.includeHidden === true;
+  const filter = notDeleted();
+  if (!includeHidden) filter.isHidden = { $ne: true };
+  const persons = await DastiPerson.find(filter).sort({ name: 1 }).lean();
   if (persons.length === 0) return [];
 
   // Pull every live transaction in one shot, then bucket by person — avoids
@@ -182,6 +189,7 @@ const updatePerson = async (id, body) => {
     update.mobile = mobile;
   }
   if (body.remark !== undefined) update.remark = (body.remark || '').trim();
+  if (body.isHidden !== undefined) update.isHidden = !!body.isHidden;
 
   await DastiPerson.updateOne({ id }, { $set: update });
   return { ...person, ...update };

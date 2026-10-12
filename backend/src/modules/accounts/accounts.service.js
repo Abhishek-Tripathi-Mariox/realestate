@@ -3,15 +3,23 @@ const { getAccountBalance } = require('../../utils/transactions');
 const { pick } = require('../../utils/pick');
 const { Account, AccountOpeningBalance, Transaction } = require('../../models');
 
-// Allow rename / overdraft toggle but NOT scope/societyId/isDefault — those
-// would silently change which account every "no accountId" payment lands in.
-const ACCOUNT_UPDATABLE = ['name', 'type', 'overdraftEnabled'];
+// Allow rename / overdraft / hidden-flag toggle but NOT scope/societyId/
+// isDefault — those would silently change which account every "no
+// accountId" payment lands in.
+const ACCOUNT_UPDATABLE = ['name', 'type', 'overdraftEnabled', 'isHidden'];
 
 const stripId = ({ _id, ...rest }) => rest;
 
 const list = async (query) => {
   const { societyId, scope } = query;
   const filter = { isActive: { $ne: false } };
+
+  // Hidden accounts stay in the DB (old txns still reference them) but are
+  // dropped from the default list so new transaction forms never offer
+  // them. The Daybook's Account Balances card passes includeHidden=true so
+  // the user can still see the balance and toggle hidden back off.
+  const includeHidden = query.includeHidden === 'true' || query.includeHidden === true;
+  if (!includeHidden) filter.isHidden = { $ne: true };
 
   const isGlobalAccount = {
     $or: [

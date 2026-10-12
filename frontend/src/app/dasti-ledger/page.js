@@ -65,6 +65,10 @@ export default function DastiLedgerPage() {
 
   // Data
   const [persons, setPersons] = useState([])
+  // All persons incl. hidden — used in the Transactions table to resolve
+  // the name on rows that reference a hidden person. The visible UI
+  // (cards + dropdowns) uses `activePersons` below.
+  const activePersons = persons.filter((p) => !p.isHidden)
   const [firms, setFirms] = useState([])
   const [accounts, setAccounts] = useState([])
   const [transactions, setTransactions] = useState([])
@@ -84,7 +88,7 @@ export default function DastiLedgerPage() {
   // Modal state
   const [showAddPerson, setShowAddPerson] = useState(false)
   const [editingPerson, setEditingPerson] = useState(null)
-  const [personForm, setPersonForm] = useState({ name: '', mobile: '', remark: '' })
+  const [personForm, setPersonForm] = useState({ name: '', mobile: '', remark: '', isHidden: false })
 
   const [showAddTxn, setShowAddTxn] = useState(false)
   const [txnFormType, setTxnFormType] = useState('IN') // IN | OUT — drives modal styling
@@ -161,7 +165,11 @@ export default function DastiLedgerPage() {
 
   // ------------------------------------------------------------------- Loads
   const loadPersons = async () => {
-    try { setPersons(await apiCall('/dasti/persons')) }
+    // Fetch hidden ones too so the Transactions table can still resolve the
+    // person on old entries (otherwise they render as "— removed —"). The
+    // Dasti Accounts cards and the form dropdowns filter them back out via
+    // `activePersons` below.
+    try { setPersons(await apiCall('/dasti/persons?includeHidden=true')) }
     catch (e) { toast({ variant: 'destructive', title: 'Error', description: e.message }) }
   }
   const loadFirms = async () => {
@@ -201,12 +209,12 @@ export default function DastiLedgerPage() {
   // ------------------------------------------------------------- Person CRUD
   const openAddPerson = () => {
     setEditingPerson(null)
-    setPersonForm({ name: '', mobile: '', remark: '' })
+    setPersonForm({ name: '', mobile: '', remark: '', isHidden: false })
     setShowAddPerson(true)
   }
   const openEditPerson = (p) => {
     setEditingPerson(p)
-    setPersonForm({ name: p.name || '', mobile: p.mobile || '', remark: p.remark || '' })
+    setPersonForm({ name: p.name || '', mobile: p.mobile || '', remark: p.remark || '', isHidden: !!p.isHidden })
     setShowAddPerson(true)
   }
   const handleSavePerson = async () => {
@@ -438,7 +446,7 @@ export default function DastiLedgerPage() {
             <CardContent className="p-4">
               <p className="text-xs uppercase tracking-wide text-purple-700">Activities</p>
               <p className="text-2xl font-bold text-purple-700 mt-1">{summary.txnCount}</p>
-              <p className="text-xs text-slate-500 mt-1">{persons.length} dasti accounts</p>
+              <p className="text-xs text-slate-500 mt-1">{activePersons.length} dasti accounts</p>
             </CardContent>
           </Card>
         </div>
@@ -465,7 +473,11 @@ export default function DastiLedgerPage() {
                   <SelectTrigger className="h-9"><SelectValue placeholder="All Persons" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All Persons</SelectItem>
-                    {persons.map(p => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+                    {persons.map(p => (
+                      <SelectItem key={p.id} value={p.id}>
+                        {p.name}{p.isHidden ? ' (hidden)' : ''}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
                 <Select value={filters.firmId} onValueChange={v => setFilters(f => ({ ...f, firmId: v }))}>
@@ -502,13 +514,13 @@ export default function DastiLedgerPage() {
               <div className="flex items-center gap-2">
                 <Users className="w-4 h-4 text-purple-600" />
                 <h3 className="font-semibold text-slate-900">Dasti Accounts</h3>
-                <Badge variant="secondary">{persons.length}</Badge>
+                <Badge variant="secondary">{activePersons.length}</Badge>
               </div>
               <Button size="sm" onClick={openAddPerson}>
                 <Plus className="w-4 h-4 mr-1" /> Add Person
               </Button>
             </div>
-            {persons.length === 0 ? (
+            {activePersons.length === 0 ? (
               <div className="text-center py-8 text-slate-500">
                 <Users className="w-12 h-12 mx-auto text-slate-300 mb-2" />
                 <p>No dasti accounts yet</p>
@@ -516,7 +528,7 @@ export default function DastiLedgerPage() {
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                {persons.map(p => {
+                {activePersons.map(p => {
                   const balPositive = (p.balance || 0) >= 0  // firm owes person
                   return (
                     <Link key={p.id} href={`/dasti-ledger/${p.id}`} className="block group">
@@ -619,10 +631,17 @@ export default function DastiLedgerPage() {
                         <TableCell>
                           {person ? (
                             <Link href={`/dasti-ledger/${person.id}`} className="flex items-center gap-2 hover:underline">
-                              <div className={`w-6 h-6 rounded-md bg-gradient-to-br ${pickGradient(person.id)} text-white text-xs font-bold flex items-center justify-center`}>
+                              <div className={`w-6 h-6 rounded-md bg-gradient-to-br ${pickGradient(person.id)} text-white text-xs font-bold flex items-center justify-center ${person.isHidden ? 'opacity-60' : ''}`}>
                                 {initials(person.name)}
                               </div>
-                              <span className="font-medium text-slate-800">{person.name}</span>
+                              <span className={`font-medium ${person.isHidden ? 'text-slate-500' : 'text-slate-800'}`}>
+                                {person.name}
+                              </span>
+                              {person.isHidden && (
+                                <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">
+                                  Hidden
+                                </span>
+                              )}
                             </Link>
                           ) : (
                             <span className="text-slate-400 text-sm">— removed —</span>
@@ -685,6 +704,28 @@ export default function DastiLedgerPage() {
               <Label>Remark / Note</Label>
               <Textarea rows={3} placeholder="e.g., Investor partner / friend" value={personForm.remark} onChange={e => setPersonForm({ ...personForm, remark: e.target.value })} />
             </div>
+            {editingPerson && (
+              // Hide toggle — only offered on existing accounts. Hidden
+              // persons stay in the DB (old transactions still reference
+              // them) but drop out of the Dasti Ledger view. Manage them
+              // on the Hidden page in the sidebar.
+              <div className="flex items-start gap-2 rounded-md border p-3 bg-slate-50">
+                <input
+                  id="dasti-person-hidden"
+                  type="checkbox"
+                  className="mt-1"
+                  checked={!!personForm.isHidden}
+                  onChange={e => setPersonForm({ ...personForm, isHidden: e.target.checked })}
+                />
+                <label htmlFor="dasti-person-hidden" className="text-sm cursor-pointer">
+                  <span className="font-medium">Hide this account</span>
+                  <span className="block text-xs text-slate-500 mt-0.5">
+                    Won&apos;t appear on the Dasti Ledger. Old transactions remain intact.
+                    Unhide anytime from the Hidden page in the sidebar.
+                  </span>
+                </label>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowAddPerson(false)}>Cancel</Button>
@@ -727,7 +768,7 @@ export default function DastiLedgerPage() {
               <Select value={txnForm.personId} onValueChange={v => setTxnForm({ ...txnForm, personId: v })}>
                 <SelectTrigger><SelectValue placeholder="Pick person" /></SelectTrigger>
                 <SelectContent>
-                  {persons.map(p => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+                  {activePersons.map(p => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
                 </SelectContent>
               </Select>
               <button type="button" className="text-sm text-orange-600 hover:underline mt-1 inline-flex items-center gap-1" onClick={() => { setShowAddTxn(false); openAddPerson() }}>

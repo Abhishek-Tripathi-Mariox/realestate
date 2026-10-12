@@ -87,7 +87,7 @@ export default function DaybookPage() {
   const [showOpeningBalanceDialog, setShowOpeningBalanceDialog] = useState(false)
   const [selectedAccountForOpening, setSelectedAccountForOpening] = useState(null)
   const [newAccount, setNewAccount] = useState({ name: '', type: 'BANK', openingAmount: 0, overdraftEnabled: false, scope: 'GLOBAL', societyId: '' })
-  const [openingBalance, setOpeningBalance] = useState({ name: '', openingAmount: 0, openingDate: '' })
+  const [openingBalance, setOpeningBalance] = useState({ name: '', isHidden: false, openingAmount: 0, openingDate: '' })
 
   const apiCall = async (endpoint, method = 'GET', body = null) => {
     const token = localStorage.getItem('token')
@@ -202,6 +202,10 @@ export default function DaybookPage() {
         const societyId = filters.societyId && filters.societyId !== 'all' ? filters.societyId : selectedSociety
         if (societyId) params.append('societyId', societyId)
       }
+      // includeHidden=true so hidden accounts still show up in the Balances
+      // card (user needs to see them to unhide) AND in the historical
+      // transaction filter (so old txns remain findable).
+      params.append('includeHidden', 'true')
       const qs = params.toString()
       const data = await apiCall(`/accounts${qs ? `?${qs}` : ''}`)
       setAccounts(data)
@@ -316,8 +320,12 @@ export default function DaybookPage() {
       // AccountOpeningBalance doc. Only fire the rename PUT when the user
       // actually changed it.
       const account = selectedAccountForOpening
-      if (name !== (account.name || '')) {
-        await apiCall(`/accounts/${account.id}`, 'PUT', { name })
+      const nextHidden = !!openingBalance.isHidden
+      const patch = {}
+      if (name !== (account.name || '')) patch.name = name
+      if (nextHidden !== !!account.isHidden) patch.isHidden = nextHidden
+      if (Object.keys(patch).length > 0) {
+        await apiCall(`/accounts/${account.id}`, 'PUT', patch)
       }
       await apiCall(`/accounts/${account.id}/opening-balance`, 'PUT', {
         openingAmount: parseFloat(openingBalance.openingAmount) || 0,
@@ -576,9 +584,12 @@ export default function DaybookPage() {
             </div>
           </CardHeader>
           <CardContent>
-            {/* Account Balances */}
+            {/* Account Balances — hidden accounts are intentionally dropped
+                from this card. They live on /hidden-accounts where the user
+                can see their balance and unhide. The historical txn filter
+                dropdown below still sees them (so old txns stay findable). */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              {accounts.map(account => (
+              {accounts.filter(a => !a.isHidden).map(account => (
                 <Card key={account.id} className={account.type === 'CASH' ? 'bg-green-50' : 'bg-blue-50'}>
                   <CardContent className="pt-4">
                     <div className="flex justify-between items-start">
@@ -593,11 +604,12 @@ export default function DaybookPage() {
                           variant="ghost" 
                           size="sm" 
                           className="h-6 w-6 p-0"
-                          title="Set Opening Balance"
+                          title="Edit Account"
                           onClick={() => {
                             setSelectedAccountForOpening(account)
                             setOpeningBalance({
                               name: account.name || '',
+                              isHidden: !!account.isHidden,
                               openingAmount: account.openingAmount || 0,
                               openingDate: account.openingDate || '',
                             })
@@ -679,6 +691,32 @@ export default function DaybookPage() {
               <div>
                 <Label>Opening Date</Label>
                 <Input type="date" value={openingBalance.openingDate} onChange={e => setOpeningBalance({ ...openingBalance, openingDate: e.target.value })} />
+              </div>
+              {/* Hide toggle — hidden accounts stay for history/reports but
+                  disappear from new-transaction account dropdowns. The
+                  default account can't be hidden (would strand the "no
+                  account" fallback for daybook writers). */}
+              <div className="flex items-start gap-2 rounded-md border p-3 bg-slate-50">
+                <input
+                  id="daybook-account-hidden"
+                  type="checkbox"
+                  className="mt-1"
+                  disabled={!!selectedAccountForOpening?.isDefault}
+                  checked={!!openingBalance.isHidden}
+                  onChange={e => setOpeningBalance({ ...openingBalance, isHidden: e.target.checked })}
+                />
+                <label htmlFor="daybook-account-hidden" className="text-sm cursor-pointer">
+                  <span className="font-medium">Hide this account</span>
+                  <span className="block text-xs text-slate-500 mt-0.5">
+                    Won&apos;t appear in Account dropdowns on new transaction forms.
+                    Old transactions remain intact. Unhide anytime from this dialog.
+                    {selectedAccountForOpening?.isDefault && (
+                      <span className="block text-amber-600 mt-1">
+                        The default account can&apos;t be hidden.
+                      </span>
+                    )}
+                  </span>
+                </label>
               </div>
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="outline" onClick={() => setShowOpeningBalanceDialog(false)}>Cancel</Button>

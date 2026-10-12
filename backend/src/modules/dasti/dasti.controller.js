@@ -14,7 +14,7 @@ const updateFirm = asyncHandler(async (req, res) => sendOrError(res, await servi
 const removeFirm = asyncHandler(async (req, res) => sendOrError(res, await service.removeFirm(req.params.id)));
 
 // Persons
-const listPersons = asyncHandler(async (req, res) => res.json(await service.listPersons()));
+const listPersons = asyncHandler(async (req, res) => res.json(await service.listPersons(req.query)));
 const getPerson = asyncHandler(async (req, res) => sendOrError(res, await service.getPerson(req.params.id)));
 const createPerson = asyncHandler(async (req, res) => sendOrError(res, await service.createPerson(req.body, req.user.userId)));
 const updatePerson = asyncHandler(async (req, res) => sendOrError(res, await service.updatePerson(req.params.id, req.body)));

@@ -13610,6 +13610,24 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
   const [newAccount, setNewAccount] = useState({ name: '', type: 'BANK', openingAmount: 0, overdraftEnabled: false, scope: 'GLOBAL', societyId: '' })
   const [openingBalance, setOpeningBalance] = useState({ openingAmount: 0, openingDate: '' })
 
+  // Separate account list that INCLUDES hidden accounts, used only for the
+  // Account Balances card on this page so the user can still see them and
+  // click Edit → uncheck "Hide". Transaction forms keep using `accounts`
+  // (hidden excluded) so new entries can't target a disabled account.
+  const [balanceAccounts, setBalanceAccounts] = useState([])
+  const loadBalanceAccounts = async () => {
+    try {
+      const societyParam = filters?.societyId && filters.societyId !== 'all'
+        ? `societyId=${filters.societyId}&`
+        : ''
+      const data = await apiCall(`/accounts?${societyParam}includeHidden=true`)
+      setBalanceAccounts(data || [])
+    } catch (err) {
+      console.error('Error loading balance accounts:', err)
+    }
+  }
+  useEffect(() => { loadBalanceAccounts() }, [filters?.societyId, accounts])
+
   const handleCreateAccount = async (e) => {
     e.preventDefault()
     try {
@@ -13629,14 +13647,35 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
   const handleUpdateOpeningBalance = async (e) => {
     e.preventDefault()
     try {
-      await apiCall(`/accounts/${selectedAccountForOpening.id}/opening-balance`, 'PUT', {
-        ...openingBalance,
-        openingAmount: parseFloat(openingBalance.openingAmount) || 0,
-      })
-      await loadAccounts()
+      // The dialog edits both opening balance (dedicated route) and
+      // account-level fields (name, isHidden). Fire them in parallel —
+      // if nothing changed on one side, skip the write so we don't
+      // churn updatedAt on both docs.
+      const nameChanged = openingBalance.name !== undefined
+        && openingBalance.name !== selectedAccountForOpening?.name
+      const hiddenChanged = openingBalance.isHidden !== undefined
+        && !!openingBalance.isHidden !== !!selectedAccountForOpening?.isHidden
+      const openingChanged = parseFloat(openingBalance.openingAmount) !== (selectedAccountForOpening?.openingAmount || 0)
+        || openingBalance.openingDate !== (selectedAccountForOpening?.openingDate || '')
+
+      const calls = []
+      if (openingChanged) {
+        calls.push(apiCall(`/accounts/${selectedAccountForOpening.id}/opening-balance`, 'PUT', {
+          openingAmount: parseFloat(openingBalance.openingAmount) || 0,
+          openingDate: openingBalance.openingDate,
+        }))
+      }
+      if (nameChanged || hiddenChanged) {
+        const patch = {}
+        if (nameChanged) patch.name = openingBalance.name
+        if (hiddenChanged) patch.isHidden = !!openingBalance.isHidden
+        calls.push(apiCall(`/accounts/${selectedAccountForOpening.id}`, 'PUT', patch))
+      }
+      await Promise.all(calls)
+      await Promise.all([loadAccounts(), loadBalanceAccounts()])
       onRefresh()
       setShowOpeningBalanceDialog(false)
-      toast({ title: 'Success', description: 'Opening balance updated' })
+      toast({ title: 'Success', description: 'Account updated' })
     } catch (error) {
       toast({ title: 'Error', description: error.message, variant: 'destructive' })
     }
@@ -13805,10 +13844,14 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
           </div>
         </CardHeader>
         <CardContent>
-          {/* Account Balances */}
+          {/* Account Balances — hidden accounts are dropped from this card;
+              they live on /hidden-accounts for the user to unhide. */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-            {accounts.map(account => (
-              <Card key={account.id} className={account.type === 'CASH' ? 'bg-green-50' : 'bg-blue-50'}>
+            {(balanceAccounts.length ? balanceAccounts : accounts).filter(a => !a.isHidden).map(account => (
+              <Card
+                key={account.id}
+                className={account.type === 'CASH' ? 'bg-green-50' : 'bg-blue-50'}
+              >
                 <CardContent className="pt-4">
                   <div className="flex justify-between items-start">
                     <div>
@@ -13830,10 +13873,15 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
                         variant="ghost" 
                         size="sm" 
                         className="h-6 w-6 p-0"
-                        title="Set Opening Balance"
+                        title="Edit Account"
                         onClick={() => {
                           setSelectedAccountForOpening(account)
-                          setOpeningBalance({ openingAmount: account.openingAmount || 0, openingDate: account.openingDate || '' })
+                          setOpeningBalance({
+                            name: account.name || '',
+                            isHidden: !!account.isHidden,
+                            openingAmount: account.openingAmount || 0,
+                            openingDate: account.openingDate || '',
+                          })
                           setShowOpeningBalanceDialog(true)
                         }}
                       >
@@ -13873,7 +13921,7 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
                       )}
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 mt-2">
+                  <div className="flex items-center gap-2 mt-2 flex-wrap">
                     <Badge variant="outline" className="text-xs">
                       {account.type}
                     </Badge>
@@ -13894,9 +13942,13 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
       <Dialog open={showOpeningBalanceDialog} onOpenChange={setShowOpeningBalanceDialog}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Edit Opening Balance - {selectedAccountForOpening?.name}</DialogTitle>
+            <DialogTitle>Edit Account - {selectedAccountForOpening?.name}</DialogTitle>
           </DialogHeader>
           <form onSubmit={handleUpdateOpeningBalance} className="space-y-4">
+            <div>
+              <Label>Account Name</Label>
+              <Input value={openingBalance.name || ''} onChange={e => setOpeningBalance({...openingBalance, name: e.target.value})} />
+            </div>
             <div>
               <Label>Opening Amount</Label>
               <Input type="number" value={openingBalance.openingAmount} onChange={e => setOpeningBalance({...openingBalance, openingAmount: e.target.value})} />
@@ -13904,6 +13956,32 @@ const DaybookTab = ({ accounts, societies, transactions, summary, filters, setFi
             <div>
               <Label>Opening Date</Label>
               <Input type="date" value={openingBalance.openingDate} onChange={e => setOpeningBalance({...openingBalance, openingDate: e.target.value})} />
+            </div>
+            {/* Hide toggle — hidden accounts stay in reports/history but
+                disappear from new transaction account dropdowns. Default
+                account can't be hidden (that would strand the "no account"
+                fallback). */}
+            <div className="flex items-start gap-2 rounded-md border p-3 bg-slate-50">
+              <input
+                id="account-hidden"
+                type="checkbox"
+                className="mt-1"
+                disabled={!!selectedAccountForOpening?.isDefault}
+                checked={!!openingBalance.isHidden}
+                onChange={e => setOpeningBalance({...openingBalance, isHidden: e.target.checked})}
+              />
+              <label htmlFor="account-hidden" className="text-sm cursor-pointer">
+                <span className="font-medium">Hide this account</span>
+                <span className="block text-xs text-slate-500 mt-0.5">
+                  Won't appear in Account dropdowns on new transaction forms.
+                  Old transactions remain intact. Unhide anytime from this dialog.
+                  {selectedAccountForOpening?.isDefault && (
+                    <span className="block text-amber-600 mt-1">
+                      The default account can't be hidden.
+                    </span>
+                  )}
+                </span>
+              </label>
             </div>
             <div className="flex justify-end gap-2">
               <Button type="button" variant="outline" onClick={() => setShowOpeningBalanceDialog(false)}>Cancel</Button>
